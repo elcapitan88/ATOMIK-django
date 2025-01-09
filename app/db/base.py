@@ -1,0 +1,94 @@
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
+from ..core.config import settings
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Create SQLAlchemy engine
+engine = create_engine(
+    settings.DATABASE_URL,
+    # For SQLite, add check_same_thread=False
+    connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {},
+    # Connection pool settings
+    poolclass=QueuePool,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,  # Recycle connections every 30 minutes
+    echo=settings.SQL_ECHO,  # Log SQL queries
+)
+
+# Create session factory
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
+
+# Import all models here so SQLAlchemy knows about them
+from app.db.base_class import Base  # noqa
+from app.models.user import User  # noqa
+from app.models.webhook import Webhook, WebhookLog  # noqa
+from app.models.strategy import ActivatedStrategy  # noqa
+from app.models.broker import BrokerAccount, BrokerCredentials  # noqa
+
+# Create a dependency for FastAPI endpoints
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Function to test database connection
+def test_db_connection():
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        logger.info("Database connection test successful")
+        return True
+    except Exception as e:
+        logger.error(f"Database connection test failed: {str(e)}")
+        return False
+
+# Database initialization function
+def init_db():
+    """Initialize the database"""
+    try:
+        # Import all models to ensure they're registered
+        import app.models.user
+        import app.models.webhook
+        import app.models.strategy
+        import app.models.broker
+        
+        # Create all tables
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created successfully")
+        
+        # Test the connection
+        test_db_connection()
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {str(e)}")
+        raise
+
+# Export everything needed by other modules
+__all__ = [
+    "Base",
+    "engine",
+    "SessionLocal",
+    "get_db",
+    "init_db",
+    "test_db_connection",
+    "User",
+    "Webhook",
+    "WebhookLog",
+    "ActivatedStrategy",
+    "BrokerAccount",
+    "BrokerCredentials"
+]
