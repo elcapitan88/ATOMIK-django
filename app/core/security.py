@@ -63,3 +63,19 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+# Add this to security.py
+async def validate_ws_token(token: str, db: Session) -> User:
+    """Validate WebSocket token without using OAuth2PasswordBearer"""
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        email: str = payload.get("sub")
+        if email is None:
+            return None
+            
+        user = db.query(User).filter(User.email == email).first()
+        return user
+    except JWTError:
+        return None

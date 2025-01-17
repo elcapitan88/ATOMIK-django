@@ -1,25 +1,31 @@
 # main.py
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Depends
+from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
+from typing import Optional
+from app.db.base import get_db 
+
+# Standard library imports
 import logging
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable, Set
+
+# FastAPI imports
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+# SQLAlchemy imports
 from sqlalchemy.exc import SQLAlchemyError
 
-# Import routers
+# Local imports
 from app.api.v1.api import api_router, tradovate_callback_router
-
-
-
-# Import core components
 from app.core.config import settings
 from app.db.base import init_db
 from app.core.db_health import check_database_health
 from app.core.tasks.token_refresh import start_token_refresh_task, stop_token_refresh_task
 from app.websockets.manager import websocket_manager
-
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +33,30 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Define CSP Middleware
+class CSPMiddleware:
+    def __init__(self, app: FastAPI):
+        self.app = app
+
+    async def __call__(self, request: Request, call_next: Callable):
+        response = await call_next(request)
+        
+        # Make CSP more permissive
+        csp_directives = [
+            # Allow everything during development
+            "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:",
+            "connect-src * ws: wss:",
+            "script-src * 'unsafe-inline' 'unsafe-eval'",
+            "style-src * 'unsafe-inline'",
+            "img-src * data: blob:",
+            "frame-src *",
+            "font-src * data:",
+            "worker-src * blob:"
+        ]
+        
+        response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
+        return response
 
 # Create FastAPI app instance
 app = FastAPI(
@@ -40,20 +70,32 @@ app = FastAPI(
 )
 
 # Track background tasks
-background_tasks: set = set()
+background_tasks: Set[asyncio.Task] = set()
+
+# Add CSP middleware first
+app.middleware("http")(CSPMiddleware(app))
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://trader.tradovate.com",
+        "https://demo.tradovateapi.com",
+        "https://live.tradovateapi.com",
+        "https://*.google.com",
+        "https://*.doubleclick.net"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # Include routers
-app.include_router(api_router, prefix="/api/v1")
-app.include_router(tradovate_callback_router, prefix="/api")
+app.include_router(tradovate_callback_router, prefix="/api")  # This will handle /api/tradovate/callback
+app.include_router(api_router, prefix="/api/v1") 
+
 
 async def initialize_database() -> bool:
     """Initialize database and run migrations"""
@@ -214,6 +256,16 @@ async def shutdown_event():
         raise
     finally:
         logger.info("Shutdown process completed")
+
+@app.get("/api/routes-check")
+async def check_routes():
+    """Health check endpoint for routes"""
+    return {
+        "status": "ok",
+        "callback_route": "/api/tradovate/callback",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
 
 @app.get("/")
 async def root():

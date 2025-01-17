@@ -52,7 +52,7 @@ class TokenConfig:
     BROKER_TOKEN_CONFIGS = {
         'tradovate': {
             'TOKEN_LIFETIME': 4800,  # 80 minutes (actual Tradovate time)
-            'REFRESH_THRESHOLD': 0.0625,  # Refresh at ~26.4 minutes remaining
+            'REFRESH_THRESHOLD': 0.5625,  # Refresh at ~26.4 minutes remaining
             'MAX_RETRY_ATTEMPTS': 3,
             'RETRY_DELAY': 10,  # Seconds between retry attempts
             'SUPPORTS_REFRESH_TOKEN': False  # Explicit flag showing we only use access token
@@ -63,8 +63,8 @@ class TokenConfig:
     def get_broker_config(cls, broker_id: str) -> dict:
         """Get token configuration for specific broker"""
         return cls.BROKER_TOKEN_CONFIGS.get(broker_id, {
-            'TOKEN_LIFETIME': 180,  # Default values if broker not found
-            'REFRESH_THRESHOLD': 0.5625Tell ,
+            'TOKEN_LIFETIME': 4800,  # Default values if broker not found
+            'REFRESH_THRESHOLD': 0.5625,
             'MAX_RETRY_ATTEMPTS': 3,
             'RETRY_DELAY': 10
         })

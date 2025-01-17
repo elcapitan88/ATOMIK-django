@@ -2,12 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 import logging
+import json
+import base64
+import uuid
+
 from enum import Enum
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 
 
 from ....core.security import get_current_user
+from ....core.config import settings
 from ....core.permissions import check_subscription_feature
 from ....db.session import get_db
 from ....models.user import User
@@ -50,79 +55,63 @@ async def get_supported_brokers():
         }
     }
 
-
-@router.post("/{broker_id}/connect")
-@check_subscription_feature(SubscriptionTier.STARTED)
-async def connect_broker(
-    broker_id: str,
-    request: BrokerConnectRequest,
+@router.post("/connect")
+async def initiate_oauth(
+    environment: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Initiate the OAuth flow with Tradovate"""
     try:
-        # Check existing active connections
-        token_service = BrokerTokenService(db)
-        
-        existing_account = db.query(BrokerAccount).filter(
-            BrokerAccount.user_id == current_user.id,
-            BrokerAccount.broker_id == broker_id,
-            BrokerAccount.environment == request.environment,
-            BrokerAccount.is_active == True
-        ).first()
+        state = base64.urlsafe_b64encode(json.dumps({
+            'environment': environment,
+            'user_id': current_user.id,
+            'timestamp': datetime.utcnow().isoformat(),
+            'nonce': str(uuid.uuid4())
+        }).encode()).decode()
 
-        if existing_account and existing_account.credentials:
-            # Try to refresh token if account exists
-            if await token_service.validate_token(existing_account.credentials):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Account already connected with valid token"
-                )
-            # If token is invalid, deactivate old connection
-            existing_account.is_active = False
-            db.commit()
+        # Use the auth URL from settings
+        auth_url = settings.TRADOVATE_AUTH_URL
 
-        # Continue with new connection
-        broker = BaseBroker.get_broker_instance(broker_id, db)
-        result = await broker.initialize_connection(
-            user=current_user,
-            environment=request.environment,
-            credentials=request.credentials.dict()
-        )
+        params = {
+            "client_id": settings.TRADOVATE_CLIENT_ID,
+            "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
+            "response_type": "code",
+            "scope": "trading",
+            "state": state
+        }
 
-        return result
+        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+        full_auth_url = f"{auth_url}?{query_string}"
 
-    except HTTPException:
-        raise
+        return {"auth_url": full_auth_url}
+
     except Exception as e:
-        logger.error(f"Error connecting broker: {str(e)}")
+        logger.error(f"OAuth initiation failed: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to connect broker: {str(e)}"
+            detail=f"OAuth initiation failed: {str(e)}"
         )
 
+
 @router.get("/accounts")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def list_broker_accounts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List all connected broker accounts"""
-    accounts = db.query(BrokerAccount).filter(
-        BrokerAccount.user_id == current_user.id,
-        BrokerAccount.is_active == True
-    ).all()
+    try:
+        accounts = db.query(BrokerAccount).filter(
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True
+        ).all()
 
-    return {
-        "accounts": [{
-            "account_id": account.account_id,
-            "broker_id": account.broker_id,
-            "name": account.name,
-            "environment": account.environment,
-            "status": account.status,
-            "last_connected": account.last_connected,
-            "features": BROKER_CONFIGS[account.broker_id].features.dict()
-        } for account in accounts]
-    }
+        return [account.to_dict() for account in accounts]
+    except Exception as e:
+        logger.error(f"Error fetching accounts: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @router.delete("/accounts/{account_id}")
 async def disconnect_broker_account(

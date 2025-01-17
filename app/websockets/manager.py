@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Set, Optional, Any
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
+from app.db.base import SessionLocal  
 
 from ..models.websocket import (
     WebSocketConnection,
@@ -157,9 +158,8 @@ class ManagerConfig:
 
 class WebSocketManager:
     def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.client_info: Dict[str, Dict] = {}
-        self.subscriptions: Dict[str, Set[str]] = {}
+        self.active_connections: Dict[str, WebSocketConnection] = {}
+        self.connection_locks: Dict[str, asyncio.Lock] = {}
         self.is_initialized: bool = False
 
     async def initialize(self) -> bool:
@@ -187,9 +187,9 @@ class WebSocketManager:
             finally:
                 db.close()
 
+            # Reset connection state
             self.active_connections = {}
-            self.client_info = {}
-            self.subscriptions = {}
+            self.connection_locks = {}
             self.is_initialized = True
             
             logger.info("WebSocket manager initialized successfully")
@@ -200,128 +200,51 @@ class WebSocketManager:
             self.is_initialized = False
             return False
 
-    async def connect(self, websocket: WebSocket, client_id: str, user: User):
-        """Connect a new WebSocket client"""
-        try:
-            await websocket.accept()
-            self.active_connections[client_id] = websocket
-            self.client_info[client_id] = {
-                "user_id": user.id,
-                "connected_at": datetime.utcnow(),
-                "last_heartbeat": datetime.utcnow()
-            }
-            
-            # Create database record
-            db = SessionLocal()
-            try:
-                connection = WebSocketConnection(
-                    user_id=user.id,
-                    client_id=client_id,
-                    connected_at=datetime.utcnow(),
-                    is_active=True
-                )
-                db.add(connection)
-                db.commit()
-            finally:
-                db.close()
-
-            logger.info(f"Client {client_id} connected")
-
-        except Exception as e:
-            logger.error(f"Error connecting client {client_id}: {str(e)}")
-            raise
-
-    async def disconnect(self, client_id: str):
-        """Disconnect a WebSocket client"""
-        try:
-            if client_id in self.active_connections:
-                # Close WebSocket connection
-                await self.active_connections[client_id].close()
-                
-                # Update database record
-                db = SessionLocal()
-                try:
-                    connection = db.query(WebSocketConnection).filter(
-                        WebSocketConnection.client_id == client_id,
-                        WebSocketConnection.is_active == True
-                    ).first()
-                    
-                    if connection:
-                        connection.is_active = False
-                        connection.disconnected_at = datetime.utcnow()
-                        db.commit()
-                finally:
-                    db.close()
-
-                # Clean up local storage
-                self.active_connections.pop(client_id, None)
-                self.client_info.pop(client_id, None)
-                self.subscriptions.pop(client_id, None)
-                
-                logger.info(f"Client {client_id} disconnected")
-
-        except Exception as e:
-            logger.error(f"Error disconnecting client {client_id}: {str(e)}")
-            raise
-
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
-        disconnected_clients = []
+    async def connect(self, websocket: WebSocket, account_id: str, user_id: int) -> bool:
+        if account_id not in self.connection_locks:
+            self.connection_locks[account_id] = asyncio.Lock()
         
-        for client_id, websocket in self.active_connections.items():
+        async with self.connection_locks[account_id]:
             try:
-                await websocket.send_json(message)
+                await websocket.accept()
+                
+                self.active_connections[account_id] = WebSocketConnection(
+                    websocket=websocket,
+                    user_id=user_id,
+                    connected_at=datetime.utcnow(),
+                    last_heartbeat=datetime.utcnow()
+                )
+                
+                logger.info(f"WebSocket connected for account {account_id}")
+                return True
+                
             except Exception as e:
-                logger.error(f"Error broadcasting to client {client_id}: {str(e)}")
-                disconnected_clients.append(client_id)
+                logger.error(f"WebSocket connection failed for account {account_id}: {str(e)}")
+                return False
 
-        # Clean up disconnected clients
-        for client_id in disconnected_clients:
-            await self.disconnect(client_id)
-
-    async def remove_account_connections(self, account_id: int):
-        """Remove all WebSocket connections for a specific account"""
-        try:
-            # Find all connections for this account
-            db = SessionLocal()
+    async def disconnect(self, account_id: str):
+        if account_id in self.active_connections:
+            connection = self.active_connections[account_id]
             try:
-                connections = db.query(WebSocketConnection).filter(
-                    WebSocketConnection.account_id == account_id,
-                    WebSocketConnection.is_active == True
-                ).all()
-                
-                for connection in connections:
-                    connection.is_active = False
-                    connection.disconnected_at = datetime.utcnow()
-                    
-                    # Also disconnect the WebSocket if it's active
-                    if connection.client_id in self.active_connections:
-                        await self.disconnect(connection.client_id)
-                
-                db.commit()
-                logger.info(f"Removed {len(connections)} WebSocket connections for account {account_id}")
-                
+                await connection.websocket.close()
+            except Exception as e:
+                logger.error(f"Error closing WebSocket for account {account_id}: {str(e)}")
             finally:
-                db.close()
-
-        except Exception as e:
-            logger.error(f"Error removing account connections: {str(e)}")
-            raise
+                del self.active_connections[account_id]
 
     def get_status(self) -> dict:
         """Get current WebSocket manager status"""
         return {
             "initialized": self.is_initialized,
             "active_connections": len(self.active_connections),
-            "total_subscriptions": sum(len(subs) for subs in self.subscriptions.values())
         }
 
     async def shutdown(self):
         """Shutdown the WebSocket manager"""
         try:
-            # Disconnect all clients
-            for client_id in list(self.active_connections.keys()):
-                await self.disconnect(client_id)
+            # Close all active connections
+            for account_id in list(self.active_connections.keys()):
+                await self.disconnect(account_id)
             
             self.is_initialized = False
             logger.info("WebSocket manager shut down successfully")

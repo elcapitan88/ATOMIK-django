@@ -11,9 +11,6 @@ logger = logging.getLogger(__name__)
 # Create SQLAlchemy engine
 engine = create_engine(
     settings.DATABASE_URL,
-    # For SQLite, add check_same_thread=False
-    connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {},
-    # Connection pool settings
     poolclass=QueuePool,
     pool_size=5,
     max_overflow=10,
@@ -35,6 +32,8 @@ from app.models.user import User  # noqa
 from app.models.webhook import Webhook, WebhookLog  # noqa
 from app.models.strategy import ActivatedStrategy  # noqa
 from app.models.broker import BrokerAccount, BrokerCredentials  # noqa
+from app.models.subscription import Subscription
+from app.models.order import Order
 
 # Create a dependency for FastAPI endpoints
 def get_db():
@@ -65,6 +64,8 @@ def init_db():
         import app.models.webhook
         import app.models.strategy
         import app.models.broker
+        import app.models.subscription
+        import app.models.order
         
         # Create all tables
         Base.metadata.create_all(bind=engine)
@@ -90,5 +91,7 @@ __all__ = [
     "WebhookLog",
     "ActivatedStrategy",
     "BrokerAccount",
-    "BrokerCredentials"
+    "BrokerCredentials",
+    "Subscription",
+    "Order"
 ]

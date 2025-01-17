@@ -1,8 +1,8 @@
-"""fix_strategy_relationships
+"""initial migration
 
-Revision ID: 88e9841690f6
+Revision ID: 48f8520d6334
 Revises: 
-Create Date: 2024-12-27 18:19:50.324910
+Create Date: 2025-01-10 13:20:06.244470
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '88e9841690f6'
+revision: str = '48f8520d6334'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -47,6 +47,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
     sa.Column('last_connected', sa.DateTime(), nullable=True),
+    sa.Column('deleted_at', sa.DateTime(), nullable=True),
+    sa.Column('is_deleted', sa.Boolean(), nullable=True),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -75,7 +77,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_subscriptions_stripe_customer_id'), 'subscriptions', ['stripe_customer_id'], unique=True)
     op.create_table('webhooks',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('token', sa.String(length=36), nullable=True),
+    sa.Column('token', sa.String(length=64), nullable=True),
     sa.Column('user_id', sa.Integer(), nullable=True),
     sa.Column('name', sa.String(length=255), nullable=True),
     sa.Column('details', sa.Text(), nullable=True),
@@ -155,16 +157,18 @@ def upgrade() -> None:
     op.create_index(op.f('ix_activated_strategies_webhook_id'), 'activated_strategies', ['webhook_id'], unique=False)
     op.create_table('broker_credentials',
     sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('broker_id', sa.String(), nullable=False),
     sa.Column('account_id', sa.Integer(), nullable=True),
-    sa.Column('broker_id', sa.String(length=50), nullable=True),
     sa.Column('credential_type', sa.String(length=20), nullable=True),
-    sa.Column('access_token', sa.Text(), nullable=True),
-    sa.Column('refresh_token', sa.Text(), nullable=True),
+    sa.Column('access_token', sa.String(), nullable=True),
     sa.Column('expires_at', sa.DateTime(), nullable=True),
     sa.Column('is_valid', sa.Boolean(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['account_id'], ['broker_accounts.id'], ),
+    sa.Column('refresh_fail_count', sa.Integer(), nullable=True),
+    sa.Column('last_refresh_attempt', sa.DateTime(), nullable=True),
+    sa.Column('last_refresh_error', sa.String(), nullable=True),
+    sa.ForeignKeyConstraint(['account_id'], ['broker_accounts.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_broker_credentials_id'), 'broker_credentials', ['id'], unique=False)

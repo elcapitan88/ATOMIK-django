@@ -43,20 +43,9 @@ class TokenManager:
             logger.info(f"Reset refresh attempts for credential {credential_id}")
 
     async def get_active_credentials(self, db: Session) -> list[BrokerCredentials]:
-        """Get all active credentials that need checking"""
         try:
             current_time = datetime.utcnow()
-        
-        # Debug logging
-            all_credentials = db.query(BrokerCredentials).all()
-            logger.info(f"Total credentials in database: {len(all_credentials)}")
-            logger.info(f"Credentials details: {[{
-                'id': c.id,
-                'broker_id': c.broker_id,
-                'is_valid': c.is_valid,
-                'expires_at': c.expires_at
-            } for c in all_credentials]}")
-        
+            
             credentials = (
                 db.query(BrokerCredentials)
                 .join(BrokerAccount)
@@ -67,38 +56,39 @@ class TokenManager:
                 )
                 .all()
             )
-        
+            
             credentials_to_refresh = []
             for credential in credentials:
                 broker_config = TokenConfig.get_broker_config(credential.broker_id)
-            
-                # Get the reference time - either last_refresh_attempt or created_at
-                reference_time = credential.last_refresh_attempt
-                if reference_time is None:
-                # If no refresh attempt yet, use token creation time
-                    reference_time = datetime.utcnow() - timedelta(seconds=1)  # Force a refresh
                 
-            # Calculate time used
-                token_age = (current_time - reference_time).total_seconds()
-                refresh_threshold = broker_config['TOKEN_LIFETIME'] * broker_config['REFRESH_THRESHOLD']
-            
+                # Get reference time (last refresh or creation time)
+                reference_time = credential.last_refresh_attempt or credential.created_at
+                
+                # Calculate time until refresh
+                token_lifetime = broker_config['TOKEN_LIFETIME']
+                refresh_threshold = broker_config['REFRESH_THRESHOLD']
+                refresh_at = token_lifetime * refresh_threshold
+                
+                time_used = (current_time - reference_time).total_seconds()
+                time_until_refresh = refresh_at - time_used
+                
                 logger.info(
                     f"Credential {credential.id}: "
-                    f"Token age: {token_age:.0f}s, "
-                    f"Will refresh after {refresh_threshold:.0f}s of use"
+                    f"Time until refresh: {time_until_refresh:.0f} seconds "
+                    f"(Will refresh after {refresh_at:.0f} seconds of use)"
                 )
-            
-            # Check if we've used the token for longer than our threshold
-                if token_age >= refresh_threshold:
+                
+                # Check if we should refresh
+                if time_used >= refresh_at:
                     credentials_to_refresh.append(credential)
                     logger.info(
                         f"Queuing credential {credential.id} for refresh "
-                        f"(used for {token_age:.0f}s)"
+                        f"(Used for {time_used:.0f} seconds, "
+                        f"Refresh threshold: {refresh_at:.0f} seconds)"
                     )
             
-            logger.info(f"Checking {len(credentials_to_refresh)} active credentials for refresh")
             return credentials_to_refresh
-            
+                
         except Exception as e:
             logger.error(f"Error getting active credentials: {str(e)}")
             return []

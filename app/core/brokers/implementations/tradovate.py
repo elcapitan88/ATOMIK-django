@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import requests
 import logging
 import json
+from sqlalchemy.exc import IntegrityError
 import aiohttp
 import base64
 import asyncio
@@ -259,19 +260,16 @@ class TradovateBroker(BaseBroker):
         """Process OAuth callback from Tradovate"""
         try:
             tokens = await self._exchange_code_for_tokens(code, environment)
-        
-            logger.info("=== Development: OAuth Token Information ===")
-            logger.info(f"Access Token: {tokens.get('access_token')}")
-            logger.info(f"Expires In: {tokens.get('expires_in')}")
-            logger.info("==========================================")
+            logger.info("Processing OAuth callback tokens")
 
+            # Create credentials
             credentials = BrokerCredentials(
                 broker_id=self.broker_id,
                 credential_type='oauth',
                 access_token=tokens.get('access_token'),
                 expires_at=datetime.utcnow() + timedelta(seconds=tokens.get('expires_in', 4800)),
                 is_valid=True,
-                last_refresh_attempt=datetime.utcnow(),  # Initialize here
+                last_refresh_attempt=datetime.utcnow(),
                 refresh_fail_count=0,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
@@ -279,52 +277,74 @@ class TradovateBroker(BaseBroker):
             
             self.db.add(credentials)
 
+            # Fetch accounts using new credentials
             api_url = settings.TRADOVATE_LIVE_API_URL if environment == 'live' else settings.TRADOVATE_DEMO_API_URL
-
-            logger.info(f"Fetching account list from: {api_url}")
-            
             headers = {
                 "Authorization": f"Bearer {credentials.access_token}",
                 "Content-Type": "application/json"
             }
 
-            account_response = requests.get(
-                f"{api_url}/account/list",
-                headers=headers
-            )
+            accounts_response = requests.get(f"{api_url}/account/list", headers=headers)
+            if accounts_response.status_code != 200:
+                raise ConnectionError(f"Failed to fetch accounts: {accounts_response.text}")
 
-            if account_response.status_code != 200:
-                logger.error(f"Failed to fetch accounts: {account_response.text}")
-                raise ConnectionError("Failed to fetch account information")
-
-            accounts_data = account_response.json()
-
-            logger.info("=== Development: Tradovate Accounts Information ===")
-            logger.info(f"Raw Accounts Data: {accounts_data}")
-            logger.info("===============================================")
-
+            accounts_data = accounts_response.json()
             stored_accounts = []
-            for account_info in accounts_data:
-                account = BrokerAccount(
-                    user_id=user_id,
-                    broker_id=self.broker_id,
-                    account_id=str(account_info.get('id')),
-                    name=account_info.get('nickname') or account_info.get('name'),
-                    environment=environment,
-                    status='active',
-                    is_active=True,
-                    last_connected=datetime.utcnow()
-                )
-                
-                self.db.add(account)
-                account.credentials = credentials
-                stored_accounts.append(account)
 
-                logger.info(f"Storing account: {account_info.get('name')} (ID: {account_info.get('id')})")
+            for account_info in accounts_data:
+                # Check for existing account
+                existing_account = self.db.query(BrokerAccount).filter(
+                    BrokerAccount.user_id == user_id,
+                    BrokerAccount.account_id == str(account_info.get('id')),
+                    BrokerAccount.broker_id == self.broker_id,
+                    BrokerAccount.environment == environment
+                ).first()
+
+                if existing_account:
+                    logger.info(f"Updating existing account: {existing_account.account_id}")
+                    # Update existing account
+                    existing_account.name = account_info.get('name')
+                    existing_account.is_active = True
+                    existing_account.status = 'active'
+                    existing_account.error_message = None
+                    existing_account.last_connected = datetime.utcnow()
+                    existing_account.updated_at = datetime.utcnow()
+                    existing_account.deleted_at = None
+                    existing_account.is_deleted = False
+                    
+                    # Update credentials
+                    if existing_account.credentials:
+                        self.db.delete(existing_account.credentials)
+                    existing_account.credentials = credentials
+                    
+                    stored_accounts.append(existing_account)
+                else:
+                    logger.info(f"Creating new account for user {user_id}")
+                    # Create new account
+                    new_account = BrokerAccount(
+                        user_id=user_id,
+                        broker_id=self.broker_id,
+                        account_id=str(account_info.get('id')),
+                        name=account_info.get('name'),
+                        environment=environment,
+                        status='active',
+                        is_active=True,
+                        last_connected=datetime.utcnow()
+                    )
+                    self.db.add(new_account)
+                    new_account.credentials = credentials
+                    stored_accounts.append(new_account)
 
             try:
                 self.db.commit()
-                logger.info(f"Successfully stored {len(stored_accounts)} accounts")
+                logger.info(f"Successfully stored/updated {len(stored_accounts)} accounts")
+            except IntegrityError as e:
+                self.db.rollback()
+                logger.error(f"Database integrity error: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Account already exists for this user"
+                )
             except Exception as e:
                 self.db.rollback()
                 logger.error(f"Database error: {str(e)}")
