@@ -1,0 +1,1 @@
+default_app_config = 'strategies.brokers.tradovate.apps.TradovateConfig'

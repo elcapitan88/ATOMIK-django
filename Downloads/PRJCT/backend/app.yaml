@@ -1,0 +1,20 @@
+name: your-app-name
+services:
+  - name: web
+    github:
+      repo: your-repo
+      branch: main
+    envs:
+      - key: DJANGO_SETTINGS_MODULE
+        value: your_project.settings
+
+jobs:
+  - name: refresh-tradovate-tokens
+    github:
+      repo: your-repo
+      branch: main
+    run_command: python manage.py refresh_tradovate_tokens
+    envs:
+      - key: DJANGO_SETTINGS_MODULE
+        value: your_project.settings
+    schedule: "*/5 * * * *"
