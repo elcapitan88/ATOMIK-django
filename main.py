@@ -176,31 +176,64 @@ async def startup_event():
         "websocket": False,
         "background_tasks": False
     }
-    
+
     try:
         # Step 1: Initialize database
-        startup_status["database"] = await initialize_database()
-        if not startup_status["database"]:
-            raise Exception("Database initialization failed")
+        try:
+            logger.info("Initializing database...")
+            init_db()
+            
+            # Check database health
+            health_status = check_database_health()
+            if health_status['status'] != 'healthy':
+                logger.error(f"Database health check failed: {health_status}")
+                raise Exception("Database health check failed")
+                
+            startup_status["database"] = True
+            logger.info("Database initialization successful")
+            
+        except Exception as db_error:
+            logger.error(f"Database initialization failed: {str(db_error)}")
+            raise
 
         # Step 2: Initialize WebSocket manager
-        startup_status["websocket"] = await initialize_websocket_manager()
-        if not startup_status["websocket"]:
-            raise Exception("WebSocket manager initialization failed")
+        try:
+            logger.info("Initializing WebSocket manager...")
+            success = await websocket_manager.initialize()
+            
+            if not success:
+                raise Exception("WebSocket manager initialization failed")
+                
+            startup_status["websocket"] = True
+            logger.info("WebSocket manager initialized successfully")
+            
+        except Exception as ws_error:
+            logger.error(f"WebSocket manager initialization failed: {str(ws_error)}")
+            raise
 
         # Step 3: Start background tasks
-        tasks_to_start = [
-            (start_token_refresh_task, "token_refresh"),
-            # Add more background tasks here
-        ]
-
-        started_tasks = []
-        for task_func, task_name in tasks_to_start:
-            task = await start_background_task(task_func, task_name)
-            if task:
-                started_tasks.append(task)
-
-        startup_status["background_tasks"] = len(started_tasks) == len(tasks_to_start)
+        try:
+            logger.info("Starting background tasks...")
+            background_tasks_status = []
+            
+            # Start token refresh task
+            token_refresh_task = asyncio.create_task(start_token_refresh_task())
+            background_tasks.add(token_refresh_task)
+            background_tasks_status.append(("token_refresh", True))
+            
+            # Add additional background tasks here
+            
+            startup_status["background_tasks"] = all(status for _, status in background_tasks_status)
+            
+            if not startup_status["background_tasks"]:
+                failed_tasks = [task for task, status in background_tasks_status if not status]
+                raise Exception(f"Failed to start background tasks: {failed_tasks}")
+                
+            logger.info("Background tasks started successfully")
+            
+        except Exception as task_error:
+            logger.error(f"Background task initialization failed: {str(task_error)}")
+            raise
 
         # Step 4: Final health check
         if all(startup_status.values()):
@@ -213,7 +246,83 @@ async def startup_event():
     except Exception as e:
         logger.critical(f"Startup failed: {str(e)}")
         logger.critical("Service cannot start properly - shutting down")
+        
+        # Attempt cleanup of any initialized components
+        await cleanup_on_failed_startup(startup_status)
+        
         raise
+
+async def cleanup_on_failed_startup(startup_status: dict):
+    """Cleanup any initialized components after failed startup"""
+    try:
+        logger.info("Performing cleanup after failed startup...")
+        
+        # Cleanup WebSocket manager if it was initialized
+        if startup_status["websocket"]:
+            try:
+                await websocket_manager.cleanup()
+            except Exception as ws_error:
+                logger.error(f"WebSocket manager cleanup failed: {str(ws_error)}")
+
+        # Cancel any started background tasks
+        if startup_status["background_tasks"]:
+            for task in background_tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                        
+        logger.info("Cleanup completed")
+        
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+
+# Initialize set to track background tasks
+background_tasks: Set[asyncio.Task] = set()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    Shutdown event handler that:
+    1. Stops background tasks
+    2. Closes WebSocket connections
+    3. Closes database connections
+    """
+    logger.info("Initiating Trading API Service shutdown")
+    
+    try:
+        # Step 1: Stop token refresh task
+        logger.info("Stopping token refresh task...")
+        await stop_token_refresh_task()
+
+        # Step 2: Stop all background tasks
+        logger.info(f"Stopping {len(background_tasks)} background tasks...")
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        # Step 3: Close WebSocket connections
+        logger.info("Closing WebSocket connections...")
+        await websocket_manager.shutdown()
+
+        # Step 4: Close database connections
+        logger.info("Closing database connections...")
+        from app.db.session import engine
+        await engine.dispose()
+
+        logger.info("Trading API Service shutdown completed successfully")
+
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}")
+        raise
+    finally:
+        logger.info("Shutdown process completed")
 
 @app.on_event("shutdown")
 async def shutdown_event():

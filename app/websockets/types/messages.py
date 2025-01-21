@@ -1,12 +1,15 @@
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Union
+from typing import Dict, Optional, List, Any, Union
 from enum import Enum
+import logging
 from decimal import Decimal
 from pydantic import BaseModel, Field
 import uuid
 
+logger = logging.getLogger(__name__)
+
 class WSMessageType(str, Enum):
-    """Types of WebSocket messages"""
+    """WebSocket message types"""
     AUTH = "auth"
     MARKET_DATA = "market_data"
     ORDER = "order"
@@ -14,23 +17,12 @@ class WSMessageType(str, Enum):
     ACCOUNT = "account"
     SUBSCRIPTION = "subscription"
     HEARTBEAT = "heartbeat"
+    HEARTBEAT_ACK = "heartbeat_ack"
     ERROR = "error"
     SYSTEM = "system"
 
-class OrderType(str, Enum):
-    """Types of trading orders"""
-    MARKET = "market"
-    LIMIT = "limit"
-    STOP = "stop"
-    STOP_LIMIT = "stop_limit"
-
-class OrderSide(str, Enum):
-    """Trading order sides"""
-    BUY = "buy"
-    SELL = "sell"
-
 class OrderStatus(str, Enum):
-    """Trading order statuses"""
+    """Order status enumeration"""
     PENDING = "pending"
     WORKING = "working"
     FILLED = "filled"
@@ -38,6 +30,18 @@ class OrderStatus(str, Enum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     PARTIALLY_FILLED = "partially_filled"
+
+class OrderSide(str, Enum):
+    """Order side enumeration"""
+    BUY = "buy"
+    SELL = "sell"
+
+class OrderType(str, Enum):
+    """Order type enumeration"""
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP = "stop"
+    STOP_LIMIT = "stop_limit"
 
 class SubscriptionAction(str, Enum):
     """Subscription actions"""
@@ -55,6 +59,8 @@ class ErrorCode(str, Enum):
     INVALID_SYMBOL = "invalid_symbol"
     INSUFFICIENT_FUNDS = "insufficient_funds"
     SYSTEM_ERROR = "system_error"
+    HEARTBEAT_TIMEOUT = "heartbeat_timeout"
+    HEARTBEAT_MISSED = "heartbeat_missed"
 
 # Base message model
 class WSBaseMessage(BaseModel):
@@ -64,7 +70,44 @@ class WSBaseMessage(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     broker: Optional[str] = None
 
+    class Config:
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
+
+
+# Enhanced Heartbeat Messages
+class HeartbeatMessage(WSBaseMessage):
+    """Enhanced heartbeat message with sequence tracking"""
+    type: WSMessageType = WSMessageType.HEARTBEAT
+    sequence_number: int
+    client_id: Optional[str] = None
+    account_id: str
+    metrics: Optional[Dict[str, Any]] = None
+
+class HeartbeatAckMessage(WSBaseMessage):
+    """Heartbeat acknowledgment message"""
+    type: WSMessageType = WSMessageType.HEARTBEAT_ACK
+    sequence_number: int
+    original_timestamp: datetime
+    account_id: str
+    latency: Optional[float] = None
+    client_metrics: Optional[Dict[str, Any]] = None
+
 # Authentication messages
+class HeartbeatMessage(BaseModel):
+    type: str = "heartbeat"
+    sequence_number: int
+    timestamp: str
+    account_id: str
+    metrics: Optional[Dict[str, Any]]
+
+class HeartbeatAckMessage(BaseModel):
+    type: str = "heartbeat_ack"
+    sequence_number: int
+    account_id: str
+    client_timestamp: str
+
 class WSAuthRequest(WSBaseMessage):
     """Authentication request message"""
     type: WSMessageType = WSMessageType.AUTH
@@ -188,12 +231,6 @@ class WSErrorMessage(WSBaseMessage):
     message: str
     details: Optional[Dict[str, Any]] = None
 
-# Heartbeat messages
-class WSHeartbeat(WSBaseMessage):
-    """Heartbeat message"""
-    type: WSMessageType = WSMessageType.HEARTBEAT
-    connection_id: str
-
 # System messages
 class WSSystemMessage(WSBaseMessage):
     """System message"""
@@ -214,38 +251,67 @@ WSMessage = Union[
     WSSubscriptionRequest,
     WSSubscriptionResponse,
     WSErrorMessage,
-    WSHeartbeat,
+    HeartbeatMessage,
+    HeartbeatAckMessage,
     WSSystemMessage
 ]
 
 def parse_ws_message(data: Dict[str, Any]) -> WSMessage:
     """Parse a raw WebSocket message into the appropriate type"""
-    message_type = data.get("type")
-    
-    if not message_type:
-        raise ValueError("Message type not specified")
+    try:
+        message_type = data.get("type")
+        if not message_type:
+            raise ValueError("Message type not specified")
 
-    message_classes = {
-        WSMessageType.AUTH: WSAuthRequest if "token" in data else WSAuthResponse,
-        WSMessageType.MARKET_DATA: WSMarketDataMessage,
-        WSMessageType.ORDER: (
-            WSOrderRequest if "client_order_id" in data 
-            else WSOrderResponse if "order_id" in data 
-            else WSOrderUpdate
-        ),
-        WSMessageType.POSITION: WSPosition,
-        WSMessageType.ACCOUNT: WSAccountUpdate,
-        WSMessageType.SUBSCRIPTION: (
-            WSSubscriptionRequest if "action" in data 
-            else WSSubscriptionResponse
-        ),
-        WSMessageType.ERROR: WSErrorMessage,
-        WSMessageType.HEARTBEAT: WSHeartbeat,
-        WSMessageType.SYSTEM: WSSystemMessage
-    }
+        message_classes = {
+            WSMessageType.AUTH: WSAuthRequest if "token" in data else WSAuthResponse,
+            WSMessageType.MARKET_DATA: WSMarketDataMessage,
+            WSMessageType.ORDER: (
+                WSOrderRequest if "client_order_id" in data 
+                else WSOrderResponse if "order_id" in data 
+                else WSOrderUpdate
+            ),
+            WSMessageType.POSITION: WSPosition,
+            WSMessageType.ACCOUNT: WSAccountUpdate,
+            WSMessageType.SUBSCRIPTION: (
+                WSSubscriptionRequest if "action" in data 
+                else WSSubscriptionResponse
+            ),
+            WSMessageType.ERROR: WSErrorMessage,
+            WSMessageType.HEARTBEAT: HeartbeatMessage,
+            WSMessageType.HEARTBEAT_ACK: HeartbeatAckMessage,
+            WSMessageType.SYSTEM: WSSystemMessage
+        }
 
-    message_class = message_classes.get(message_type)
-    if not message_class:
-        raise ValueError(f"Unknown message type: {message_type}")
+        message_class = message_classes.get(message_type)
+        if not message_class:
+            raise ValueError(f"Unknown message type: {message_type}")
 
-    return message_class(**data)
+        return message_class(**data)
+        
+    except Exception as e:
+        logger.error(f"Error parsing WebSocket message: {str(e)}")
+        raise ValueError(f"Invalid message format: {str(e)}")
+
+def create_heartbeat_message(account_id: str, sequence_number: int, metrics: Optional[Dict[str, Any]] = None) -> HeartbeatMessage:
+    """Create a heartbeat message"""
+    return HeartbeatMessage(
+        account_id=account_id,
+        sequence_number=sequence_number,
+        metrics=metrics,
+        timestamp=datetime.utcnow()  # Keep as datetime, let Pydantic handle serialization
+    )
+
+def create_heartbeat_ack(
+    original_message: HeartbeatMessage,
+    latency: Optional[float] = None,
+    client_metrics: Optional[Dict[str, Any]] = None
+) -> HeartbeatAckMessage:
+    """Create a heartbeat acknowledgment message"""
+    return HeartbeatAckMessage(
+        sequence_number=original_message.sequence_number,
+        original_timestamp=original_message.timestamp,
+        account_id=original_message.account_id,
+        latency=latency,
+        client_metrics=client_metrics
+    )
