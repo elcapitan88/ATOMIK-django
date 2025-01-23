@@ -1,5 +1,10 @@
- __pycache__/
-*.pyc
-*.pyo
-*.env
-
+echo "__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+venv/
+ENV/
+.idea/
+.vscode/
+*.sqlite" > .gitignore

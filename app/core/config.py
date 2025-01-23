@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 from functools import lru_cache
 from typing import Optional, List, Any
 from pathlib import Path
+import secrets
 
 class Settings(BaseSettings):
     # Base Settings
@@ -28,6 +29,16 @@ class Settings(BaseSettings):
     SESSION_LIFETIME_HOURS: int = 24
     RATE_LIMIT_PER_MINUTE: int = 60
     
+    # WebSocket Settings
+    WEBHOOK_SECRET_KEY: str = secrets.token_urlsafe(32)
+    WEBSOCKET_MAX_CONNECTIONS: int = 1000
+    WEBSOCKET_RATE_LIMIT: int = 100
+    WEBSOCKET_PING_INTERVAL: int = 30
+    WEBSOCKET_PING_TIMEOUT: int = 10
+    WEBSOCKET_HEARTBEAT_INTERVAL: int = 30
+    WEBSOCKET_RECONNECT_ATTEMPTS: int = 3
+    WEBSOCKET_RECONNECT_DELAY: int = 5
+    
     # Tradovate Settings
     TRADOVATE_CLIENT_ID: str
     TRADOVATE_CLIENT_SECRET: str
@@ -41,7 +52,6 @@ class Settings(BaseSettings):
     TRADOVATE_DEMO_EXCHANGE_URL: str
     TRADOVATE_DEMO_API_URL: str
     TRADOVATE_DEMO_WS_URL: str
-    # In config.py, add to the Settings class:
     TRADOVATE_LIVE_RENEW_TOKEN_URL: str
     TRADOVATE_DEMO_RENEW_TOKEN_URL: str
 

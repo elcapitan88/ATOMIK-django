@@ -1,20 +1,17 @@
 # main.py
-from fastapi import FastAPI, Request, Depends
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Request, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
-from typing import Optional
-from app.db.base import get_db 
+from typing import Optional, Callable, Set, Dict
+from contextlib import asynccontextmanager
 
 # Standard library imports
 import logging
 import asyncio
 from datetime import datetime
-from typing import Optional, Callable, Set
 
 # FastAPI imports
-from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 # SQLAlchemy imports
 from sqlalchemy.exc import SQLAlchemyError
@@ -22,10 +19,19 @@ from sqlalchemy.exc import SQLAlchemyError
 # Local imports
 from app.api.v1.api import api_router, tradovate_callback_router
 from app.core.config import settings
-from app.db.base import init_db
+from app.db.base import init_db, get_db
 from app.core.db_health import check_database_health
 from app.core.tasks.token_refresh import start_token_refresh_task, stop_token_refresh_task
-from app.websockets.manager import websocket_manager
+
+# Import new WebSocket components
+from app.websockets.handlers.endpoint_handlers import TradovateEndpointHandler
+from app.websockets.handlers.event_handlers import TradovateEventHandler
+from app.websockets.handlers.webhook_handlers import TradovateWebhookHandler
+from app.websockets.handlers.order_executor import TradovateOrderExecutor
+from app.websockets.monitoring.monitor import MonitoringService
+from app.websockets.scaling.resource_manager import ResourceManager
+from app.websockets.errors import WebSocketError, handle_websocket_error
+from app.websockets.websocket_config import WebSocketConfig
 
 # Configure logging
 logging.basicConfig(
@@ -58,6 +64,117 @@ class CSPMiddleware:
         response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
         return response
 
+# New WebSocket Manager Class
+class WebSocketManager:
+    """Manager class to coordinate all WebSocket components."""
+    
+    def __init__(self):
+        self.resource_manager = ResourceManager()
+        self.monitoring_service = MonitoringService()
+        self.order_executor = TradovateOrderExecutor()
+        self.event_handler = TradovateEventHandler()
+        self.endpoint_handler = TradovateEndpointHandler(
+            config={
+                "path": "/ws/tradovate",
+                "auth_required": True
+            }
+        )
+        self.webhook_handler = TradovateWebhookHandler(
+            secret_key=settings.WEBHOOK_SECRET_KEY
+        )
+        self.active_connections: Dict[str, WebSocket] = {}
+
+    async def initialize(self) -> bool:
+        """Initialize the WebSocket manager."""
+        try:
+            await self.monitoring_service.start()
+            await self.resource_manager.load_balancer.register_node(
+                "default_node",
+                capacity=1000,
+                metadata={"type": "default"}
+            )
+            self.event_handler.register_handler(
+                "market_data",
+                self.endpoint_handler.handle_market_data
+            )
+            logger.info("WebSocket manager initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"WebSocket manager initialization failed: {str(e)}")
+            return False
+
+    def get_status(self):
+        """Get current status of WebSocket connections."""
+        return {
+            "active_connections": len(self.active_connections),
+            "monitoring_active": self.monitoring_service.is_running(),
+        }
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        """Handle new WebSocket connection."""
+        try:
+            node_id = await self.resource_manager.register_connection(
+                websocket.client.host,
+                client_id
+            )
+            
+            if not node_id:
+                await websocket.close(code=1008)
+                return
+                
+            await websocket.accept()
+            connection_id = f"{client_id}_{websocket.client.host}"
+            self.active_connections[connection_id] = websocket
+            logger.info(f"New WebSocket connection: {connection_id}")
+            return connection_id
+            
+        except Exception as e:
+            logger.error(f"Error handling connection: {str(e)}")
+            if websocket.client.state.connected:
+                await websocket.close(code=1011)
+            raise
+
+    async def disconnect(self, connection_id: str):
+        """Handle WebSocket disconnection."""
+        try:
+            if connection_id in self.active_connections:
+                del self.active_connections[connection_id]
+            await self.resource_manager.load_balancer.release_connection(connection_id)
+            logger.info(f"WebSocket disconnected: {connection_id}")
+        except Exception as e:
+            logger.error(f"Error handling disconnection: {str(e)}")
+            raise
+
+    async def shutdown(self):
+        """Shutdown the WebSocket manager."""
+        try:
+            await self.monitoring_service.stop()
+            for connection_id, websocket in self.active_connections.items():
+                await websocket.close()
+            self.active_connections.clear()
+            logger.info("WebSocket manager shut down successfully")
+        except Exception as e:
+            logger.error(f"Error during WebSocket manager shutdown: {str(e)}")
+            raise
+
+# FastAPI lifespan event
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize WebSocket manager
+    websocket_manager = WebSocketManager()
+    app.state.websocket_manager = websocket_manager
+    
+    # Initialize the default node
+    await websocket_manager.resource_manager.load_balancer.register_node(
+        "default_node",
+        capacity=1000,
+        metadata={"type": "default"}
+    )
+    
+    await websocket_manager.initialize()
+    yield
+    await websocket_manager.cleanup()
+    
 # Create FastAPI app instance
 app = FastAPI(
     title="Trading API",
@@ -67,6 +184,7 @@ app = FastAPI(
         "name": "API Support",
         "email": "support@example.com",
     },
+    lifespan=lifespan
 )
 
 # Track background tasks
@@ -91,59 +209,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # Include routers
-app.include_router(tradovate_callback_router, prefix="/api")  # This will handle /api/tradovate/callback
-app.include_router(api_router, prefix="/api/v1") 
+app.include_router(tradovate_callback_router, prefix="/api")
+app.include_router(api_router, prefix="/api/v1")
 
+# Dependency to get WebSocket manager
+async def get_websocket_manager():
+    return app.state.websocket_manager
 
-async def initialize_database() -> bool:
-    """Initialize database and run migrations"""
+@app.websocket("/ws/tradovate/{client_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    client_id: str,
+    manager: WebSocketManager = Depends(get_websocket_manager)
+):
+    connection_id = None
     try:
-        logger.info("Initializing database...")
-        init_db()
-        
-        # Check database health
-        health_status = check_database_health()
-        if health_status['status'] != 'healthy':
-            logger.error(f"Database health check failed: {health_status}")
-            return False
-            
-        logger.info("Database initialization successful")
-        return True
-        
-    except SQLAlchemyError as e:
-        logger.error(f"Database initialization failed: {str(e)}")
-        return False
+        connection_id = await manager.connect(websocket, client_id)
+        while True:
+            message = await websocket.receive_json()
+            try:
+                response = await manager.endpoint_handler.handle_message(
+                    message,
+                    connection_id
+                )
+                await websocket.send_json(response)
+            except WebSocketError as e:
+                error_response = handle_websocket_error(e)
+                await websocket.send_json(error_response)
+            except Exception as e:
+                logger.error(f"Error processing message: {str(e)}")
+                await websocket.send_json({
+                    "error": "Internal server error",
+                    "code": 500
+                })
+    except WebSocketDisconnect:
+        if connection_id:
+            await manager.disconnect(connection_id)
     except Exception as e:
-        logger.error(f"Unexpected error during database initialization: {str(e)}")
-        return False
-
-async def initialize_websocket_manager() -> bool:
-    """Initialize WebSocket manager"""
-    try:
-        logger.info("Initializing WebSocket manager...")
-        await websocket_manager.initialize()
-        logger.info("WebSocket manager initialized successfully")
-        return True
-        
-    except Exception as e:
-        logger.error(f"WebSocket manager initialization failed: {str(e)}")
-        return False
-
-async def start_background_task(task_func, task_name: str) -> Optional[asyncio.Task]:
-    """Start a background task with error handling"""
-    try:
-        task = asyncio.create_task(task_func())
-        task.set_name(task_name)
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
-        logger.info(f"Started background task: {task_name}")
-        return task
-        
-    except Exception as e:
-        logger.error(f"Failed to start background task {task_name}: {str(e)}")
-        return None
+        logger.error(f"WebSocket error: {str(e)}")
+        if connection_id:
+            await manager.disconnect(connection_id)
+        if websocket.client.state.connected:
+            await websocket.close(code=1011)
 
 # Request logging middleware
 @app.middleware("http")
@@ -163,17 +271,10 @@ async def log_requests(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Startup event handler that:
-    1. Initializes database and creates tables
-    2. Starts WebSocket manager
-    3. Starts background tasks (token refresh, etc.)
-    4. Performs health checks
-    """
+    """Startup event handler"""
     logger.info("Starting Trading API Service")
     startup_status = {
         "database": False,
-        "websocket": False,
         "background_tasks": False
     }
 
@@ -182,60 +283,26 @@ async def startup_event():
         try:
             logger.info("Initializing database...")
             init_db()
-            
-            # Check database health
             health_status = check_database_health()
             if health_status['status'] != 'healthy':
-                logger.error(f"Database health check failed: {health_status}")
                 raise Exception("Database health check failed")
-                
             startup_status["database"] = True
             logger.info("Database initialization successful")
-            
         except Exception as db_error:
             logger.error(f"Database initialization failed: {str(db_error)}")
             raise
 
-        # Step 2: Initialize WebSocket manager
-        try:
-            logger.info("Initializing WebSocket manager...")
-            success = await websocket_manager.initialize()
-            
-            if not success:
-                raise Exception("WebSocket manager initialization failed")
-                
-            startup_status["websocket"] = True
-            logger.info("WebSocket manager initialized successfully")
-            
-        except Exception as ws_error:
-            logger.error(f"WebSocket manager initialization failed: {str(ws_error)}")
-            raise
-
-        # Step 3: Start background tasks
+        # Step 2: Start background tasks
         try:
             logger.info("Starting background tasks...")
-            background_tasks_status = []
-            
-            # Start token refresh task
             token_refresh_task = asyncio.create_task(start_token_refresh_task())
             background_tasks.add(token_refresh_task)
-            background_tasks_status.append(("token_refresh", True))
-            
-            # Add additional background tasks here
-            
-            startup_status["background_tasks"] = all(status for _, status in background_tasks_status)
-            
-            if not startup_status["background_tasks"]:
-                failed_tasks = [task for task, status in background_tasks_status if not status]
-                raise Exception(f"Failed to start background tasks: {failed_tasks}")
-                
+            startup_status["background_tasks"] = True
             logger.info("Background tasks started successfully")
-            
         except Exception as task_error:
             logger.error(f"Background task initialization failed: {str(task_error)}")
             raise
 
-        # Step 4: Final health check
         if all(startup_status.values()):
             logger.info("Trading API Service started successfully")
             logger.info("Startup Status: %s", startup_status)
@@ -246,10 +313,7 @@ async def startup_event():
     except Exception as e:
         logger.critical(f"Startup failed: {str(e)}")
         logger.critical("Service cannot start properly - shutting down")
-        
-        # Attempt cleanup of any initialized components
         await cleanup_on_failed_startup(startup_status)
-        
         raise
 
 async def cleanup_on_failed_startup(startup_status: dict):
@@ -257,14 +321,6 @@ async def cleanup_on_failed_startup(startup_status: dict):
     try:
         logger.info("Performing cleanup after failed startup...")
         
-        # Cleanup WebSocket manager if it was initialized
-        if startup_status["websocket"]:
-            try:
-                await websocket_manager.cleanup()
-            except Exception as ws_error:
-                logger.error(f"WebSocket manager cleanup failed: {str(ws_error)}")
-
-        # Cancel any started background tasks
         if startup_status["background_tasks"]:
             for task in background_tasks:
                 if not task.done():
@@ -275,21 +331,12 @@ async def cleanup_on_failed_startup(startup_status: dict):
                         pass
                         
         logger.info("Cleanup completed")
-        
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
-# Initialize set to track background tasks
-background_tasks: Set[asyncio.Task] = set()
-
 @app.on_event("shutdown")
 async def shutdown_event():
-    """
-    Shutdown event handler that:
-    1. Stops background tasks
-    2. Closes WebSocket connections
-    3. Closes database connections
-    """
+    """Shutdown event handler"""
     logger.info("Initiating Trading API Service shutdown")
     
     try:
@@ -307,59 +354,12 @@ async def shutdown_event():
                 except asyncio.CancelledError:
                     pass
 
-        # Step 3: Close WebSocket connections
-        logger.info("Closing WebSocket connections...")
-        await websocket_manager.shutdown()
-
-        # Step 4: Close database connections
+        # Step 3: Close database connections
         logger.info("Closing database connections...")
         from app.db.session import engine
         await engine.dispose()
 
         logger.info("Trading API Service shutdown completed successfully")
-
-    except Exception as e:
-        logger.error(f"Error during shutdown: {str(e)}")
-        raise
-    finally:
-        logger.info("Shutdown process completed")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """
-    Shutdown event handler that:
-    1. Stops background tasks
-    2. Closes WebSocket connections
-    3. Closes database connections
-    """
-    logger.info("Initiating Trading API Service shutdown")
-    
-    try:
-        # Step 1: Stop token refresh task
-        logger.info("Stopping token refresh task...")
-        await stop_token_refresh_task()
-
-        # Step 2: Stop all background tasks
-        logger.info(f"Stopping {len(background_tasks)} background tasks...")
-        for task in background_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        # Step 3: Close WebSocket connections
-        logger.info("Closing WebSocket connections...")
-        await websocket_manager.shutdown()
-
-        # Step 4: Close database connections
-        logger.info("Closing database connections...")
-        from app.db.session import engine
-        await engine.dispose()
-
-        logger.info("Trading API Service shutdown completed successfully")
-
     except Exception as e:
         logger.error(f"Error during shutdown: {str(e)}")
         raise
@@ -375,7 +375,6 @@ async def check_routes():
         "timestamp": datetime.utcnow().isoformat()
     }
 
-
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -390,6 +389,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Check API and database health"""
+    websocket_manager = app.state.websocket_manager
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),

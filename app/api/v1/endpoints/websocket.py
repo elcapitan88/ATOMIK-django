@@ -3,6 +3,7 @@ from datetime import datetime
 import asyncio
 import logging
 import json
+from enum import Enum
 import uuid
 from starlette.websockets import WebSocketState
 from typing import Dict, Optional, Set, Any, Union
@@ -13,6 +14,7 @@ from fastapi import (
     WebSocket, 
     WebSocketDisconnect, 
     Depends, 
+    Request,
     Query, 
     HTTPException,
     status
@@ -20,21 +22,34 @@ from fastapi import (
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 
+from app.core.brokers.base import BaseBroker  # Fix for BaseBroker error
+from app.websockets.metrics import HeartbeatMetrics  # Fix for HeartbeatMetrics error
+from starlette.websockets import WebSocketState  # Fix for WebSocketState error
+from fastapi import WebSocket, WebSocketDisconnect
+
 # Local imports
+from app.websockets.manager import WebSocketManager
 from app.db.session import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.models.broker import BrokerAccount
 from app.core.config import settings
+from app.websockets.metrics import HeartbeatMetrics
 from app.websockets.manager import websocket_manager
 from app.websockets.heartbeat_monitor import heartbeat_monitor
 from app.websockets.metrics import HeartbeatMetrics
-from ....websockets.websocket_config import WebSocketConfig 
+from app.websockets.websocket_config import WebSocketConfig
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+class WebSocketState(str, Enum):
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    RECONNECTING = "reconnecting"
+    ERROR = "error"
 
 # Store active connections
 class ConnectionManager:
@@ -42,48 +57,62 @@ class ConnectionManager:
         self.active_connections: Dict[int, Dict[str, WebSocket]] = {}
         self.connection_details: Dict[str, Dict[str, Any]] = {}
 
-    async def connect(self, websocket: WebSocket, connection_id: str, user_id: int, account_id: str) -> bool:
-        """Store a websocket connection"""
+    async def connect(self, websocket: WebSocket, client_id: str, user_id: Optional[int] = None) -> bool:
+        """Handle new WebSocket connection."""
         try:
-            if user_id not in self.active_connections:
-                self.active_connections[user_id] = {}
-                
-            self.active_connections[user_id][connection_id] = websocket
-            self.connection_details[connection_id] = {
-                "user_id": user_id,
-                "account_id": account_id,
-                "connected_at": datetime.utcnow(),
-                "last_heartbeat": datetime.utcnow()
-            }
+            # Register with resource manager
+            node_id = await self.resource_manager.register_connection(
+                websocket.client.host,
+                client_id
+            )
             
-            logger.info(f"New connection stored: {connection_id}")
+            if not node_id:
+                await websocket.close(code=1008)
+                return False
+
+            # Accept connection
+            connection_id = f"{client_id}_{user_id}" if user_id else client_id
+            
+            async with self._lock:
+                self.active_connections[connection_id] = websocket
+                if user_id:
+                    if user_id not in self.user_connections:
+                        self.user_connections[user_id] = set()
+                    self.user_connections[user_id].add(websocket)
+                
+            logger.info(f"New WebSocket connection: {connection_id}")
             return True
+
         except Exception as e:
-            logger.error(f"Error storing connection: {str(e)}")
+            logger.error(f"Error in connect: {str(e)}")
             return False
 
-    async def disconnect(self, connection_id: str):
-        """Remove a websocket connection"""
+    async def disconnect(self, client_id: str):
+        """Handle WebSocket disconnection."""
         try:
-            if connection_id in self.connection_details:
-                user_id = self.connection_details[connection_id]["user_id"]
+            async with self._lock:
+                # Remove from active connections
+                for conn_id in list(self.active_connections.keys()):
+                    if conn_id.startswith(f"{client_id}_") or conn_id == client_id:
+                        if conn_id in self.active_connections:
+                            del self.active_connections[conn_id]
                 
-                # Close WebSocket if it exists
-                if user_id in self.active_connections and connection_id in self.active_connections[user_id]:
-                    ws = self.active_connections[user_id][connection_id]
-                    if ws:
-                        await ws.close()
-                    
-                    # Clean up connections
-                    self.active_connections[user_id].pop(connection_id, None)
-                    if not self.active_connections[user_id]:
-                        self.active_connections.pop(user_id, None)
+                # Remove from user connections
+                for user_connections in self.user_connections.values():
+                    for websocket in list(user_connections):
+                        try:
+                            await websocket.close()
+                        except:
+                            pass
+                        user_connections.discard(websocket)
+
+                # Release resources
+                await self.resource_manager.load_balancer.release_connection(client_id)
                 
-                # Remove connection details
-                self.connection_details.pop(connection_id, None)
-                logger.info(f"Connection removed: {connection_id}")
+                logger.info(f"WebSocket disconnected: {client_id}")
+
         except Exception as e:
-            logger.error(f"Error during disconnect: {str(e)}")
+            logger.error(f"Error in disconnect: {str(e)}")
 
     async def update_heartbeat(self, connection_id: str):
         """Update last heartbeat time for a connection"""
@@ -170,139 +199,136 @@ async def validate_ws_token(token: str, db: Session) -> Optional[User]:
             detail="Authentication failed",
         )
     
+async def get_websocket_manager(websocket: WebSocket):
+    """
+    Modified to work with WebSocket endpoints
+    """
+    try:
+        app = websocket.app
+        if not hasattr(app.state, "websocket_manager"):
+            logger.error("WebSocket manager not found in application state")
+            await websocket.close(code=1011)
+            raise HTTPException(
+                status_code=500,
+                detail="WebSocket manager not initialized"
+            )
 
+        manager = app.state.websocket_manager
+        
+        # Ensure manager is initialized
+        if not getattr(manager, '_initialized', False):
+            initialized = await manager.initialize()
+            if not initialized:
+                logger.error("Failed to initialize WebSocket manager")
+                await websocket.close(code=1011)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to initialize WebSocket manager"
+                )
+            
+        return manager
+        
+    except Exception as e:
+        logger.error(f"Error getting WebSocket manager: {str(e)}")
+        await websocket.close(code=1011)
+        raise HTTPException(
+            status_code=500,
+            detail="WebSocket system unavailable"
+        )
+    
 @router.websocket("/tradovate/{account_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     account_id: str,
     token: str = Query(...),
+    manager: WebSocketManager = Depends(get_websocket_manager),
     db: Session = Depends(get_db)
 ):
     """WebSocket endpoint for real-time trading data"""
-    # Initialize resources
-    metrics = HeartbeatMetrics()
-    cleanup_tasks: Set[asyncio.Task] = set()
-    heartbeat_task = None
-    monitoring_task = None
-
-    logger.info(f"WebSocket connection request for account {account_id}")
-
     try:
-        # Token validation and authentication
+        # Validate token BEFORE accepting connection
         user = await validate_ws_token(token, db)
         if not user:
-            logger.error(f"WebSocket authentication failed for account {account_id}")
             await websocket.close(code=4001)
             return
 
-        # Verify account ownership
+        # Verify account BEFORE accepting connection
+        account = db.query(BrokerAccount).filter(
+            BrokerAccount.user_id == user.id,
+            BrokerAccount.account_id == account_id,
+            BrokerAccount.is_active == True,
+            BrokerAccount.deleted_at.is_(None)
+        ).first()
+
+        if not account:
+            await websocket.close(code=4003)
+            return
+
+        # Initialize connection with manager (this will handle accepting)
+        success = await manager.connect(
+            websocket=websocket,
+            client_id=account_id
+        )
+
+        if not success:
+            await websocket.close(code=4000)
+            return
+
+        # Message loop
+        try:
+            while True:
+                data = await websocket.receive_json()
+                if data.get('type') == 'heartbeat':
+                    await manager.update_heartbeat(account_id)
+                    await websocket.send_json({
+                        "type": "heartbeat_ack",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                else:
+                    await websocket.send_json({
+                        "type": "echo",
+                        "data": data,
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected normally: {account_id}")
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected during setup: {account_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {str(e)}")
+    finally:
+        await manager.disconnect(account_id)
+        logger.info(f"Cleaned up WebSocket connection for account {account_id}")
+
+async def get_account_data(account_id: str, db: Session) -> Optional[Dict[str, Any]]:
+    """Get latest account data with positions and balances"""
+    try:
         account = db.query(BrokerAccount).filter(
             BrokerAccount.account_id == account_id,
-            BrokerAccount.user_id == user.id,
             BrokerAccount.is_active == True
         ).first()
 
         if not account:
-            logger.error(f"Account verification failed: {account_id}")
-            await websocket.close(code=4003)
-            return
+            return None
 
-        # Accept connection
-        await websocket.accept()
-        logger.info(f"WebSocket connection accepted for account {account_id}")
+        # Get broker instance
+        broker = BaseBroker.get_broker_instance(account.broker_id, db)
+        
+        # Fetch latest account status
+        status = await broker.get_account_status(account)
+        positions = await broker.get_positions(account)
 
-        # Initialize WebSocket manager connection
-        success = await websocket_manager.connect(websocket, account_id, user.id)
-        if not success:
-            raise Exception(f"Failed to initialize connection manager for account {account_id}")
-
-        # Start monitoring tasks
-        heartbeat_task = asyncio.create_task(
-            heartbeat_monitor.start_monitoring(websocket, account_id, metrics)
-        )
-        cleanup_tasks.add(heartbeat_task)
-        logger.info(f"Started heartbeat monitoring for account {account_id}")
-
-        # Start connection monitoring
-        monitoring_task = asyncio.create_task(
-            monitor_connection_health(websocket, account_id, metrics)
-        )
-        cleanup_tasks.add(monitoring_task)
-
-        try:
-            # Main message loop
-            while True:
-                try:
-                    message = await websocket.receive_json()
-                    logger.debug(f"Received message: {message}") 
-                    
-                    # Handle heartbeat acknowledgments
-                    if message.get('type') == 'heartbeat_ack':
-                        logger.info(f"Routing heartbeat ack to monitor: {message}")
-                        await heartbeat_monitor.process_heartbeat_ack(account_id, message)
-                        continue
-
-                    # Process other messages
-                    await websocket_manager.handle_message(account_id, message)
-
-                except WebSocketDisconnect:
-                    logger.info(f"Client disconnected: {account_id}")
-                    break
-                except Exception as e:
-                    logger.error(f"Error processing message: {str(e)}")
-                    if websocket.client_state != WebSocketState.DISCONNECTED:
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": str(e)
-                        })
-
-        except Exception as e:
-            logger.error(f"Error in message loop: {str(e)}")
-            raise
-
+        return {
+            "account_id": account_id,
+            "status": status,
+            "positions": positions,
+            "timestamp": datetime.utcnow().isoformat()
+        }
     except Exception as e:
-        logger.error(f"WebSocket error for account {account_id}: {str(e)}")
-        if websocket.client_state != WebSocketState.DISCONNECTED:
-            await websocket.close(code=4000)
-
-    finally:
-        logger.info(f"Cleaning up connection for account {account_id}")
-        
-        # Cancel all cleanup tasks
-        for task in cleanup_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        # Stop heartbeat monitoring
-        if heartbeat_task and not heartbeat_task.done():
-            await heartbeat_monitor.stop_monitoring(account_id)
-            logger.info(f"Stopped heartbeat monitoring for account {account_id}")
-
-        # Stop other monitoring
-        if monitoring_task and not monitoring_task.done():
-            monitoring_task.cancel()
-            try:
-                await monitoring_task
-            except asyncio.CancelledError:
-                pass
-
-        # Disconnect from manager
-        await websocket_manager.disconnect(account_id)
-
-        # Log final statistics
-        duration = (datetime.utcnow() - metrics.lastHeartbeat).total_seconds() if metrics.lastHeartbeat else 0
-        logger.info(
-            f"Connection statistics for {account_id}: "
-            f"Duration={duration:.1f}s, "
-            f"Messages={metrics.totalHeartbeats}, "
-            f"Heartbeats={metrics.totalHeartbeats}"
-        )
-        
-        logger.info(f"Cleaned up WebSocket connection for account {account_id}")
+        logger.error(f"Error getting account data: {str(e)}")
+        return None
 
 async def monitor_connection_health(
     websocket: WebSocket,
@@ -326,23 +352,6 @@ async def monitor_connection_health(
         except Exception as e:
             logger.error(f"Error monitoring connection health for account {account_id}: {str(e)}")
             await asyncio.sleep(5)  # Wait before retrying
-
-@router.get("/health")
-async def websocket_health():
-    """Health check endpoint for WebSocket service"""
-    try:
-        return {
-            "status": "healthy",
-            "websocket_manager": websocket_manager.get_health_status(),
-            "heartbeat_monitor": heartbeat_monitor.get_health_status(),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="WebSocket service health check failed"
-        )
 
 @router.get("/health")
 async def websocket_health():

@@ -75,39 +75,7 @@ class WSBaseMessage(BaseModel):
             datetime: lambda dt: dt.isoformat()
         }
 
-
-# Enhanced Heartbeat Messages
-class HeartbeatMessage(WSBaseMessage):
-    """Enhanced heartbeat message with sequence tracking"""
-    type: WSMessageType = WSMessageType.HEARTBEAT
-    sequence_number: int
-    client_id: Optional[str] = None
-    account_id: str
-    metrics: Optional[Dict[str, Any]] = None
-
-class HeartbeatAckMessage(WSBaseMessage):
-    """Heartbeat acknowledgment message"""
-    type: WSMessageType = WSMessageType.HEARTBEAT_ACK
-    sequence_number: int
-    original_timestamp: datetime
-    account_id: str
-    latency: Optional[float] = None
-    client_metrics: Optional[Dict[str, Any]] = None
-
 # Authentication messages
-class HeartbeatMessage(BaseModel):
-    type: str = "heartbeat"
-    sequence_number: int
-    timestamp: str
-    account_id: str
-    metrics: Optional[Dict[str, Any]]
-
-class HeartbeatAckMessage(BaseModel):
-    type: str = "heartbeat_ack"
-    sequence_number: int
-    account_id: str
-    client_timestamp: str
-
 class WSAuthRequest(WSBaseMessage):
     """Authentication request message"""
     type: WSMessageType = WSMessageType.AUTH
@@ -238,7 +206,25 @@ class WSSystemMessage(WSBaseMessage):
     event: str
     details: Optional[Dict[str, Any]] = None
 
-# Union type for all possible messages
+# Heartbeat messages
+class HeartbeatMessage(WSBaseMessage):
+    """Heartbeat message"""
+    type: WSMessageType = WSMessageType.HEARTBEAT
+    sequence_number: int
+    client_id: Optional[str] = None
+    account_id: str
+    metrics: Optional[Dict[str, Any]] = None
+
+class HeartbeatAckMessage(WSBaseMessage):
+    """Heartbeat acknowledgment message"""
+    type: WSMessageType = WSMessageType.HEARTBEAT_ACK
+    sequence_number: int
+    original_timestamp: datetime
+    account_id: str
+    latency: Optional[float] = None
+    client_metrics: Optional[Dict[str, Any]] = None
+
+# Message type union
 WSMessage = Union[
     WSAuthRequest,
     WSAuthResponse,
@@ -299,7 +285,7 @@ def create_heartbeat_message(account_id: str, sequence_number: int, metrics: Opt
         account_id=account_id,
         sequence_number=sequence_number,
         metrics=metrics,
-        timestamp=datetime.utcnow()  # Keep as datetime, let Pydantic handle serialization
+        timestamp=datetime.utcnow()
     )
 
 def create_heartbeat_ack(

@@ -1,10 +1,8 @@
-import asyncio
-import logging
+from starlette.websockets import WebSocket, WebSocketState
 from datetime import datetime
 from typing import Dict, Optional, Set
-from starlette.websockets import WebSocketState
-from fastapi import WebSocket
-
+import asyncio
+import logging
 from .metrics import HeartbeatMetrics
 from .websocket_config import WebSocketConfig
 
@@ -28,14 +26,14 @@ class HeartbeatMonitor:
         self.background_tasks: Set[asyncio.Task] = set()
 
     async def start_monitoring(self, websocket: WebSocket, account_id: str, metrics: HeartbeatMetrics) -> bool:
-        """Start monitoring a WebSocket connection"""
         lock = await self.get_lock(account_id)
         async with lock:
             try:
                 # Check if already monitoring
                 if account_id in self._monitoring_tasks and not self._monitoring_tasks[account_id].done():
-                    logger.warning(f"Already monitoring account {account_id}")
-                    return False
+                    # Instead of just warning, stop the old monitoring first
+                    logger.info(f"Stopping existing monitoring for account {account_id}")
+                    await self.stop_monitoring(account_id)
 
                 # Store connection info
                 self._active_connections[account_id] = websocket

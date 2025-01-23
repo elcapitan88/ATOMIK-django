@@ -1,501 +1,265 @@
-import asyncio
-import logging
-import json
-import uuid
-from datetime import datetime, timedelta
 from typing import Dict, Set, Optional, Any
-from fastapi import WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
-from starlette.websockets import WebSocketState, WebSocket
-from app.db.base import SessionLocal  
+import logging
+import asyncio
+from datetime import datetime
+from fastapi import WebSocket
+from enum import Enum
 
-from ..models.websocket import (
-    WebSocketConnection,
-    ConnectionStatus,
-    MessageCategory
-)
-from ..models.user import User
-from ..models.subscription import SubscriptionStatus, SubscriptionTier
-from ..core.config import settings
-from .metrics import HeartbeatMetrics
-from .websocket_config import WebSocketConfig
+# Import new WebSocket components
+from .handlers.endpoint_handlers import TradovateEndpointHandler
+from .handlers.event_handlers import TradovateEventHandler
+from .handlers.webhook_handlers import TradovateWebhookHandler
+from .handlers.order_executor import TradovateOrderExecutor
+from .monitoring.monitor import MonitoringService
+from .scaling.resource_manager import ResourceManager
+from app.websockets.metrics import HeartbeatMetrics
+from app.websockets.heartbeat_monitor import heartbeat_monitor
+from .errors import WebSocketError, handle_websocket_error
+from .scaling.resource_manager import ResourceManager
 
 logger = logging.getLogger(__name__)
 
-class ConnectionStats:
-    """Track connection statistics"""
-    def __init__(self):
-        self.connected_at: datetime = datetime.utcnow()
-        self.last_heartbeat: datetime = datetime.utcnow()
-        self.messages_received: int = 0
-        self.messages_sent: int = 0
-        self.errors: int = 0
-        self.reconnections: int = 0
-        self.subscribed_symbols: Set[str] = set()
-
-    def update_heartbeat(self):
-        """Update last heartbeat time"""
-        self.last_heartbeat = datetime.utcnow()
-
-    def increment_errors(self):
-        """Increment error count"""
-        self.errors += 1
-
-    def increment_reconnections(self):
-        """Increment reconnection count"""
-        self.reconnections += 1
-
-class ClientMetadata:
-    """Store client connection metadata"""
-    def __init__(
-        self,
-        user_id: int,
-        client_id: str,
-        environment: str,
-        broker: Optional[str] = None,
-        ip_address: Optional[str] = None,
-        user_agent: Optional[str] = None
-    ):
-        self.user_id = user_id
-        self.client_id = client_id
-        self.environment = environment
-        self.broker = broker
-        self.ip_address = ip_address
-        self.user_agent = user_agent
-        self.created_at = datetime.utcnow()
-
-    def to_dict(self) -> dict:
-        """Convert metadata to dictionary"""
-        return {
-            "user_id": self.user_id,
-            "client_id": self.client_id,
-            "environment": self.environment,
-            "broker": self.broker,
-            "ip_address": self.ip_address,
-            "user_agent": self.user_agent,
-            "created_at": self.created_at.isoformat()
-        }
-
-class ConnectionInfo:
-    """Store complete connection information"""
-    def __init__(
-        self,
-        websocket: WebSocket,
-        client_id: str,
-        user_id: int,
-        metadata: ClientMetadata,
-        stats: ConnectionStats
-    ):
-        self.websocket = websocket
-        self.client_id = client_id
-        self.user_id = user_id
-        self.metadata = metadata
-        self.stats = stats
-        self.status = ConnectionStatus.CONNECTED
-
-    async def close(self):
-        """Close the websocket connection"""
-        try:
-            await self.websocket.close()
-        except Exception as e:
-            logger.error(f"Error closing websocket: {str(e)}")
-
-    def get_connection_info(self) -> dict:
-        """Get complete connection information"""
-        return {
-            "client_id": self.client_id,
-            "user_id": self.user_id,
-            "status": self.status,
-            "metadata": self.metadata.to_dict(),
-            "stats": {
-                "connected_at": self.stats.connected_at.isoformat(),
-                "last_heartbeat": self.stats.last_heartbeat.isoformat(),
-                "messages_received": self.stats.messages_received,
-                "messages_sent": self.stats.messages_sent,
-                "errors": self.stats.errors,
-                "reconnections": self.stats.reconnections,
-                "subscribed_symbols": list(self.stats.subscribed_symbols)
-            }
-        }
-
-class ManagerConfig:
-    """Configuration for WebSocket manager"""
-    def __init__(self):
-        self.heartbeat_interval: int = 30
-        self.connection_timeout: int = 60
-        self.max_connections_per_user: int = 5
-        self.max_subscriptions_per_client: int = 50
-        self.cleanup_interval: int = 300
-        self.max_message_size: int = 1024 * 1024  # 1MB
-        self.enable_message_logging: bool = True
-        self.broker_configs: Dict[str, Dict[str, Any]] = {}
-        
-        # Subscription tier limits
-        self.tier_limits = {
-            SubscriptionTier.STARTED: {
-                "max_connections": 1,
-                "max_subscriptions": 1,
-                "data_delay": 15,  # seconds
-            },
-            SubscriptionTier.PLUS: {
-                "max_connections": 5,
-                "max_subscriptions": 10,
-                "data_delay": 0,
-            },
-            SubscriptionTier.PRO: {
-                "max_connections": 10,
-                "max_subscriptions": float('inf'),
-                "data_delay": 0,
-            },
-            SubscriptionTier.LIFETIME: {
-                "max_connections": 10,
-                "max_subscriptions": float('inf'),
-                "data_delay": 0,
-            }
-        }
-
-    def get_tier_limits(self, tier: SubscriptionTier) -> dict:
-        """Get limits for a subscription tier"""
-        return self.tier_limits.get(tier, self.tier_limits[SubscriptionTier.STARTED])
+class WebSocketState(str, Enum):
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    RECONNECTING = "RECONNECTING"
+    ERROR = "ERROR"
 
 class WebSocketManager:
     """
-    Manages WebSocket connections, heartbeats, and message handling.
-    Implements connection pooling, heartbeat monitoring, and error recovery.
+    WebSocket manager that bridges old and new implementations.
+    Maintains backward compatibility while using new features.
     """
+    
     def __init__(self):
-        # Connection management
-        self.connections: Dict[str, WebSocket] = {}
-        self.connection_states: Dict[str, str] = {}
-        self.metrics: Dict[str, HeartbeatMetrics] = {}
+        # Initialize new components
+        self.resource_manager = ResourceManager()
+        self.monitoring_service = MonitoringService()
+        self.heartbeat_monitor = heartbeat_monitor
+        self.order_executor = TradovateOrderExecutor()
+        self.event_handler = TradovateEventHandler()
+        self.endpoint_handler = TradovateEndpointHandler(
+            config={
+                "path": "/ws/tradovate",
+                "auth_required": True
+            }
+        )
         
-        # Configuration
-        self.config = WebSocketConfig.HEARTBEAT
-        self.is_initialized = False
-        
-        # Message handling
-        self.message_queue: Dict[str, asyncio.Queue] = {}
-        self.pending_messages: Dict[str, Set[str]] = {}
-        
-        # Connection tracking
-        self.reconnect_attempts: Dict[str, int] = {}
-        self.MAX_RECONNECT_ATTEMPTS = 5
-        self.HEARTBEAT_INTERVAL = 30  # seconds
-        self.CONNECTION_TIMEOUT = 10  # seconds
-        
-        # Circuit breaker pattern
-        self.circuit_breakers: Dict[str, Dict[str, Any]] = {}
-        
-        # Background tasks
-        self.cleanup_task: Optional[asyncio.Task] = None
-        self.heartbeat_tasks: Dict[str, asyncio.Task] = {}
+        # Maintain compatibility with old implementation
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.connection_tokens: Dict[str, str] = {}
+        self.user_connections: Dict[str, Set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+        self._initialized = False
 
     async def initialize(self) -> bool:
         """Initialize the WebSocket manager"""
-        try:
-            if self.is_initialized:
-                logger.info("WebSocket manager already initialized")
-                return True
-
-            logger.info("Initializing WebSocket manager...")
-            
-            # Clear any existing connections
-            await self.cleanup()
-            
-            # Start cleanup task
-            self.cleanup_task = asyncio.create_task(self._periodic_cleanup())
-            
-            self.is_initialized = True
-            logger.info("WebSocket manager initialized successfully")
+        if self._initialized:
             return True
 
+        try:
+            await self.resource_manager.initialize()
+            self._initialized = True
+            return True
         except Exception as e:
             logger.error(f"Failed to initialize WebSocket manager: {str(e)}")
             return False
 
-    async def connect(self, websocket: WebSocket, account_id: str, user_id: int) -> bool:
-        """Store a websocket connection"""
-        try:
-            # Initialize metrics for this connection
-            self.metrics[account_id] = HeartbeatMetrics()
-            self.connections[account_id] = websocket
-            self.connection_states[account_id] = 'connected'
-            self.message_queue[account_id] = asyncio.Queue()
-            self.pending_messages[account_id] = set()
+    def get_status(self) -> Dict[str, Any]:
+        """Get current WebSocket manager status."""
+        return {
+            "active_connections": len(self.active_connections),
+            "user_connections": len(self.user_connections),
+            "monitoring_active": self._initialized and self.monitoring_service.is_running(),
+            "initialized": self._initialized
+        }
+
+    async def connect(
+        self,
+        websocket: WebSocket,
+        client_id: str,  # Changed from account_id
+    ) -> bool:
+        """
+        Establish new WebSocket connection
+        
+        Args:
+            websocket: The WebSocket connection
+            client_id: Unique identifier for the client
             
-            # Initialize circuit breaker
-            self.circuit_breakers[account_id] = {
-                'failures': 0,
-                'last_failure': None,
-                'status': 'closed'
-            }
-
-            # Start heartbeat task
-            self.heartbeat_tasks[account_id] = asyncio.create_task(
-                self._heartbeat_loop(account_id)
-            )
-
-            logger.info(f"New connection stored: {account_id}")
-            logger.info(f"Initial metrics created for account {account_id}")
-            return True
+        Returns:
+            bool: True if connection successful, False otherwise
+        """
+        try:
+            async with self._lock:
+                # Store connection info
+                self.active_connections[client_id] = websocket
+                
+                # Initialize connection details
+                self.connection_details[client_id] = {
+                    'connected_at': datetime.utcnow(),
+                    'last_heartbeat': datetime.utcnow(),
+                    'message_count': 0
+                }
+                
+                # Initialize metrics
+                self.metrics[client_id] = HeartbeatMetrics()
+                
+                logger.info(f"New WebSocket connection established: {client_id}")
+                return True
 
         except Exception as e:
-            logger.error(f"Error storing connection: {str(e)}")
-            await self.disconnect(account_id)
+            logger.error(f"Error establishing connection: {str(e)}")
             return False
-
-    async def disconnect(self, account_id: str) -> None:
-        """Remove a websocket connection and cleanup resources"""
+        
+    async def disconnect(self, client_id: str) -> None:
+        """Clean up connection resources"""
         try:
-            # Cancel heartbeat task
-            if account_id in self.heartbeat_tasks:
-                self.heartbeat_tasks[account_id].cancel()
-                del self.heartbeat_tasks[account_id]
-
-            # Close WebSocket
-            if account_id in self.connections:
-                try:
-                    websocket = self.connections[account_id]
-                    try:
+            async with self._lock:
+                if client_id in self.active_connections:
+                    websocket = self.active_connections[client_id]
+                    if websocket.client_state == WebSocketState.CONNECTED:
                         await websocket.close()
-                    except RuntimeError:
-                        # Socket might already be closed
-                        pass
-                except Exception as e:
-                    logger.error(f"Error closing websocket for {account_id}: {str(e)}")
-
-            # Cleanup resources
-            self.connections.pop(account_id, None)
-            self.connection_states.pop(account_id, None)
-            self.metrics.pop(account_id, None)
-            self.message_queue.pop(account_id, None)
-            self.pending_messages.pop(account_id, None)
-            self.circuit_breakers.pop(account_id, None)
-            self.reconnect_attempts.pop(account_id, None)
-
-            logger.info(f"Connection removed: {account_id}")
+                    
+                    # Cleanup all resources
+                    self.active_connections.pop(client_id, None)
+                    self.connection_details.pop(client_id, None)
+                    self.metrics.pop(client_id, None)
+                    
+                    # Release from resource manager
+                    await self.resource_manager.release_connection(client_id)
+                    
+                    logger.info(f"Cleaned up connection: {client_id}")
 
         except Exception as e:
-            logger.error(f"Error during disconnect: {str(e)}")
+            logger.error(f"Error in disconnect: {str(e)}")
 
-    async def handle_message(self, account_id: str, message: Dict[str, Any]) -> None:
-        """Handle incoming messages"""
+    async def update_heartbeat(self, client_id: str) -> bool:
+        """Update last heartbeat time for a connection"""
         try:
-            if account_id not in self.connections:
-                logger.error(f"No connection found for account {account_id}")
-                return
-
-            websocket = self.connections[account_id]
-            message_type = message.get('type')
-
-            if message_type == 'heartbeat':
-                await self.handle_heartbeat(account_id)
-            else:
-                # Queue message for processing
-                await self.message_queue[account_id].put(message)
-                
-                # Process queued messages
-                await self._process_message_queue(account_id)
-
+            if client_id in self.connection_details:
+                self.connection_details[client_id]["last_heartbeat"] = datetime.utcnow()
+                return True
+            return False
         except Exception as e:
-            logger.error(f"Error handling message: {str(e)}")
-            await self._handle_message_error(account_id, e)
-
-    async def handle_heartbeat(self, account_id: str) -> bool:
-        """Handle heartbeat message from client"""
-        try:
-            if account_id not in self.connections:
-                logger.error(f"No connection found for account {account_id}")
-                return False
-
-            metrics = self.metrics.get(account_id)
-            if not metrics:
-                metrics = HeartbeatMetrics()
-                self.metrics[account_id] = metrics
-
-            # Record heartbeat
-            await metrics.record_heartbeat()
-            
-            # Reset circuit breaker on successful heartbeat
-            self.circuit_breakers[account_id]['failures'] = 0
-            self.circuit_breakers[account_id]['status'] = 'closed'
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Error handling heartbeat for account {account_id}: {str(e)}")
-            await self._handle_heartbeat_error(account_id, e)
+            logger.error(f"Error updating heartbeat: {str(e)}")
             return False
 
-    async def _handle_heartbeat_error(self, account_id: str, error: Exception) -> None:
-        """Handle heartbeat errors"""
-        try:
-            metrics = self.metrics.get(account_id)
-            if metrics:
-                missed = await metrics.record_missed()
-                
-                # Update circuit breaker
-                breaker = self.circuit_breakers[account_id]
-                breaker['failures'] += 1
-                breaker['last_failure'] = datetime.utcnow()
-                
-                if breaker['failures'] >= self.config['MAX_MISSED']:
-                    breaker['status'] = 'open'
-                    await self.disconnect(account_id)
-
-        except Exception as e:
-            logger.error(f"Error handling heartbeat error: {str(e)}")
-
-    async def _heartbeat_loop(self, account_id: str) -> None:
-        """Heartbeat monitoring loop for a connection"""
-        try:
-            while True:
+    # UPDATE: Add method to broadcast messages
+    async def broadcast_message(self, message: Dict[str, Any], exclude: Optional[str] = None) -> None:
+        """Broadcast message to all connections except excluded one"""
+        disconnected = []
+        for client_id, websocket in self.active_connections.items():
+            if client_id != exclude:
                 try:
-                    websocket = self.connections.get(account_id)
-                    if not websocket:
-                        break
-
-                    try:
-                        # Send heartbeat
-                        await websocket.send_json({
-                            "type": "heartbeat",
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
-
-                        # Update metrics
-                        metrics = self.metrics[account_id]
-                        metrics.totalHeartbeats += 1
-                        metrics.lastHeartbeat = datetime.utcnow()
-
-                    except RuntimeError:
-                        # Socket is closed or closing
-                        break
-                    except Exception as send_error:
-                        logger.error(f"Error sending heartbeat to {account_id}: {str(send_error)}")
-                        await self._handle_heartbeat_error(account_id, send_error)
-                        continue
-
-                    # Wait for next interval
-                    await asyncio.sleep(self.HEARTBEAT_INTERVAL)
-
+                    await websocket.send_json(message)
                 except Exception as e:
-                    logger.error(f"Error in heartbeat loop: {str(e)}")
-                    await self._handle_heartbeat_error(account_id, e)
+                    logger.error(f"Error broadcasting to {client_id}: {str(e)}")
+                    disconnected.append(client_id)
 
-        except asyncio.CancelledError:
-            logger.info(f"Heartbeat loop cancelled for account {account_id}")
-        except Exception as e:
-            logger.error(f"Heartbeat loop error: {str(e)}")
-        finally:
-            await self.disconnect(account_id)
+        # Clean up disconnected clients
+        for client_id in disconnected:
+            await self.disconnect(client_id)
 
-    async def _process_message_queue(self, account_id: str) -> None:
-        """Process queued messages for an account"""
-        while True:
-            try:
-                # Get next message
-                message = await self.message_queue[account_id].get()
-                
-                # Process message
-                websocket = self.connections.get(account_id)
-                if websocket:
-                    try:
-                        await websocket.send_json({
-                            "type": "message_processed",
-                            "original_message": message,
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
-                    except RuntimeError:
-                        # Socket is closed or closing
-                        break
-                    except Exception as send_error:
-                        logger.error(f"Error sending message to {account_id}: {str(send_error)}")
-                        break
+    def get_connection_status(self, client_id: str) -> Optional[Dict[str, Any]]:
+        """Get status of a specific connection"""
+        if client_id not in self.connection_details:
+            return None
+            
+        details = self.connection_details[client_id]
+        metrics = self.metrics.get(client_id)
+        
+        return {
+            "connected_at": details["connected_at"].isoformat(),
+            "last_heartbeat": details["last_heartbeat"].isoformat(),
+            "message_count": details["message_count"],
+            "metrics": metrics.get_metrics() if metrics else None
+        }
 
-            except asyncio.QueueEmpty:
-                break
-            except Exception as e:
-                logger.error(f"Error processing message queue: {str(e)}")
-                break
+    # NEW: Add method to get overall status
+    def get_status(self) -> Dict[str, Any]:
+        """Get overall WebSocket manager status"""
+        return {
+            "active_connections": len(self.active_connections),
+            "initialized": self._initialized,
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
-    async def _periodic_cleanup(self) -> None:
-        """Periodic cleanup of dead connections"""
-        while True:
-            try:
-                current_time = datetime.utcnow()
-                
-                for account_id in list(self.connections.keys()):
-                    try:
-                        metrics = self.metrics.get(account_id)
-                        if not metrics:
-                            continue
-                            
-                        # Check last heartbeat
-                        if metrics.lastHeartbeat:
-                            time_since_heartbeat = (current_time - metrics.lastHeartbeat).total_seconds()
-                            if time_since_heartbeat > self.config['INTERVAL'] * 2:
-                                logger.warning(f"No heartbeat received for {time_since_heartbeat}s from {account_id}")
-                                await self.disconnect(account_id)
-
-                    except Exception as e:
-                        logger.error(f"Error cleaning up connection {account_id}: {str(e)}")
-
-                await asyncio.sleep(self.config['CLEANUP_INTERVAL'])
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in cleanup loop: {str(e)}")
-                await asyncio.sleep(60)  # Wait before retrying
-
-    async def cleanup(self) -> None:
-        """Cleanup all connections and resources"""
+    async def send_personal_message(self, message: Any, websocket: WebSocket):
+        """Send a message to a specific WebSocket connection."""
         try:
-            # Cancel cleanup task
-            if self.cleanup_task:
-                self.cleanup_task.cancel()
-                self.cleanup_task = None
+            await websocket.send_json(message)
+        except Exception as e:
+            logger.error(f"Error sending personal message: {str(e)}")
+            await self.disconnect(websocket)
 
-            # Disconnect all connections
-            for account_id in list(self.connections.keys()):
-                await self.disconnect(account_id)
+    async def broadcast(self, message: Any):
+        """Broadcast a message to all active connections."""
+        disconnected = []
+        
+        for connection_id, websocket in self.active_connections.items():
+            try:
+                await websocket.send_json(message)
+            except Exception as e:
+                logger.error(f"Error broadcasting to {connection_id}: {str(e)}")
+                disconnected.append(websocket)
 
-            # Clear all collections
-            self.connections.clear()
-            self.connection_states.clear()
-            self.metrics.clear()
-            self.message_queue.clear()
-            self.pending_messages.clear()
-            self.circuit_breakers.clear()
-            self.reconnect_attempts.clear()
-            self.heartbeat_tasks.clear()
+        # Clean up disconnected websockets
+        for websocket in disconnected:
+            await self.disconnect(websocket)
 
-            self.is_initialized = False
+    async def send_to_user(self, user_id: str, message: Any):
+        """Send a message to all connections of a specific user."""
+        if user_id in self.user_connections:
+            disconnected = []
+            
+            for websocket in self.user_connections[user_id]:
+                try:
+                    await websocket.send_json(message)
+                except Exception as e:
+                    logger.error(f"Error sending to user {user_id}: {str(e)}")
+                    disconnected.append(websocket)
+
+            # Clean up disconnected websockets
+            for websocket in disconnected:
+                await self.disconnect(websocket)
+
+    async def associate_user(self, user_id: str, websocket: WebSocket, token: str):
+        """Associate a WebSocket connection with a user."""
+        async with self._lock:
+            if user_id not in self.user_connections:
+                self.user_connections[user_id] = set()
+            
+            self.user_connections[user_id].add(websocket)
+            self.connection_tokens[str(id(websocket))] = token
+            
+            logger.info(f"Associated user {user_id} with WebSocket")
+
+    async def cleanup(self):
+        """Clean up resources and close all connections."""
+        try:
+            # Stop monitoring service
+            if self._initialized:
+                await self.monitoring_service.stop()
+
+            # Close all connections
+            async with self._lock:
+                for websocket in self.active_connections.values():
+                    await websocket.close()
+                
+                self.active_connections.clear()
+                self.connection_tokens.clear()
+                self.user_connections.clear()
+
+            self._initialized = False
             logger.info("WebSocket manager cleaned up successfully")
-
+            
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
 
-    def get_connection_stats(self, account_id: str) -> Dict[str, Any]:
-        """Get connection statistics"""
-        return {
-            "connection_state": self.connection_states.get(account_id),
-            "metrics": self.metrics.get(account_id),
-            "circuit_breaker": self.circuit_breakers.get(account_id),
-            "reconnect_attempts": self.reconnect_attempts.get(account_id, 0),
-            "pending_messages": len(self.pending_messages.get(account_id, set())),
-            "queued_messages": self.message_queue.get(account_id, asyncio.Queue()).qsize() if account_id in self.message_queue else 0
-        }
+    async def shutdown(self):
+        """Shutdown the WebSocket manager."""
+        await self.cleanup()
 
-    def get_status(self) -> Dict[str, Any]:
-        """Get overall manager status"""
-        return {
-            "active_connections": len(self.connections),
-            "initialized": self.is_initialized,
-            "cleanup_task_running": bool(self.cleanup_task and not self.cleanup_task.done()),
-            "total_pending_messages": sum(len(msgs) for msgs in self.pending_messages.values()),
-            "total_queued_messages": sum(queue.qsize() for queue in self.message_queue.values())
-        }
-
-# Create singleton instance
+# Create a singleton instance
 websocket_manager = WebSocketManager()

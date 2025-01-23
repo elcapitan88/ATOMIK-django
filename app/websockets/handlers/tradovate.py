@@ -1,614 +1,734 @@
-import asyncio
-import json
-import logging
-import websockets
-import random
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
-from decimal import Decimal
-from .base import BrokerWebSocketHandler, WSConnectionStatus, WSMessageType
-from ...core.config import settings
-from ...models.tradovate import TradovateToken
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+import asyncio
+import logging
+import json
+import base64
+import uuid
+import traceback
+from datetime import datetime, timedelta
+import requests
+import aiohttp
+from typing import Dict, List, Optional, Any, Union
+from fastapi import HTTPException
 
+# Local relative imports using proper paths
+from ...core.brokers.base import BaseBroker
+from ...core.brokers.config import BrokerEnvironment, ConnectionMethod
+from ...core.config import settings
+from ...db.base import SessionLocal
+from ...models.broker import BrokerAccount, BrokerCredentials
+from ...models.user import User
+from ...models.webhook import Webhook
+from ...models.subscription import SubscriptionTier, SubscriptionStatus
+from ...models.strategy import ActivatedStrategy
+
+# Create logger
 logger = logging.getLogger(__name__)
 
-class CircuitBreaker:
-    """Circuit breaker for handling connection failures"""
-    def __init__(self):
-        self.failure_count = 0
-        self.last_failure = None
-        self.state = 'closed'  # closed, open, half-open
-        self.threshold = 5  # failures before opening
-        self.timeout = 60  # seconds to wait before trying again
+# Custom exceptions - let's move these to a separate exceptions file later
+class AuthenticationError(Exception):
+    """Authentication-related errors"""
+    pass
 
-    def record_failure(self):
-        """Record a failure and potentially open the circuit"""
-        self.failure_count += 1
-        self.last_failure = datetime.utcnow()
-        if self.failure_count >= self.threshold:
-            self.state = 'open'
+class ConnectionError(Exception):
+    """Connection-related errors"""
+    pass
 
-    def record_success(self):
-        """Record a success and potentially close the circuit"""
-        self.failure_count = 0
-        self.state = 'closed'
+class OrderError(Exception):
+    """Order-related errors"""
+    pass
 
-    def can_execute(self) -> bool:
-        """Check if operation should be allowed"""
-        if self.state == 'closed':
-            return True
-        
-        if self.state == 'open':
-            if datetime.utcnow() - self.last_failure > timedelta(seconds=self.timeout):
-                self.state = 'half-open'
-                return True
-            return False
-        
-        return self.state == 'half-open'
-
-class MessageQueue:
-    """Queue for handling message backlog during reconnection"""
-    def __init__(self, max_size: int = 1000):
-        self.queue = asyncio.Queue(maxsize=max_size)
-        self.processing = False
-
-    async def add_message(self, message: Dict[str, Any]):
-        """Add message to queue"""
-        try:
-            await self.queue.put(message)
-        except asyncio.QueueFull:
-            logger.warning("Message queue full, dropping oldest message")
-            self.queue.get_nowait()
-            await self.queue.put(message)
-
-    async def get_message(self) -> Optional[Dict[str, Any]]:
-        """Get message from queue"""
-        try:
-            return await self.queue.get()
-        except asyncio.QueueEmpty:
-            return None
-
-    def clear(self):
-        """Clear all messages from queue"""
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-
-class TradovateWebSocketHandler(BrokerWebSocketHandler):
-    def __init__(self, db: Session, user_id: int, environment: str = 'demo'):
-        """Initialize Tradovate WebSocket handler"""
-        super().__init__()
-        self.db = db
-        self.user_id = user_id
-        self.environment = environment
-        self.ws_url = (
-            settings.TRADOVATE_LIVE_WS_URL 
-            if environment == 'live' 
-            else settings.TRADOVATE_DEMO_WS_URL
-        )
-        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
-        self.circuit_breaker = CircuitBreaker()
-        self.message_queue = MessageQueue()
-        self.connection_lock = asyncio.Lock()
-        self.message_handlers = {
-            'md': self._handle_market_data,
-            'order': self._handle_order_update,
-            'account': self._handle_account_update,
-            'error': self._handle_error_message
+class TradovateBroker(BaseBroker):
+    """Tradovate broker implementation"""
+    
+    def __init__(self, broker_id: str, db: Session):
+        super().__init__(broker_id, db)
+        self.api_urls = {
+            'demo': settings.TRADOVATE_DEMO_API_URL,
+            'live': settings.TRADOVATE_LIVE_API_URL
         }
-        self.last_reconnect_time = None
-        self.subscription_state = set()
+        self.ws_urls = {
+            'demo': settings.TRADOVATE_DEMO_WS_URL,
+            'live': settings.TRADOVATE_LIVE_WS_URL
+        }
 
-    async def execute_with_circuit_breaker(self, operation):
-        """Execute an operation with circuit breaker protection"""
-        if not self.circuit_breaker.can_execute():
-            raise Exception("Circuit breaker is open")
-        
+    async def _make_request(
+        self, 
+        method: str, 
+        url: str, 
+        data: Optional[dict | str] = None, 
+        headers: Optional[dict] = None
+    ) -> Any:
+        """Make HTTP request to Tradovate API"""
         try:
-            result = await operation()
-            self.circuit_breaker.record_success()
-            return result
+            async with aiohttp.ClientSession() as session:
+                request_kwargs = {
+                    'method': method,
+                    'url': url,
+                    'headers': headers or {}
+                }
+
+                if data:
+                    # Always send JSON data
+                    request_kwargs['json'] = data if isinstance(data, dict) else json.loads(data)
+
+                async with session.request(**request_kwargs) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Request failed - Status: {response.status}, URL: {url}, Error: {error_text}")
+                        raise AuthenticationError(f"Request failed with status {response.status}: {error_text}")
+                    
+                    return await response.json()
+
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP request failed: {str(e)}")
+            raise AuthenticationError(f"HTTP request failed: {str(e)}")
         except Exception as e:
-            self.circuit_breaker.record_failure()
-            raise
+            logger.error(f"Unexpected error in request: {str(e)}")
+            raise AuthenticationError(f"Request error: {str(e)}")
 
-    async def connect(self) -> bool:
-        """Establish connection to Tradovate WebSocket"""
-        async with self.connection_lock:
-            if self.status in [WSConnectionStatus.CONNECTED, WSConnectionStatus.CONNECTING]:
-                return True
 
-            try:
-                self.status = WSConnectionStatus.CONNECTING
-                
-                # Connect with circuit breaker
-                async def connect_operation():
-                    self.websocket = await websockets.connect(
-                        self.ws_url,
-                        ping_interval=20,
-                        ping_timeout=10,
-                        close_timeout=10
-                    )
-                    return True
-
-                connected = await self.execute_with_circuit_breaker(connect_operation)
-                if not connected:
-                    return False
-
-                # Authenticate immediately after connection
-                auth_success = await self.authenticate({})
-                if not auth_success:
-                    await self.disconnect()
-                    return False
-
-                self.status = WSConnectionStatus.CONNECTED
-                self.reset_error_count()
-                self.reconnect_attempts = 0
-                self.update_heartbeat()
-
-                # Start message processor
-                asyncio.create_task(self._process_messages())
-                
-                # Resubscribe to previous subscriptions
-                if self.subscription_state:
-                    await self.subscribe(list(self.subscription_state))
-
-                logger.info(f"Connected to Tradovate WebSocket ({self.environment})")
-                return True
-
-            except Exception as e:
-                self.status = WSConnectionStatus.ERROR
-                logger.error(f"Failed to connect to Tradovate: {str(e)}")
+    def _validate_token_response(self, tokens: dict) -> bool:
+        """Validate token response has required fields"""
+        required_fields = ['access_token', 'expires_in']  
+    
+        for field in required_fields:
+            if not tokens.get(field):
+                logger.error(f"Missing required field in token response: {field}")
                 return False
-
-    async def disconnect(self) -> bool:
-        """Disconnect from Tradovate WebSocket"""
-        try:
-            if self.websocket:
-                await self.websocket.close()
-                self.websocket = None
-            self.status = WSConnectionStatus.DISCONNECTED
-            await self.cleanup()
-            logger.info("Disconnected from Tradovate WebSocket")
-            return True
-        except Exception as e:
-            logger.error(f"Error disconnecting from Tradovate: {str(e)}")
+            
+        if not isinstance(tokens['expires_in'], (int, float)):
+            logger.error("Invalid expires_in value")
             return False
+        
+        return True
 
-    async def reconnect(self) -> bool:
-        """Attempt to reconnect with exponential backoff"""
-        if self.reconnect_attempts >= self.max_reconnect_attempts:
-            logger.error("Max reconnection attempts reached")
-            return False
+    async def _exchange_code_for_tokens(self, code: str, environment: str) -> dict:
+        """Exchange authorization code for tokens"""
+        exchange_url = (
+            settings.TRADOVATE_LIVE_EXCHANGE_URL 
+            if environment == 'live'  # Just use the environment parameter directly
+            else settings.TRADOVATE_DEMO_EXCHANGE_URL
+        )
 
         try:
-            self.status = WSConnectionStatus.RECONNECTING
-            self.reconnect_attempts += 1
-            
-            # Calculate backoff time
-            backoff = min(300, (2 ** self.reconnect_attempts) + random.uniform(0, 1))
-            logger.info(f"Waiting {backoff:.2f}s before reconnection attempt {self.reconnect_attempts}")
-            await asyncio.sleep(backoff)
-            
-            self.last_reconnect_time = datetime.utcnow()
-            
-            # Attempt reconnection with circuit breaker
-            connected = await self.execute_with_circuit_breaker(self.connect)
-            
-            if connected:
-                # Process any queued messages
-                await self._process_message_queue()
-                
-            return connected
-
-        except Exception as e:
-            logger.error(f"Reconnection failed: {str(e)}")
-            return False
-
-    async def authenticate(self, credentials: Dict[str, Any]) -> bool:
-        """Authenticate with Tradovate WebSocket"""
-        try:
-            # Get valid token from database
-            token = (
-                self.db.query(TradovateToken)
-                .filter(
-                    TradovateToken.user_id == self.user_id,
-                    TradovateToken.environment == self.environment,
-                    TradovateToken.is_valid == True
-                )
-                .first()
+            response = requests.post(
+                exchange_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
+                    "client_id": settings.TRADOVATE_CLIENT_ID,
+                    "client_secret": settings.TRADOVATE_CLIENT_SECRET,
+                },
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
             )
 
-            if not token:
-                logger.error("No valid Tradovate token found")
-                return False
+            if response.status_code != 200:
+                logger.error(f"Token exchange failed with status {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                raise AuthenticationError(
+                    f"Token exchange failed: {response.text}"
+                )
 
-            auth_message = {
-                "type": "auth",
-                "token": token.access_token
+            tokens = response.json()
+            
+            if not self._validate_token_response(tokens):
+                raise AuthenticationError("Invalid token response from Tradovate")
+
+            return tokens
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error during token exchange: {str(e)}")
+            raise AuthenticationError("Failed to connect to Tradovate authentication service")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse token response: {str(e)}")
+            raise AuthenticationError("Invalid response from Tradovate authentication service")
+
+    async def initialize_api_key(
+        self,
+        user: User,
+        environment: str,
+        credentials: Dict[str, Any]
+) -> Dict[str, Any]:
+        """Initialize API key connection - Not supported for Tradovate"""
+        raise NotImplementedError("Tradovate does not support API key authentication")
+
+    async def initialize_oauth(
+        self,
+        user: User,
+        environment: str
+    ) -> Dict[str, Any]:
+        """Initialize OAuth flow for Tradovate"""
+        try:
+            # Generate state token
+            state = self.generate_state_token(user.id, environment)
+
+            # Build OAuth URL
+            base_url = settings.TRADOVATE_AUTH_URL
+            if environment == 'demo':
+                base_url = base_url.replace('live', 'demo')
+
+            params = {
+                "client_id": settings.TRADOVATE_CLIENT_ID,
+                "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
+                "response_type": "code",
+                "scope": "trading",
+                "state": state
             }
 
-            await self.send_message(auth_message)
-            
-            # Wait for auth response
-            response = await self._wait_for_message("auth")
-            if response and response.get("success"):
-                logger.info("Successfully authenticated with Tradovate")
-                return True
-            else:
-                logger.error("Tradovate authentication failed")
-                return False
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            auth_url = f"{base_url}?{query_string}"
 
-        except Exception as e:
-            logger.error(f"Authentication error: {str(e)}")
-            return False
-
-    async def subscribe(self, symbols: List[str]) -> bool:
-        """Subscribe to market data for specified symbols"""
-        try:
-            subscription_message = {
-                "type": "subscribe",
-                "symbols": symbols
+            return {
+                "auth_url": auth_url,
+                "broker_id": self.broker_id,
+                "environment": environment
             }
 
-            success = await self.send_message(subscription_message)
-            if success:
-                self.subscription_state.update(symbols)
-                logger.info(f"Subscribed to symbols: {symbols}")
-                return True
-            return False
-
         except Exception as e:
-            logger.error(f"Subscription error: {str(e)}")
-            return False
+            logger.error(f"OAuth initialization failed: {str(e)}")
+            raise
 
-    async def send_message(self, message: Dict[str, Any]) -> bool:
-        """Send a message to Tradovate WebSocket"""
-        if not self.is_connected() or not self.websocket:
-            # Queue message for later if not connected
-            await self.message_queue.add_message(message)
-            return False
-
-        try:
-            await self.websocket.send(json.dumps(message))
-            return True
-        except Exception as e:
-            logger.error(f"Error sending message: {str(e)}")
-            await self.handle_error(e)
-            return False
-
-    async def handle_message(self, message: Dict[str, Any]) -> None:
-        """Handle incoming messages from Tradovate"""
-        try:
-            message_type = message.get('type')
-            handler = self.message_handlers.get(message_type)
-            
-            if handler:
-                await handler(message)
-            else:
-                logger.warning(f"Unknown message type: {message_type}")
-
-        except Exception as e:
-            logger.error(f"Error handling message: {str(e)}")
-            await self.handle_error(e)
-
-    async def handle_error(self, error: Exception) -> None:
-        """Enhanced error handling with metrics"""
-        self.increment_error_count()
-        logger.error(f"WebSocket error: {str(error)}")
-        
-        # Update error metrics
-        error_type = type(error).__name__
-        await self._update_error_metrics(error_type)
-        
-        if self.error_count >= self.max_errors:
-            logger.error("Max error count reached, initiating reconnect")
-            if self.should_reconnect():
-                await self.reconnect()
-
-    async def _update_error_metrics(self, error_type: str):
-        """Update error metrics for monitoring"""
-        try:
-            # Update Redis metrics if available
-            if hasattr(self, 'websocket_manager') and self.websocket_manager.redis:
-                key = f"ws:errors:{self.user_id}:{error_type}"
-                await self.websocket_manager.redis.incr(key)
-                await self.websocket_manager.redis.expire(key, 86400)  # 24 hours
-        except Exception as e:
-            logger.error(f"Failed to update error metrics: {str(e)}")
-
-    async def _process_messages(self) -> None:
-        """Background task to process incoming messages"""
-        while True:
-            try:
-                if not self.websocket:
-                    await asyncio.sleep(1)
-                    continue
-
-                message = await self.websocket.recv()
-                if not message:
-                    continue
-
-                data = json.loads(message)
-                await self.handle_message(data)
-                self.update_heartbeat()
-
-            except websockets.exceptions.ConnectionClosed:
-                logger.error("WebSocket connection closed")
-                if self.should_reconnect():
-                    await self.reconnect()
-                break
-            except Exception as e:
-                logger.error(f"Error processing message: {str(e)}")
-                await self.handle_error(e)
-
-    async def _process_message_queue(self):
-        """Process queued messages after reconnection"""
-        while True:
-            message = await self.message_queue.get_message()
-            if not message:
-                break
-                
-            await self.send_message(message)
-            await asyncio.sleep(0.1)  # Prevent flooding
-
-    async def _wait_for_message(self, expected_type: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
-        """Wait for a specific type of message response"""
-        try:
-            if not self.websocket:
-                raise Exception("Not connected")
-
-            async with asyncio.timeout(timeout):
-                while True:
-                    message = await self.websocket.recv()
-                    data = json.loads(message)
-                    if data.get("type") == expected_type:
-                        return data
-
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for {expected_type} message")
-            return None
-        except Exception as e:
-            logger.error(f"Error waiting for message: {str(e)}")
-            return None
-
-    # Message handlers
-    async def _handle_market_data(self, message: Dict[str, Any]) -> None:
-        """Handle market data messages"""
-        try:
-            processed_data = await self.process_market_data(message)
-            if processed_data:
-                await self.websocket_manager.broadcast_market_data(
-                    processed_data["symbol"],
-                    processed_data
-                )
-        except Exception as e:
-            logger.error(f"Error handling market data: {str(e)}")
-
-    async def _handle_order_update(self, message: Dict[str, Any]) -> None:
-        """Handle order update messages"""
-        try:
-            processed_data = await self.process_order_update(message)
-            if processed_data:
-                await self.websocket_manager.broadcast_to_user(
-                    self.user_id,
-                    {
-                        "type": WSMessageType.ORDER_UPDATE,
-                        "data": processed_data
-                    }
-                )
-        except Exception as e:
-            logger.error(f"Error handling order update: {str(e)}")
-
-    async def _handle_account_update(self, message: Dict[str, Any]) -> None:
-        """Handle account update messages"""
-        try:
-            processed_data = await self.process_account_update(message)
-            if processed_data:
-                await self.websocket_manager.broadcast_to_user(
-                    self.user_id,
-                    {
-                        "type": WSMessageType.ACCOUNT_UPDATE,
-                        "data": processed_data
-                    }
-                )
-        except Exception as e:
-            logger.error(f"Error handling account update: {str(e)}")
-
-    async def _handle_error_message(self, message: Dict[str, Any]) -> None:
-        """Handle error messages from Tradovate"""
-        error_message = message.get('message', 'Unknown Tradovate error')
-        logger.error(f"Tradovate error: {error_message}")
-        await self.handle_error(Exception(error_message))
+    async def authenticate(self, credentials: Dict[str, Any]) -> BrokerCredentials:
+        """
+        Authenticate with Tradovate
     
-    async def process_market_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and normalize market data messages"""
-        try:
-            return {
-                "type": WSMessageType.MARKET_DATA,
-                "symbol": data.get("symbol"),
-                "price": Decimal(str(data.get("price", 0))),
-                "volume": data.get("size"),
-                "timestamp": datetime.utcnow().timestamp(),
-                "bid": Decimal(str(data.get("bid", 0))),
-                "ask": Decimal(str(data.get("ask", 0))),
-                "broker": "tradovate",
-                "raw_data": data  # Store original data for reference
-            }
-        except Exception as e:
-            logger.error(f"Error processing market data: {str(e)}")
-            return None
-
-    async def process_order_update(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and normalize order update messages"""
-        try:
-            return {
-                "type": WSMessageType.ORDER_UPDATE,
-                "order_id": data.get("orderId"),
-                "symbol": data.get("symbol"),
-                "status": data.get("status"),
-                "filled_quantity": data.get("filledQty", 0),
-                "remaining_quantity": data.get("remainingQty", 0),
-                "price": Decimal(str(data.get("price", 0))),
-                "timestamp": datetime.utcnow().timestamp(),
-                "broker": "tradovate",
-                "raw_data": data
-            }
-        except Exception as e:
-            logger.error(f"Error processing order update: {str(e)}")
-            return None
-
-    async def process_account_update(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and normalize account update messages"""
-        try:
-            return {
-                "type": WSMessageType.ACCOUNT_UPDATE,
-                "account_id": data.get("accountId"),
-                "balance": Decimal(str(data.get("balance", 0))),
-                "margin_used": Decimal(str(data.get("marginUsed", 0))),
-                "available_margin": Decimal(str(data.get("availableMargin", 0))),
-                "positions": data.get("positions", []),
-                "timestamp": datetime.utcnow().timestamp(),
-                "broker": "tradovate",
-                "raw_data": data
-            }
-        except Exception as e:
-            logger.error(f"Error processing account update: {str(e)}")
-            return None
-
-    async def send_heartbeat(self) -> bool:
-        """Send heartbeat message to maintain connection"""
-        heartbeat_message = {
-            "type": WSMessageType.HEARTBEAT,
-            "timestamp": datetime.utcnow().timestamp()
-        }
-        return await self.send_message(heartbeat_message)
-
-    async def start_heartbeat_loop(self):
-        """Start background heartbeat task"""
-        while True:
-            try:
-                if self.is_connected():
-                    await self.send_heartbeat()
-                await asyncio.sleep(20)  # Send heartbeat every 20 seconds
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in heartbeat loop: {str(e)}")
-
-    def get_connection_stats(self) -> Dict[str, Any]:
-        """Get current connection statistics"""
-        return {
-            "status": self.status,
-            "connection_id": self.connection_id,
-            "error_count": self.error_count,
-            "reconnect_attempts": self.reconnect_attempts,
-            "last_heartbeat": self.last_heartbeat,
-            "subscribed_symbols": list(self.subscription_state),
-            "circuit_breaker_state": self.circuit_breaker.state,
-            "message_queue_size": self.message_queue.queue.qsize()
-        }
-
-    async def validate_subscription(self, symbols: List[str]) -> List[str]:
-        """Validate symbols before subscription"""
-        valid_symbols = []
-        for symbol in symbols:
-            # Add your symbol validation logic here
-            if self._is_valid_symbol(symbol):
-                valid_symbols.append(symbol)
-            else:
-                logger.warning(f"Invalid symbol: {symbol}")
-        return valid_symbols
-
-    def _is_valid_symbol(self, symbol: str) -> bool:
-        """Validate individual symbol"""
-        # Add your symbol validation logic here
-        # This is a placeholder implementation
-        return bool(symbol and isinstance(symbol, str) and len(symbol) <= 10)
-
-    async def _handle_subscription_response(self, response: Dict[str, Any]):
-        """Handle subscription response from broker"""
-        success = response.get("success", False)
-        symbols = response.get("symbols", [])
+        Args:
+            credentials (Dict[str, Any]): Dictionary containing environment and code
         
-        if success:
-            self.subscription_state.update(symbols)
-            logger.info(f"Successfully subscribed to: {symbols}")
-        else:
-            error = response.get("error", "Unknown subscription error")
-            logger.error(f"Subscription failed: {error}")
-            
-            # Remove failed symbols from subscription state
-            for symbol in symbols:
-                self.subscription_state.discard(symbol)
-
-    async def _validate_message(self, message: Dict[str, Any]) -> bool:
-        """Validate incoming message structure"""
-        required_fields = {
-            "md": ["symbol", "price"],
-            "order": ["orderId", "status"],
-            "account": ["accountId"],
-            "error": ["message"]
-        }
+        Returns:
+            BrokerCredentials: New credentials object with access token
         
-        message_type = message.get("type")
-        if not message_type:
-            return False
-            
-        fields = required_fields.get(message_type, [])
-        return all(field in message for field in fields)
+        Raises:
+            AuthenticationError: If authentication fails
+        """
+        try:
+            environment = credentials.get('environment', 'demo')
+            exchange_url = f"{self.api_urls[environment]}/auth/token"
 
-    async def _process_batch_messages(self, messages: List[Dict[str, Any]]):
-        """Process multiple messages in batch"""
-        for message in messages:
-            try:
-                if await self._validate_message(message):
-                    await self.handle_message(message)
+        # Prepare request data
+            request_data = {
+                "grant_type": "refresh_token",
+                "access_token": credentials.access_token,
+                "client_id": settings.TRADOVATE_CLIENT_ID,
+                "client_secret": settings.TRADOVATE_CLIENT_SECRET
+            }
+
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',  # Changed content type
+                'Accept': 'application/json'
+            }
+
+        # Make request using our _make_request helper
+            response = await self._make_request(
+                'POST',
+                exchange_url,
+                data=json.dumps(request_data),
+                headers=headers
+            )
+
+        # Validate response
+            if not response or 'accessToken' not in response:
+                raise AuthenticationError("Invalid response from Tradovate authentication")
+
+        # Get current time for consistent timestamps
+            current_time = datetime.utcnow()
+            expiry_time = current_time + timedelta(seconds=response.get('expiresIn', 4800))
+
+        # Create new credentials with properly initialized fields
+            new_credentials = BrokerCredentials(
+                broker_id=self.broker_id,
+                credential_type='oauth',
+                access_token=response['accessToken'],
+                expires_at=expiry_time,
+                is_valid=True,
+                created_at=current_time,
+                updated_at=current_time,
+                last_refresh_attempt=current_time,  # Initialize the last refresh attempt
+                refresh_fail_count=0,
+                last_refresh_error=None,
+                error_message=None
+            )
+
+            logger.info(
+                f"Created new credentials for {self.broker_id}:\n"
+                f"Access Token: {response['accessToken'][:20]}...\n"
+                f"Expires In: {response.get('expiresIn')}\n"
+                f"Created At: {current_time}\n"
+                f"Expires At: {expiry_time}"
+            )
+
+            return new_credentials
+
+        except AuthenticationError as auth_e:
+            logger.error(f"Authentication error: {str(auth_e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during authentication: {str(e)}\n"
+                    f"Traceback: {traceback.format_exc()}")
+            raise AuthenticationError(f"Authentication failed: {str(e)}")
+           
+
+    async def process_oauth_callback(self, code: str, user_id: int, environment: str) -> Dict[str, Any]:
+        """Process OAuth callback from Tradovate"""
+        try:
+            tokens = await self._exchange_code_for_tokens(code, environment)
+            logger.info("Processing OAuth callback tokens")
+
+            # Create credentials
+            credentials = BrokerCredentials(
+                broker_id=self.broker_id,
+                credential_type='oauth',
+                access_token=tokens.get('access_token'),
+                expires_at=datetime.utcnow() + timedelta(seconds=tokens.get('expires_in', 4800)),
+                is_valid=True,
+                last_refresh_attempt=datetime.utcnow(),
+                refresh_fail_count=0,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            
+            self.db.add(credentials)
+
+            # Fetch accounts using new credentials
+            api_url = settings.TRADOVATE_LIVE_API_URL if environment == 'live' else settings.TRADOVATE_DEMO_API_URL
+            headers = {
+                "Authorization": f"Bearer {credentials.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            accounts_response = requests.get(f"{api_url}/account/list", headers=headers)
+            if accounts_response.status_code != 200:
+                raise ConnectionError(f"Failed to fetch accounts: {accounts_response.text}")
+
+            accounts_data = accounts_response.json()
+            stored_accounts = []
+
+            for account_info in accounts_data:
+                # Check for existing account
+                existing_account = self.db.query(BrokerAccount).filter(
+                    BrokerAccount.user_id == user_id,
+                    BrokerAccount.account_id == str(account_info.get('id')),
+                    BrokerAccount.broker_id == self.broker_id,
+                    BrokerAccount.environment == environment
+                ).first()
+
+                if existing_account:
+                    logger.info(f"Updating existing account: {existing_account.account_id}")
+                    # Update existing account
+                    existing_account.name = account_info.get('name')
+                    existing_account.is_active = True
+                    existing_account.status = 'active'
+                    existing_account.error_message = None
+                    existing_account.last_connected = datetime.utcnow()
+                    existing_account.updated_at = datetime.utcnow()
+                    existing_account.deleted_at = None
+                    existing_account.is_deleted = False
+                    
+                    # Update credentials
+                    if existing_account.credentials:
+                        self.db.delete(existing_account.credentials)
+                    existing_account.credentials = credentials
+                    
+                    stored_accounts.append(existing_account)
                 else:
-                    logger.warning(f"Invalid message format: {message}")
+                    logger.info(f"Creating new account for user {user_id}")
+                    # Create new account
+                    new_account = BrokerAccount(
+                        user_id=user_id,
+                        broker_id=self.broker_id,
+                        account_id=str(account_info.get('id')),
+                        name=account_info.get('name'),
+                        environment=environment,
+                        status='active',
+                        is_active=True,
+                        last_connected=datetime.utcnow()
+                    )
+                    self.db.add(new_account)
+                    new_account.credentials = credentials
+                    stored_accounts.append(new_account)
+
+            try:
+                self.db.commit()
+                logger.info(f"Successfully stored/updated {len(stored_accounts)} accounts")
+            except IntegrityError as e:
+                self.db.rollback()
+                logger.error(f"Database integrity error: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Account already exists for this user"
+                )
             except Exception as e:
-                logger.error(f"Error processing batch message: {str(e)}")
+                self.db.rollback()
+                logger.error(f"Database error: {str(e)}")
+                raise
 
-    async def cleanup(self) -> None:
-        """Cleanup resources and reset state"""
-        try:
-            # Clear message queue
-            self.message_queue.clear()
-            
-            # Reset circuit breaker
-            self.circuit_breaker = CircuitBreaker()
-            
-            # Clear subscription state
-            self.subscription_state.clear()
-            
-            # Reset connection state
-            self.status = WSConnectionStatus.DISCONNECTED
-            self.last_heartbeat = None
-            self.error_count = 0
-            self.reconnect_attempts = 0
-            
-            # Close websocket if still open
-            if self.websocket:
-                await self.websocket.close()
-                self.websocket = None
-                
-            logger.info(f"Cleaned up WebSocket handler state for user {self.user_id}")
-            
+            return {
+                "status": "success",
+                "accounts": [
+                    {
+                        "account_id": acc.account_id,
+                        "name": acc.name,
+                        "environment": acc.environment
+                    } for acc in stored_accounts
+                ]
+            }
+
         except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
+            logger.error(f"OAuth callback processing failed: {str(e)}")
+            raise
 
-    async def unsubscribe_all(self) -> bool:
-        """Unsubscribe from all current subscriptions"""
+
+    async def validate_credentials(self, credentials: BrokerCredentials) -> bool:
+        """Validate stored credentials"""
         try:
-            if self.subscription_state:
-                success = await self.unsubscribe(list(self.subscription_state))
-                if success:
-                    self.subscription_state.clear()
-                return success
+            if not credentials.is_valid:
+                return False
+
+            if credentials.expires_at <= datetime.utcnow():
+                return False
+
+            # Test credentials with a simple API call
+            headers = {
+                "Authorization": f"Bearer {credentials.access_token}"
+            }
+            response = requests.get(
+                f"{self.api_urls[credentials.account.environment]}/user/userinfo",
+                headers=headers
+            )
+
+            return response.status_code == 200
+
+        except Exception as e:
+            logger.error(f"Credential validation failed: {str(e)}")
+            return False
+
+
+    async def connect_account(
+        self,
+        user: User,
+        account_id: str,
+        environment: BrokerEnvironment,
+        credentials: Optional[Dict[str, Any]] = None
+    ) -> BrokerAccount:
+        """Connect to a Tradovate account"""
+        try:
+            # Check if account already exists
+            existing_account = await self.check_account_exists(
+                user.id, account_id, environment.value
+            )
+
+            if existing_account:
+                if existing_account.is_active:
+                    raise ConnectionError("Account already connected")
+                account = existing_account
+                account.is_active = True
+            else:
+                account = BrokerAccount(
+                    user_id=user.id,
+                    broker_id=self.broker_id,
+                    account_id=account_id,
+                    environment=environment.value,
+                    name=f"Tradovate {environment.value.capitalize()} Account",
+                    status='connecting'
+                )
+                self.db.add(account)
+
+            if credentials:
+                # Get account information
+                auth_response = await self.authenticate(credentials)
+                account_info = await self._get_account_info(account_id, auth_response)
+
+                # Update account with retrieved information
+                account.name = account_info.get('name', account.name)
+
+            account.status = 'active'
+            account.last_connected = datetime.utcnow()
+            account.error_message = None
+
+            self.db.commit()
+            return account
+
+        except Exception as e:
+            if 'account' in locals():
+                account.status = 'error'
+                account.error_message = str(e)
+                account.is_active = False
+                self.db.commit()
+            raise ConnectionError(f"Account connection failed: {str(e)}")
+
+    async def refresh_credentials(self, credentials: BrokerCredentials) -> BrokerCredentials:
+        """
+        Refresh access token for Tradovate using the renewAccessToken endpoint
+    
+        Args:
+            credentials (BrokerCredentials): The current credentials to refresh
+    
+        Returns:
+            BrokerCredentials: Updated credentials with new access token
+    
+        Raises:
+            AuthenticationError: If token refresh fails
+        """
+        try:
+            if not credentials or not credentials.access_token:
+                raise AuthenticationError("Invalid credentials provided for refresh")
+
+        # Construct the URL using the environment-specific base URL
+            exchange_url = (
+                settings.TRADOVATE_LIVE_RENEW_TOKEN_URL 
+                if credentials.account.environment == 'live' 
+                else settings.TRADOVATE_DEMO_RENEW_TOKEN_URL
+            )
+
+            logger.info(
+                f"Initiating token refresh for credential {credentials.id} "
+                f"Environment: {credentials.account.environment} "
+                f"URL: {exchange_url}"
+                f"Attempting to refresh with token: {credentials.access_token[:30]}..."
+            )
+
+        # Prepare the request data according to Tradovate's specifications
+            request_data = {
+                "accessToken": credentials.access_token
+            }
+
+            headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': f'Bearer {credentials.access_token}'
+            }
+
+        # Make the request with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = await self._make_request(
+                        'POST',
+                        exchange_url,
+                        headers=headers
+                    )
+
+                # Log successful response for debugging
+                    logger.info(f"Token refresh response: {response}")
+
+                    if not response:
+                        raise AuthenticationError("Empty response received from Tradovate")
+                
+                    if 'accessToken' not in response:
+                        raise AuthenticationError(
+                            f"Invalid response format. Expected 'accessToken', got: {list(response.keys())}"
+                        )
+                
+                    if 'accessToken' not in response:
+                        raise AuthenticationError("Response missing 'accessToken' field")
+                    if 'expirationTime' not in response:
+                        raise AuthenticationError("Response missing 'expirationTime' field")
+
+                # Update credential using Tradovate's returned values
+                    credentials.access_token = response['accessToken']
+                    credentials.expires_at = datetime.fromisoformat(response['expirationTime'].replace('Z', '+00:00'))
+                    credentials.is_valid = True
+                    credentials.refresh_fail_count = 0
+                    credentials.last_refresh_attempt = datetime.utcnow()  # Update last refresh timestamp
+                    credentials.last_refresh_error = None
+
+                    self.db.commit()
+            
+                    logger.info(
+                        f"Successfully refreshed token for credential {credentials.id}. "
+                        f"New token expires at {credentials.expires_at}"
+                    )
+
+                    return credentials
+
+                except Exception as e:
+                    if attempt == max_retries - 1:  # Last attempt
+                        raise
+                    logger.warning(
+                        f"Refresh attempt {attempt + 1} failed for credential {credentials.id}: {str(e)}. "
+                        "Retrying..."
+                    )
+                    await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+
+        except AuthenticationError as auth_e:
+            logger.error(
+                f"Authentication error refreshing token for credential {credentials.id}: {str(auth_e)}"
+            )
+            credentials.refresh_fail_count = (credentials.refresh_fail_count or 0) + 1
+            credentials.last_refresh_error = str(auth_e)
+            credentials.last_refresh_attempt = datetime.utcnow()
+            raise
+
+        except Exception as e:
+            logger.error(
+                f"Unexpected error refreshing token for credential {credentials.id}: {str(e)}\n"
+                f"Traceback: {traceback.format_exc()}"
+            )
+            credentials.refresh_fail_count = (credentials.refresh_fail_count or 0) + 1
+            credentials.last_refresh_error = str(e)
+            credentials.last_refresh_attempt = datetime.utcnow()
+            raise AuthenticationError(f"Token refresh failed: {str(e)}")
+        
+        except Exception as e:
+            self.db.rollback()  # Add rollback on error
+            logger.error(f"Failed to refresh token: {str(e)}")
+            raise
+
+    async def fetch_accounts(self, user: User) -> List[Dict[str, Any]]:
+        """Fetch Tradovate accounts for a user"""
+        try:
+            accounts = self.db.query(BrokerAccount).filter(
+                BrokerAccount.user_id == user.id,
+                BrokerAccount.broker_id == self.broker_id,
+                BrokerAccount.is_active == True,
+                BrokerAccount.deleted_at.is_(None)
+            ).all()
+
+            formatted_accounts = []
+            for account in accounts:
+                # Get account balance if credentials are valid
+                balance = 0.0
+                if account.credentials and account.credentials.is_valid:
+                    try:
+                        status = await self.get_account_status(account)
+                        balance = status.get("balance", 0.0)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch balance for account {account.id}: {str(e)}")
+
+                formatted_accounts.append({
+                    "account_id": account.account_id,
+                    "name": account.name,
+                    "environment": account.environment,
+                    "status": account.status,
+                    "balance": balance,
+                    "active": account.is_active,
+                    "is_token_expired": not account.credentials.is_valid if account.credentials else True,
+                    "last_connected": account.last_connected,
+                    "broker": "tradovate"
+                })
+
+            return formatted_accounts
+
+        except Exception as e:
+            logger.error(f"Error fetching Tradovate accounts: {str(e)}")
+            raise
+
+    async def get_account_status(self, account: BrokerAccount) -> Dict[str, Any]:
+        """Get account status and information"""
+        try:
+            api_url = self.api_urls[account.environment]
+            headers = self._get_auth_headers(account.credentials)
+            
+            response = requests.get(
+                f"{api_url}/account/status",
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                raise ConnectionError(f"Failed to get account status: {response.text}")
+                
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error getting account status: {str(e)}")
+            raise
+
+    async def get_positions(self, account: BrokerAccount) -> List[Dict[str, Any]]:
+        """Get current positions for an account"""
+        try:
+            api_url = self.api_urls[account.environment]
+            headers = self._get_auth_headers(account.credentials)
+            
+            response = requests.get(
+                f"{api_url}/position/list",
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                raise ConnectionError(f"Failed to get positions: {response.text}")
+                
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error getting positions: {str(e)}")
+            raise
+
+    async def get_orders(self, account: BrokerAccount) -> List[Dict[str, Any]]:
+        """Get orders for an account"""
+        try:
+            api_url = self.api_urls[account.environment]
+            headers = self._get_auth_headers(account.credentials)
+            
+            response = requests.get(
+                f"{api_url}/order/list",
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                raise ConnectionError(f"Failed to get orders: {response.text}")
+                
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error getting orders: {str(e)}")
+            raise
+
+    async def place_order(self, account: BrokerAccount, order_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Place a trading order"""
+        try:
+            api_url = self.api_urls[account.environment]
+            headers = self._get_auth_headers(account.credentials)
+            
+            response = requests.post(
+                f"{api_url}/order/placeOrder",
+                headers=headers,
+                json=order_data
+            )
+            
+            if response.status_code != 200:
+                raise OrderError(f"Failed to place order: {response.text}")
+                
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error placing order: {str(e)}")
+            raise
+
+    async def cancel_order(self, account: BrokerAccount, order_id: str) -> bool:
+        """Cancel an order"""
+        try:
+            api_url = self.api_urls[account.environment]
+            headers = self._get_auth_headers(account.credentials)
+            
+            response = requests.post(
+                f"{api_url}/order/cancelOrder",
+                headers=headers,
+                json={"orderId": order_id}
+            )
+            
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Error cancelling order: {str(e)}")
+            raise
+
+    async def disconnect_account(self, account: BrokerAccount) -> bool:
+        """Disconnect a trading account"""
+        try:
+            # Mark account as inactive
+            account.is_active = False
+            account.status = "disconnected"
+            account.error_message = None
+            self.db.commit()
+            
             return True
         except Exception as e:
-            logger.error(f"Error unsubscribing from all symbols: {str(e)}")
-            return False
+            logger.error(f"Error disconnecting account: {str(e)}")
+            raise
+
+    def _get_auth_headers(self, credentials: BrokerCredentials) -> Dict[str, str]:
+        """Get authentication headers for API requests"""
+        return {
+            "Authorization": f"Bearer {credentials.access_token}",
+            "Content-Type": "application/json"
+        }
