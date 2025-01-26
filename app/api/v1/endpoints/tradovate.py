@@ -28,6 +28,8 @@ from ....models.subscription import SubscriptionTier, SubscriptionStatus
 from ....core.brokers.base import BaseBroker
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from ....core.config import settings
+# Update WebSocket related imports
+from app.websockets.manager import websocket_manager
 
 
 __all__ = ['router', 'tradovate_callback'] 

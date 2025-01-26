@@ -6,6 +6,24 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from ..db.base_class import Base
 
+# Define ConnectionState as Enum
+class ConnectionState(str, Enum):
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    ERROR = "error"
+    AUTHENTICATING = "authenticating"
+    READY = "ready"
+
+class MessageCategory(str, Enum):
+    MARKET_DATA = "market_data"
+    ORDER_UPDATE = "order_update"
+    ACCOUNT_UPDATE = "account_update"
+    SYSTEM = "system"
+    ERROR = "error"
+    AUTH = "auth"
+    HEARTBEAT = "heartbeat"
+
 # SQLAlchemy Models
 class WebSocketConnection(Base):
     """Database model for tracking WebSocket connections"""
@@ -22,24 +40,6 @@ class WebSocketConnection(Base):
     
     # Relationships
     user = relationship("User", back_populates="websocket_connections")
-
-# Enums for WebSocket types
-class ConnectionStatus(str, Enum):
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
-    CONNECTING = "connecting"
-    ERROR = "error"
-    AUTHENTICATING = "authenticating"
-    READY = "ready"
-
-class MessageCategory(str, Enum):
-    MARKET_DATA = "market_data"
-    ORDER_UPDATE = "order_update"
-    ACCOUNT_UPDATE = "account_update"
-    SYSTEM = "system"
-    ERROR = "error"
-    AUTH = "auth"
-    HEARTBEAT = "heartbeat"
 
 # Configuration class
 class ManagerConfig:
@@ -81,3 +81,13 @@ class ClientMetadata:
         self.broker = broker
         self.ip_address = ip_address
         self.user_agent = user_agent
+
+# Export all needed classes
+__all__ = [
+    'ConnectionState',
+    'MessageCategory',
+    'WebSocketConnection',
+    'ManagerConfig',
+    'ConnectionStats',
+    'ClientMetadata'
+]

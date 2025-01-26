@@ -15,7 +15,6 @@ api_router.include_router(broker.router, prefix="/brokers", tags=["brokers"])
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])
-api_router.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 api_router.include_router(subscription.router, prefix="/subscriptions", tags=["subscriptions"])
 
 # Define the callback route - Notice the change in the path
