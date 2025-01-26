@@ -24,6 +24,15 @@ class HeartbeatMonitor:
         self._locks: Dict[str, asyncio.Lock] = {}
         self.config = WebSocketConfig.HEARTBEAT
         self.background_tasks: Set[asyncio.Task] = set()
+        
+        # Tradovate specific settings
+        self.HEARTBEAT_INTERVAL = 2500  # 2.5 seconds in milliseconds
+        self.MAX_MISSED_HEARTBEATS = 3
+        self.HEARTBEAT_MESSAGE = '[]'
+        
+        # Performance tracking
+        self._last_heartbeat_times: Dict[str, float] = {}
+        self._missed_heartbeats: Dict[str, int] = {}
 
     async def start_monitoring(self, websocket: WebSocket, account_id: str, metrics: HeartbeatMetrics) -> bool:
         lock = await self.get_lock(account_id)
@@ -31,13 +40,14 @@ class HeartbeatMonitor:
             try:
                 # Check if already monitoring
                 if account_id in self._monitoring_tasks and not self._monitoring_tasks[account_id].done():
-                    # Instead of just warning, stop the old monitoring first
                     logger.info(f"Stopping existing monitoring for account {account_id}")
                     await self.stop_monitoring(account_id)
 
                 # Store connection info
                 self._active_connections[account_id] = websocket
                 self._metrics[account_id] = metrics
+                self._last_heartbeat_times[account_id] = datetime.utcnow().timestamp() * 1000
+                self._missed_heartbeats[account_id] = 0
 
                 # Create monitoring task
                 task = asyncio.create_task(
@@ -56,48 +66,56 @@ class HeartbeatMonitor:
                 return False
 
     async def _monitor_connection(self, websocket: WebSocket, account_id: str, metrics: HeartbeatMetrics) -> None:
-        """Monitor a specific WebSocket connection"""
+        """Monitor a specific WebSocket connection with Tradovate's requirements"""
         try:
             logger.info(f"Starting heartbeat loop for account {account_id}")
-            while True:
-                if websocket.client_state == WebSocketState.DISCONNECTED:
-                    logger.info(f"WebSocket disconnected for account {account_id}, stopping heartbeat")
-                    break
+            
+            while websocket.client_state != WebSocketState.DISCONNECTED:
+                current_time = datetime.utcnow().timestamp() * 1000
+                last_heartbeat_time = self._last_heartbeat_times.get(account_id, 0)
+                time_since_last = current_time - last_heartbeat_time
 
-                try:
-                    current_time = datetime.utcnow()
-                    # Generate and send heartbeat
-                    heartbeat = {
-                        "type": "heartbeat",
-                        "sequence": metrics.totalHeartbeats + 1,
-                        "timestamp": current_time.isoformat(),
-                        "account_id": account_id,
-                        "stats": {
-                            "total_sent": metrics.totalHeartbeats,
-                            "missed": metrics.missedHeartbeats
+                if time_since_last >= self.HEARTBEAT_INTERVAL:
+                    try:
+                        # Send heartbeat
+                        heartbeat = {
+                            "type": "heartbeat",
+                            "timestamp": current_time,
+                            "account_id": account_id
                         }
-                    }
+                        
+                        await websocket.send_json(self.HEARTBEAT_MESSAGE)
+                        metrics.heartbeatsSent += 1
+                        
+                        # Update missed heartbeats count
+                        missed_count = self._missed_heartbeats.get(account_id, 0) + 1
+                        self._missed_heartbeats[account_id] = missed_count
+                        
+                        logger.debug(
+                            f"Sent heartbeat {metrics.heartbeatsSent} to account {account_id}. "
+                            f"Missed count: {missed_count}"
+                        )
 
-                    logger.info(f"Sending heartbeat {heartbeat['sequence']} to account {account_id}")
-                    await websocket.send_json(heartbeat)
-                    metrics.totalHeartbeats += 1
-                    metrics.lastHeartbeat = current_time
-                    
-                    logger.info(f"Heartbeat {heartbeat['sequence']} sent successfully to account {account_id}")
+                        # Check for too many missed heartbeats
+                        if missed_count >= self.MAX_MISSED_HEARTBEATS:
+                            logger.warning(
+                                f"Max missed heartbeats reached for account {account_id}. "
+                                f"Closing connection."
+                            )
+                            await self._handle_connection_failure(websocket, account_id)
+                            break
 
-                except RuntimeError as runtime_error:
-                    if "Cannot call 'send' once a close message has been sent" in str(runtime_error):
-                        logger.info(f"Connection already closed for account {account_id}")
-                        break
-                    raise
+                        # Update timestamp
+                        self._last_heartbeat_times[account_id] = current_time
 
-                except Exception as send_error:
-                    await self._handle_heartbeat_error(account_id, send_error, metrics)
-                    if metrics.missedHeartbeats >= self.config['MAX_MISSED']:
-                        break
+                    except Exception as e:
+                        logger.error(f"Error sending heartbeat to {account_id}: {str(e)}")
+                        metrics.heartbeatsFailed += 1
+                        await self._handle_heartbeat_error(account_id, e, metrics)
 
-                # Wait for next interval
-                await asyncio.sleep(self.config['INTERVAL'] / 1000)  # Convert to seconds
+                # Sleep for a short interval to prevent tight loop
+                # Use a shorter sleep than the interval to maintain accuracy
+                await asyncio.sleep(0.1)  # 100ms
 
         except asyncio.CancelledError:
             logger.info(f"Heartbeat monitoring cancelled for account {account_id}")
@@ -106,56 +124,17 @@ class HeartbeatMonitor:
         finally:
             await self._handle_connection_failure(websocket, account_id)
 
-    async def _handle_heartbeat_error(self, account_id: str, error: Exception, metrics: HeartbeatMetrics) -> None:
-        """Handle errors during heartbeat sending"""
-        try:
-            logger.error(f"Heartbeat error for account {account_id}: {str(error)}")
-            
-            metrics.missedHeartbeats += 1
-            metrics.lastFailure = datetime.utcnow()
-            
-            if metrics.missedHeartbeats >= self.config['MAX_MISSED']:
-                logger.warning(f"Max missed heartbeats reached for account {account_id}")
-                websocket = self._active_connections.get(account_id)
-                if websocket and websocket.client_state != WebSocketState.DISCONNECTED:
-                    await self._handle_connection_failure(websocket, account_id)
-
-        except Exception as e:
-            logger.error(f"Error handling heartbeat error: {str(e)}")
-
-    async def _handle_connection_failure(self, websocket: WebSocket, account_id: str) -> None:
-        """Handle connection failure scenarios"""
-        try:
-            if websocket.client_state != WebSocketState.DISCONNECTED:
-                # Try to send failure notification
-                try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "code": "heartbeat_failure",
-                        "message": "Connection terminated due to heartbeat failure",
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                except Exception:
-                    pass  # Ignore send errors during failure handling
-
-                # Close the connection
-                try:
-                    await websocket.close(code=4000)  # Custom close code for heartbeat failure
-                except Exception:
-                    pass  # Ignore close errors
-
-            await self._cleanup_connection(account_id)
-
-        except Exception as e:
-            logger.error(f"Error handling connection failure: {str(e)}")
-
     async def process_heartbeat_ack(self, account_id: str, ack_message: dict) -> None:
         """Process heartbeat acknowledgment from client"""
         try:
+            # Reset missed heartbeats counter
+            self._missed_heartbeats[account_id] = 0
+            
+            # Update metrics
             metrics = self._metrics.get(account_id)
             if metrics:
                 metrics.lastSuccessful = datetime.utcnow()
-                metrics.missedHeartbeats = 0  # Reset missed count on successful ack
+                metrics.missedHeartbeats = 0
 
                 logger.debug(f"Processed heartbeat ack for account {account_id}")
 
@@ -184,13 +163,12 @@ class HeartbeatMonitor:
 
     async def _cleanup_connection(self, account_id: str) -> None:
         """Clean up connection resources"""
-        try:
-            self._monitoring_tasks.pop(account_id, None)
-            self._active_connections.pop(account_id, None)
-            self._metrics.pop(account_id, None)
-            self._locks.pop(account_id, None)
-        except Exception as e:
-            logger.error(f"Error cleaning up connection {account_id}: {str(e)}")
+        self._active_connections.pop(account_id, None)
+        self._metrics.pop(account_id, None)
+        self._monitoring_tasks.pop(account_id, None)
+        self._locks.pop(account_id, None)
+        self._last_heartbeat_times.pop(account_id, None)
+        self._missed_heartbeats.pop(account_id, None)
 
     async def get_lock(self, account_id: str) -> asyncio.Lock:
         """Get or create a lock for specific account"""
@@ -206,9 +184,9 @@ class HeartbeatMonitor:
 
         return {
             "is_active": account_id in self._active_connections,
-            "total_heartbeats": metrics.totalHeartbeats,
-            "missed_heartbeats": metrics.missedHeartbeats,
-            "last_heartbeat": metrics.lastHeartbeat,
+            "total_heartbeats": metrics.heartbeatsSent,
+            "missed_heartbeats": self._missed_heartbeats.get(account_id, 0),
+            "last_heartbeat": self._last_heartbeat_times.get(account_id),
             "last_successful": metrics.lastSuccessful
         }
 

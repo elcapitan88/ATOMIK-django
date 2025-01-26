@@ -84,19 +84,64 @@ async def activate_strategy(
         strategy_data['webhook_id'] = str(strategy_data['webhook_id'])
         strategy_data['user_id'] = current_user.id
 
+        # Handle broker account lookup based on strategy type
+        if isinstance(strategy, SingleStrategyCreate):
+            broker_account = db.query(BrokerAccount).filter(
+                BrokerAccount.account_id == strategy.account_id,
+                BrokerAccount.user_id == current_user.id,
+                BrokerAccount.is_active == True
+            ).first()
+            
+            if not broker_account:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Broker account {strategy.account_id} not found or inactive"
+                )
+            
+            # Use the broker_account.id instead of the account_id
+            strategy_data['account_id'] = broker_account.id
+            
+        elif isinstance(strategy, MultipleStrategyCreate):
+            # Handle leader account
+            leader_account = db.query(BrokerAccount).filter(
+                BrokerAccount.account_id == strategy.leader_account_id,
+                BrokerAccount.user_id == current_user.id,
+                BrokerAccount.is_active == True
+            ).first()
+            
+            if not leader_account:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Leader account {strategy.leader_account_id} not found or inactive"
+                )
+            
+            strategy_data['leader_account_id'] = leader_account.id
+
+            # Validate and collect follower accounts
+            follower_accounts = []
+            for follower_id in strategy.follower_account_ids:
+                follower = db.query(BrokerAccount).filter(
+                    BrokerAccount.account_id == follower_id,
+                    BrokerAccount.user_id == current_user.id,
+                    BrokerAccount.is_active == True
+                ).first()
+                
+                if not follower:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Follower account {follower_id} not found or inactive"
+                    )
+                
+                follower_accounts.append(follower)
+
         # Create new strategy
         db_strategy = ActivatedStrategy(**strategy_data)
         db.add(db_strategy)
         
         # For multiple strategy, add follower accounts
         if isinstance(strategy, MultipleStrategyCreate):
-            for account_id in strategy.follower_account_ids:
-                account = db.query(BrokerAccount).filter(
-                    BrokerAccount.account_id == account_id
-                ).first()
-                
-                if account:
-                    db_strategy.follower_accounts.append(account)
+            for follower in follower_accounts:
+                db_strategy.follower_accounts.append(follower)
         
         db.commit()
         db.refresh(db_strategy)
@@ -119,14 +164,14 @@ async def activate_strategy(
         )
 
         if db_strategy.strategy_type == "single":
-            response.account_id = db_strategy.account_id
+            response.account_id = strategy.account_id  # Use original account_id for response
             response.quantity = db_strategy.quantity
         else:
-            response.leader_account_id = db_strategy.leader_account_id
+            response.leader_account_id = strategy.leader_account_id  # Use original account_id
             response.leader_quantity = db_strategy.leader_quantity
             response.follower_quantity = db_strategy.follower_quantity
             response.group_name = db_strategy.group_name
-            response.follower_account_ids = [acc.account_id for acc in db_strategy.follower_accounts]
+            response.follower_account_ids = strategy.follower_account_ids  # Use original account_ids
 
         logger.info(f"Created strategy with ID: {db_strategy.id}")
         return response

@@ -29,7 +29,7 @@ class ActivatedStrategy(Base):
 
     # Strategy Type and Configuration
     strategy_type = Column(String(20), nullable=False)  # 'single' or 'multiple'
-    webhook_id = Column(String(36), index=True)  # Store UUID as string
+    webhook_id = Column(String(64), index=True)
     ticker = Column(String(10), nullable=False)
 
     # Single Strategy Fields

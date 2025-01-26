@@ -5,6 +5,7 @@ import logging
 from starlette.websockets import WebSocket, WebSocketState
 from fastapi import WebSocketDisconnect, HTTPException
 import json
+from rx.subject import Subject
 
 from ..core.config import settings
 from .metrics import HeartbeatMetrics
@@ -46,6 +47,10 @@ class WebSocketManager:
         # Message Handling
         self.message_queues: Dict[str, asyncio.Queue] = {}
         self.pending_messages: Dict[str, Set[str]] = {}
+        self.message_subject = Subject()
+        self.market_data_subject = Subject()
+        self.order_update_subject = Subject()
+        self.account_update_subject = Subject()
         
         # Monitoring and Metrics
         self.metrics: Dict[str, HeartbeatMetrics] = {}
@@ -118,7 +123,7 @@ class WebSocketManager:
         websocket: WebSocket,
         client_id: str,
         user_id: Optional[int] = None
-    ) -> bool:
+) -> bool:
         """
         Establish and manage a new WebSocket connection with comprehensive error handling
         and resource management.
@@ -140,124 +145,234 @@ class WebSocketManager:
                 return False
 
             async with self._lock:
-                # Store connection details
-                self.active_connections[client_id] = websocket
-                self.connection_states[client_id] = ConnectionState.CONNECTED
-                self.connection_details[client_id] = {
-                    'user_id': user_id,
-                    'node_id': node_id,
-                    'connected_at': datetime.utcnow(),
-                    'last_heartbeat': datetime.utcnow(),
-                    'message_count': 0,
-                    'client_info': {
-                        'host': websocket.client.host,
-                        'port': websocket.client.port
+                try:
+                    # Store connection details
+                    self.active_connections[client_id] = websocket
+                    self.connection_states[client_id] = ConnectionState.CONNECTED
+                    self.connection_details[client_id] = {
+                        'user_id': user_id,
+                        'node_id': node_id,
+                        'connected_at': datetime.utcnow(),
+                        'last_heartbeat': datetime.utcnow(),
+                        'message_count': 0,
+                        'client_info': {
+                            'host': websocket.client.host,
+                            'port': websocket.client.port
+                        }
                     }
-                }
 
-                # Initialize message queue
-                self.message_queues[client_id] = asyncio.Queue()
-                
-                # Track user connections
-                if user_id:
-                    if user_id not in self.user_connections:
-                        self.user_connections[user_id] = set()
-                    self.user_connections[user_id].add(client_id)
-                
-                # Initialize metrics
-                self.metrics[client_id] = HeartbeatMetrics()
-                
-                # Start heartbeat monitoring
-                await self.start_heartbeat(client_id)
-                
-                # Start message processing
-                asyncio.create_task(self._process_messages(client_id))
-                
-                logger.info(f"WebSocket connection established - Client: {client_id}, User: {user_id}")
-                return True
+                    # Initialize message queue
+                    self.message_queues[client_id] = asyncio.Queue()
+                    
+                    # Track user connections
+                    if user_id:
+                        if user_id not in self.user_connections:
+                            self.user_connections[user_id] = set()
+                        self.user_connections[user_id].add(client_id)
+                    
+                    # Initialize metrics
+                    metrics = HeartbeatMetrics()
+                    self.metrics[client_id] = metrics
+                    
+                    # Start heartbeat monitoring
+                    heartbeat_success = await self.heartbeat_monitor.start_monitoring(
+                        websocket,
+                        client_id,
+                        metrics
+                    )
+                    
+                    if not heartbeat_success:
+                        logger.error(f"Failed to start heartbeat monitoring for {client_id}")
+                        await self._cleanup_connection(client_id)
+                        return False
+                    
+                    logger.info(f"Heartbeat monitoring started for {client_id}")
+                    
+                    # Start message processing
+                    asyncio.create_task(self._process_messages(client_id))
+                    
+                    logger.info(f"WebSocket connection established - Client: {client_id}, User: {user_id}")
+                    return True
+
+                except Exception as e:
+                    logger.error(f"Error during connection setup: {str(e)}")
+                    await self._cleanup_connection(client_id)
+                    return False
 
         except Exception as e:
             logger.error(f"Error establishing connection: {str(e)}")
+            # Ensure cleanup even if error occurs outside the lock
             await self._cleanup_connection(client_id)
             return False
+
 
     async def disconnect(self, client_id: str, code: int = 1000, reason: str = "Normal closure") -> None:
         """
         Handle WebSocket disconnection with proper cleanup and resource release.
+        Ensures graceful shutdown of all connection-related resources.
         """
         try:
             async with self._lock:
-                # Stop heartbeat monitoring
-                await self.stop_heartbeat(client_id)
+                logger.info(f"Initiating disconnect for client {client_id}")
                 
                 # Get connection details before cleanup
                 details = self.connection_details.get(client_id, {})
                 user_id = details.get('user_id')
                 node_id = details.get('node_id')
                 
+                # Stop heartbeat monitoring first
+                try:
+                    await self.heartbeat_monitor.stop_monitoring(client_id)
+                    logger.info(f"Heartbeat monitoring stopped for {client_id}")
+                except Exception as e:
+                    logger.error(f"Error stopping heartbeat monitoring for {client_id}: {str(e)}")
+                
                 # Close WebSocket if still open
                 websocket = self.active_connections.get(client_id)
                 if websocket and websocket.client_state == WebSocketState.CONNECTED:
                     try:
                         await websocket.close(code=code, reason=reason)
+                        logger.info(f"WebSocket closed for {client_id}")
                     except Exception as e:
                         logger.error(f"Error closing websocket for {client_id}: {str(e)}")
 
-                # Cleanup resources
-                await self._cleanup_connection(client_id)
-                
-                # Release resource manager connection
-                if node_id:
-                    await self.resource_manager.release_connection(client_id)
+                # Clean up message queue
+                if client_id in self.message_queues:
+                    try:
+                        # Signal message processing to stop
+                        self.message_queues[client_id].put_nowait(None)
+                        self.message_queues.pop(client_id, None)
+                    except Exception as e:
+                        logger.error(f"Error cleaning up message queue for {client_id}: {str(e)}")
+
+                # Update connection tracking
+                self.active_connections.pop(client_id, None)
+                self.connection_states[client_id] = ConnectionState.DISCONNECTED
                 
                 # Update user connections
                 if user_id and user_id in self.user_connections:
                     self.user_connections[user_id].discard(client_id)
                     if not self.user_connections[user_id]:
                         del self.user_connections[user_id]
+
+                # Clean up metrics and connection details
+                self.metrics.pop(client_id, None)
+                self.connection_details.pop(client_id, None)
+                
+                # Release resource manager connection
+                if node_id:
+                    try:
+                        await self.resource_manager.release_connection(client_id)
+                        logger.info(f"Released resource manager connection for {client_id}")
+                    except Exception as e:
+                        logger.error(f"Error releasing resource manager connection: {str(e)}")
                 
                 logger.info(f"WebSocket disconnected - Client: {client_id}, User: {user_id}")
 
         except Exception as e:
             logger.error(f"Error in disconnect for {client_id}: {str(e)}")
+            # Attempt emergency cleanup
+            try:
+                await self._cleanup_connection(client_id)
+            except Exception as cleanup_error:
+                logger.error(f"Emergency cleanup failed for {client_id}: {str(cleanup_error)}")
 
     async def _process_messages(self, client_id: str) -> None:
         """
         Process messages from the client's message queue.
+        Handles both regular messages and heartbeat responses.
         """
         try:
+            logger.info(f"Starting message processing for client {client_id}")
+            
             while True:
                 if client_id not in self.message_queues:
+                    logger.info(f"Message queue removed for {client_id}, stopping processing")
                     break
                 
-                queue = self.message_queues[client_id]
-                message = await queue.get()
-                
                 try:
-                    if message.get('type') == 'heartbeat':
-                        await self._handle_heartbeat(client_id, message)
-                    else:
-                        await self._route_message(client_id, message)
+                    queue = self.message_queues[client_id]
+                    message = await queue.get()
                     
-                    # Update metrics
-                    details = self.connection_details.get(client_id)
-                    if details:
-                        details['message_count'] += 1
+                    # Check for shutdown signal
+                    if message is None:
+                        logger.info(f"Received shutdown signal for {client_id}")
+                        break
+                    
+                    try:
+                        # Handle Tradovate heartbeat response
+                        if isinstance(message, str) and message == '[]':
+                            await self.heartbeat_monitor.process_heartbeat_ack(client_id, {
+                                'timestamp': datetime.utcnow().timestamp() * 1000
+                            })
+                            logger.debug(f"Processed heartbeat response for {client_id}")
+                            continue
+                        
+                        # Handle structured messages
+                        if isinstance(message, dict):
+                            # Process different message types
+                            message_type = message.get('type')
+                            
+                            if message_type == 'heartbeat':
+                                await self._handle_heartbeat(client_id, message)
+                            elif message_type == 'market_data':
+                                await self._route_message(client_id, {
+                                    **message,
+                                    'timestamp': datetime.utcnow().isoformat()
+                                })
+                                self.market_data_subject.next(message)
+                            elif message_type == 'order_update':
+                                await self._route_message(client_id, message)
+                                self.order_update_subject.next(message)
+                            elif message_type == 'account_update':
+                                await self._route_message(client_id, message)
+                                self.account_update_subject.next(message)
+                            else:
+                                await self._route_message(client_id, message)
+                                self.message_subject.next(message)
+                        
+                        # Update metrics
+                        details = self.connection_details.get(client_id)
+                        if details:
+                            details['message_count'] += 1
+                            details['last_message'] = datetime.utcnow()
+                    
+                    except Exception as msg_error:
+                        logger.error(f"Error processing message for {client_id}: {str(msg_error)}")
+                        # Don't break the loop for individual message errors
+                        continue
+                    
+                    finally:
+                        # Always mark the task as done
+                        queue.task_done()
                 
-                except Exception as e:
-                    logger.error(f"Error processing message for {client_id}: {str(e)}")
+                except asyncio.CancelledError:
+                    logger.info(f"Message processing cancelled for {client_id}")
+                    break
                 
-                finally:
-                    queue.task_done()
-
-        except asyncio.CancelledError:
-            logger.info(f"Message processing cancelled for {client_id}")
+                except Exception as queue_error:
+                    logger.error(f"Queue processing error for {client_id}: {str(queue_error)}")
+                    # Short sleep to prevent tight loop in case of persistent errors
+                    await asyncio.sleep(0.1)
+                    continue
+        
         except Exception as e:
-            logger.error(f"Message processing error for {client_id}: {str(e)}")
+            logger.error(f"Fatal error in message processing for {client_id}: {str(e)}")
+        
+        finally:
+            logger.info(f"Message processing stopped for {client_id}")
+            # Ensure proper cleanup
+            if client_id in self.message_queues:
+                try:
+                    while not self.message_queues[client_id].empty():
+                        await self.message_queues[client_id].get()
+                        self.message_queues[client_id].task_done()
+                except Exception as cleanup_error:
+                    logger.error(f"Error cleaning up message queue for {client_id}: {str(cleanup_error)}")
 
     async def _route_message(self, client_id: str, message: Dict[str, Any]) -> None:
         """
-        Route incoming messages to appropriate handlers based on message type.
+        Route messages to appropriate handlers based on message type.
         """
         try:
             message_type = message.get('type', 'unknown')
@@ -269,19 +384,11 @@ class WebSocketManager:
             elif message_type == 'account_update':
                 await self.event_handler.handle_account_update(message)
             else:
-                logger.warning(f"Unknown message type received: {message_type}")
+                logger.debug(f"Unhandled message type received: {message_type}")
                 
         except Exception as e:
             logger.error(f"Error routing message: {str(e)}")
             raise
-    async def start_heartbeat(self, client_id: str) -> None:
-        """Start heartbeat monitoring for a connection"""
-        if client_id in self.heartbeat_tasks:
-            return
-
-        self.heartbeat_tasks[client_id] = asyncio.create_task(
-            self._heartbeat_loop(client_id)
-        )
 
     async def stop_heartbeat(self, client_id: str) -> None:
         """Stop heartbeat monitoring for a connection"""
