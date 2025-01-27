@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from app.models.broker import BrokerAccount
 from app.websockets.manager import websocket_manager
 from app.websockets.heartbeat_monitor import heartbeat_monitor
@@ -68,34 +69,64 @@ async def websocket_endpoint(
             await websocket.close(code=4001)
             return
 
-        # Accept the connection
+        # Verify account access
+        account = await verify_account_access(user.id, account_id, db)
+        if not account:
+            logger.error(f"Account access verification failed for account {account_id}")
+            await websocket.close(code=4003)
+            return
+
+        # Accept connection initially to prevent timeout
         await websocket.accept()
         logger.info(f"WebSocket connection accepted for account: {account_id}")
 
+        # Use manager to handle connection and setup
+        connected = await websocket_manager.connect(
+            websocket=websocket,
+            client_id=account_id,
+            user_id=user.id
+        )
+
+        if not connected:
+            logger.error(f"Failed to establish managed connection for account {account_id}")
+            await websocket.close(code=4000)
+            return
+
         try:
+            # Main connection loop
             while True:
-                # Wait for messages
                 message = await websocket.receive_json()
                 logger.debug(f"Received message from {account_id}: {message}")
                 
-                # Process message and send response
-                response = await websocket_manager.process_message(account_id, message)
+                # Handle empty array response (Tradovate heartbeat)
+                if message == '[]':
+                    continue
+                
+                # Process message through manager
+                response = await websocket_manager._process_messages(account_id)
                 if response:
                     await websocket.send_json(response)
 
         except WebSocketDisconnect:
-            logger.info(f"WebSocket disconnected for account: {account_id}")
+            logger.info(f"WebSocket disconnected normally for account: {account_id}")
+        except ValueError as e:
+            logger.error(f"Invalid message format from {account_id}: {str(e)}")
         except Exception as e:
             logger.error(f"Error processing messages for {account_id}: {str(e)}")
-            await websocket.close(code=4000)
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.close(code=4000)
     
     except Exception as e:
         logger.error(f"WebSocket error for account {account_id}: {str(e)}")
         if websocket.client_state.connected:
             await websocket.close(code=4000)
     finally:
-        await websocket_manager.disconnect(account_id)
-        logger.info(f"WebSocket connection cleanup completed for account: {account_id}")
+        # Ensure proper cleanup through manager
+        try:
+            await websocket_manager.disconnect(account_id)
+            logger.info(f"WebSocket connection cleanup completed for account: {account_id}")
+        except Exception as e:
+            logger.error(f"Error during connection cleanup for {account_id}: {str(e)}")
 
 @router.get("/health")
 async def websocket_health():

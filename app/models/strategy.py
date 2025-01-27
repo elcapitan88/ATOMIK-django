@@ -1,20 +1,22 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Numeric, Table
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Numeric, Table, UniqueConstraint
+from sqlalchemy.orm import relationship, attribute_mapped_collection
 from datetime import datetime
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from decimal import Decimal
 from ..db.base_class import Base
 from .user import User
 import json
 from .broker import BrokerAccount
 
-# Association table for strategy followers
-strategy_followers = Table(
-    'strategy_followers',
+# Association table for strategy followers with quantities
+strategy_follower_quantities = Table(
+    'strategy_follower_quantities',
     Base.metadata,
     Column('strategy_id', Integer, ForeignKey('activated_strategies.id')),
-    Column('account_id', Integer, ForeignKey('broker_accounts.id'))
+    Column('account_id', Integer, ForeignKey('broker_accounts.id')),
+    Column('quantity', Integer, nullable=False),
+    UniqueConstraint('strategy_id', 'account_id', name='unique_strategy_follower')
 )
 
 class ActivatedStrategy(Base):
@@ -39,7 +41,6 @@ class ActivatedStrategy(Base):
     # Multiple Strategy Fields
     leader_account_id = Column(Integer, ForeignKey("broker_accounts.id"), nullable=True)
     leader_quantity = Column(Integer, nullable=True)
-    follower_quantity = Column(Integer, nullable=True)
     group_name = Column(String(100), nullable=True)
 
     # Status and Timestamps
@@ -79,11 +80,15 @@ class ActivatedStrategy(Base):
 
     # Relationships
     user = relationship("User", back_populates="strategies")
-    follower_accounts = relationship(
+    
+    # Updated relationship for followers with quantities
+    follower_accounts_with_quantities = relationship(
         "BrokerAccount",
-        secondary=strategy_followers,
-        backref="following_strategies"
+        secondary=strategy_follower_quantities,
+        backref="following_strategies_with_quantities",
+        collection_class=attribute_mapped_collection('account_id')
     )
+    
     trades = relationship("Order", back_populates="strategy", cascade="all, delete-orphan")
     broker_account = relationship(
         "BrokerAccount",
@@ -95,12 +100,50 @@ class ActivatedStrategy(Base):
         foreign_keys=[leader_account_id],
         backref="leader_strategies"
     )
-    class Config:
-        orm_mode = True
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.webhook_id = str(uuid.uuid4()) if 'webhook_id' not in kwargs else kwargs['webhook_id']
+
+    def add_follower_with_quantity(self, account: BrokerAccount, quantity: int):
+        """Helper method to add a follower with its quantity"""
+        self.follower_accounts_with_quantities[account.id] = {
+            'account': account,
+            'quantity': quantity
+        }
+
+    def update_follower_quantity(self, account: BrokerAccount, quantity: int) -> None:
+        """Update the quantity for a specific follower account."""
+        if account.id not in self.follower_accounts_with_quantities:
+            raise ValueError("Account is not a follower of this strategy")
+        
+        # Update the quantity in the association table
+        stmt = strategy_follower_quantities.update().where(
+            strategy_follower_quantities.c.strategy_id == self.id,
+            strategy_follower_quantities.c.account_id == account.id
+        ).values(quantity=quantity)
+        # Note: This needs to be executed within a session
+        return stmt
+
+    def remove_follower(self, account: BrokerAccount) -> None:
+        """Remove a follower account from the strategy."""
+        if account.id not in self.follower_accounts_with_quantities:
+            raise ValueError("Account is not a follower of this strategy")
+        
+        # Remove from the follower accounts
+        stmt = strategy_follower_quantities.delete().where(
+            strategy_follower_quantities.c.strategy_id == self.id,
+            strategy_follower_quantities.c.account_id == account.id
+        )
+        # Note: This needs to be executed within a session
+        return stmt
+
+    def get_follower_quantities(self) -> Dict[int, int]:
+        """Get a dictionary of follower account IDs and their quantities."""
+        return {
+            account_id: relationship['quantity']
+            for account_id, relationship in self.follower_accounts_with_quantities.items()
+        }
 
     def update_stats(self, trade_result: bool, pnl: float) -> None:
         """Update strategy statistics after a trade."""
@@ -110,10 +153,10 @@ class ActivatedStrategy(Base):
         else:
             self.failed_trades += 1
         
-        self.total_pnl += pnl
+        self.total_pnl += Decimal(str(pnl))
         
         if self.total_trades > 0:
-            self.win_rate = (self.successful_trades / self.total_trades) * 100
+            self.win_rate = Decimal(str(self.successful_trades / self.total_trades * 100))
 
     def get_performance_metrics(self) -> dict:
         """Get comprehensive performance metrics."""
@@ -149,10 +192,6 @@ class ActivatedStrategy(Base):
             return False
             
         return True
-
-    def get_tags(self) -> List[str]:
-        """Get strategy tags as a list."""
-        return [tag.strip() for tag in self.tags.split(',')] if self.tags else []
 
     def get_broker_settings(self) -> dict:
         """Get broker-specific settings as a dictionary."""

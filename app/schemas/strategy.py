@@ -40,10 +40,10 @@ class MultipleStrategyCreate(BaseModel):
     webhook_id: str = Field(..., description="Webhook token")
     ticker: str = Field(..., min_length=1, max_length=10)
     leader_account_id: str = Field(..., description="Leader account identifier")
-    leader_quantity: int = Field(..., gt=0, description="Leader account trading quantity")
-    follower_quantity: int = Field(..., gt=0, description="Follower accounts trading quantity")
-    group_name: str = Field(..., min_length=1, max_length=100)
+    leader_quantity: int = Field(..., gt=0)
     follower_account_ids: List[str] = Field(..., min_items=1)
+    follower_quantities: List[int] = Field(..., min_items=1)
+    group_name: str = Field(..., min_length=1, max_length=100)
 
     class Config:
         schema_extra = {
@@ -69,6 +69,17 @@ class MultipleStrategyCreate(BaseModel):
     def validate_follower_accounts(cls, v, values):
         if 'leader_account_id' in values and values['leader_account_id'] in v:
             raise ValueError('Leader account cannot be in follower accounts')
+        if len(set(v)) != len(v):
+            raise ValueError('Duplicate follower accounts are not allowed')
+        return v
+    
+    @validator('follower_quantities')
+    def validate_quantities(cls, v, values):
+        if 'follower_account_ids' in values:
+            if len(v) != len(values['follower_account_ids']):
+                raise ValueError('Number of quantities must match number of follower accounts')
+            if not all(q > 0 for q in v):
+                raise ValueError('All quantities must be greater than 0')
         return v
 
     @validator('group_name')

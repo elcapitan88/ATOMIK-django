@@ -10,12 +10,15 @@ class HeartbeatMetrics:
         self.lastSuccessful = datetime.utcnow()
         self.lastHeartbeat = datetime.utcnow()
         self.reconnectionAttempts = 0
+        self.heartbeatsSent = 0      # Add this
+        self.heartbeatsFailed = 0    # Add this
         self._lock = asyncio.Lock()
 
     async def record_heartbeat(self):
         """Record a successful heartbeat"""
         async with self._lock:
             self.totalHeartbeats += 1
+            self.heartbeatsSent += 1  # Increment sent heartbeats
             self.lastSuccessful = datetime.utcnow()
             self.lastHeartbeat = datetime.utcnow()
             self.missedHeartbeats = 0  # Reset missed count on successful heartbeat
@@ -24,6 +27,7 @@ class HeartbeatMetrics:
         """Record a missed heartbeat"""
         async with self._lock:
             self.missedHeartbeats += 1
+            self.heartbeatsFailed += 1  # Increment failed heartbeats
             return self.missedHeartbeats
 
     def get_metrics(self) -> dict:
@@ -31,6 +35,8 @@ class HeartbeatMetrics:
         return {
             "totalHeartbeats": self.totalHeartbeats,
             "missedHeartbeats": self.missedHeartbeats,
+            "heartbeatsSent": self.heartbeatsSent,      # Add this
+            "heartbeatsFailed": self.heartbeatsFailed,  # Add this
             "averageLatency": round(self.averageLatency, 2),
             "lastSuccessful": self.lastSuccessful.isoformat() if self.lastSuccessful else None,
             "lastHeartbeat": self.lastHeartbeat.isoformat() if self.lastHeartbeat else None,
@@ -47,6 +53,8 @@ class HeartbeatMetrics:
     def reset(self):
         """Reset metrics"""
         self.missedHeartbeats = 0
+        self.heartbeatsSent = 0      # Add this
+        self.heartbeatsFailed = 0    # Add this
         self.reconnectionAttempts = 0
         self.lastHeartbeat = datetime.utcnow()
         self.lastSuccessful = datetime.utcnow()

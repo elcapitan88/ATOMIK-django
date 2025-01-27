@@ -64,6 +64,49 @@ class HeartbeatMonitor:
                 logger.error(f"Failed to start monitoring for account {account_id}: {str(e)}")
                 await self._cleanup_connection(account_id)
                 return False
+            
+    async def _handle_connection_failure(self, websocket: WebSocket, account_id: str) -> None:
+        """Handle WebSocket connection failure"""
+        try:
+            logger.warning(f"Handling connection failure for account {account_id}")
+            
+            # Update metrics
+            metrics = self._metrics.get(account_id)
+            if metrics:
+                metrics.heartbeatsFailed += 1
+                metrics.reconnectionAttempts += 1
+            
+            # Close websocket if still open
+            if websocket.client_state == WebSocketState.CONNECTED:
+                try:
+                    await websocket.close(code=4000, reason="Heartbeat failure")
+                    logger.info(f"Closed WebSocket connection for account {account_id}")
+                except Exception as e:
+                    logger.error(f"Error closing WebSocket for {account_id}: {str(e)}")
+            
+            # Cleanup connection
+            await self._cleanup_connection(account_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling connection failure for {account_id}: {str(e)}")
+
+    async def _handle_heartbeat_error(self, account_id: str, error: Exception, metrics: HeartbeatMetrics) -> None:
+        """Handle errors during heartbeat operations"""
+        try:
+            logger.error(f"Heartbeat error for account {account_id}: {str(error)}")
+            
+            # Update metrics
+            metrics.heartbeatsFailed += 1
+            missed_count = self._missed_heartbeats.get(account_id, 0)
+            
+            # Check if we need to close the connection
+            if missed_count >= self.MAX_MISSED_HEARTBEATS:
+                websocket = self._active_connections.get(account_id)
+                if websocket:
+                    await self._handle_connection_failure(websocket, account_id)
+                    
+        except Exception as e:
+            logger.error(f"Error handling heartbeat error for {account_id}: {str(e)}")
 
     async def _monitor_connection(self, websocket: WebSocket, account_id: str, metrics: HeartbeatMetrics) -> None:
         """Monitor a specific WebSocket connection with Tradovate's requirements"""

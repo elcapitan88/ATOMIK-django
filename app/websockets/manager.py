@@ -87,6 +87,12 @@ class WebSocketManager:
         self.CONNECTION_TIMEOUT = 10  # seconds
         self.MAX_CONNECTIONS_PER_USER = 5
 
+        from .heartbeat_monitor import heartbeat_monitor
+        self.heartbeat_monitor = heartbeat_monitor
+        
+        # UPDATE THIS - Change heartbeat interval for Tradovate
+        self.HEARTBEAT_INTERVAL = 2500  # 2.5 seconds in milliseconds
+
     async def initialize(self) -> bool:
         """Initialize the WebSocket manager and its dependencies"""
         if self._initialized:
@@ -148,7 +154,7 @@ class WebSocketManager:
                 try:
                     # Store connection details
                     self.active_connections[client_id] = websocket
-                    self.connection_states[client_id] = ConnectionState.CONNECTED
+                    self.connection_states[client_id] = ConnectionState.CONNECTING
                     self.connection_details[client_id] = {
                         'user_id': user_id,
                         'node_id': node_id,
@@ -173,25 +179,55 @@ class WebSocketManager:
                     # Initialize metrics
                     metrics = HeartbeatMetrics()
                     self.metrics[client_id] = metrics
-                    
+
                     # Start heartbeat monitoring
-                    heartbeat_success = await self.heartbeat_monitor.start_monitoring(
-                        websocket,
-                        client_id,
-                        metrics
-                    )
-                    
-                    if not heartbeat_success:
-                        logger.error(f"Failed to start heartbeat monitoring for {client_id}")
+                    try:
+                        heartbeat_success = await self.heartbeat_monitor.start_monitoring(
+                            websocket,
+                            client_id,
+                            metrics
+                        )
+                        
+                        if not heartbeat_success:
+                            logger.error(f"Failed to start heartbeat monitoring for {client_id}")
+                            await self._cleanup_connection(client_id)
+                            return False
+                            
+                        logger.info(f"Heartbeat monitoring started for {client_id}")
+                        
+                        # Create heartbeat task
+                        self.heartbeat_tasks[client_id] = asyncio.create_task(
+                            self._heartbeat_loop(client_id)
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"Error starting heartbeat monitoring: {str(e)}")
                         await self._cleanup_connection(client_id)
                         return False
-                    
-                    logger.info(f"Heartbeat monitoring started for {client_id}")
-                    
+
                     # Start message processing
-                    asyncio.create_task(self._process_messages(client_id))
-                    
+                    try:
+                        process_task = asyncio.create_task(
+                            self._process_messages(client_id)
+                        )
+                        logger.info(f"Message processing started for {client_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to start message processing: {str(e)}")
+                        await self._cleanup_connection(client_id)
+                        return False
+
+                    # Update connection state to connected
+                    self.connection_states[client_id] = ConnectionState.CONNECTED
                     logger.info(f"WebSocket connection established - Client: {client_id}, User: {user_id}")
+                    
+                    # Send initial heartbeat
+                    try:
+                        await websocket.send_text('[]')
+                        logger.debug(f"Initial heartbeat sent for {client_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send initial heartbeat: {str(e)}")
+                        # Continue despite heartbeat failure
+                    
                     return True
 
                 except Exception as e:
@@ -201,7 +237,6 @@ class WebSocketManager:
 
         except Exception as e:
             logger.error(f"Error establishing connection: {str(e)}")
-            # Ensure cleanup even if error occurs outside the lock
             await self._cleanup_connection(client_id)
             return False
 
@@ -291,7 +326,10 @@ class WebSocketManager:
                     break
                 
                 try:
+                    # Get the message queue for this client
                     queue = self.message_queues[client_id]
+                    
+                    # Wait for the next message
                     message = await queue.get()
                     
                     # Check for shutdown signal
@@ -300,46 +338,71 @@ class WebSocketManager:
                         break
                     
                     try:
-                        # Handle Tradovate heartbeat response
-                        if isinstance(message, str) and message == '[]':
-                            await self.heartbeat_monitor.process_heartbeat_ack(client_id, {
-                                'timestamp': datetime.utcnow().timestamp() * 1000
-                            })
+                        # Handle empty array (Tradovate heartbeat response)
+                        if message == '[]':
+                            current_time = datetime.utcnow().timestamp() * 1000
+                            await self.heartbeat_monitor.process_heartbeat_ack(
+                                client_id,
+                                {'timestamp': current_time}
+                            )
                             logger.debug(f"Processed heartbeat response for {client_id}")
                             continue
+
+                        # Parse JSON messages if received as string
+                        if isinstance(message, str):
+                            try:
+                                message = json.loads(message)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse message for {client_id}: {str(e)}")
+                                continue
                         
                         # Handle structured messages
                         if isinstance(message, dict):
-                            # Process different message types
                             message_type = message.get('type')
                             
+                            # Update last message timestamp
+                            self.connection_details[client_id]['last_message'] = datetime.utcnow()
+                            
+                            # Route message based on type
                             if message_type == 'heartbeat':
+                                # Handle heartbeat message
                                 await self._handle_heartbeat(client_id, message)
+                                
                             elif message_type == 'market_data':
-                                await self._route_message(client_id, {
-                                    **message,
-                                    'timestamp': datetime.utcnow().isoformat()
-                                })
+                                # Add timestamp if not present
+                                if 'timestamp' not in message:
+                                    message['timestamp'] = datetime.utcnow().isoformat()
+                                
+                                # Route and emit market data
+                                await self._route_message(client_id, message)
                                 self.market_data_subject.next(message)
+                                
                             elif message_type == 'order_update':
+                                # Route and emit order update
                                 await self._route_message(client_id, message)
                                 self.order_update_subject.next(message)
+                                
                             elif message_type == 'account_update':
+                                # Route and emit account update
                                 await self._route_message(client_id, message)
                                 self.account_update_subject.next(message)
+                                
                             else:
+                                # Handle unknown message types
                                 await self._route_message(client_id, message)
                                 self.message_subject.next(message)
+                            
+                            # Update metrics
+                            if client_id in self.connection_details:
+                                self.connection_details[client_id]['message_count'] += 1
                         
-                        # Update metrics
-                        details = self.connection_details.get(client_id)
-                        if details:
-                            details['message_count'] += 1
-                            details['last_message'] = datetime.utcnow()
+                        else:
+                            logger.warning(f"Received unhandled message type for {client_id}: {type(message)}")
                     
                     except Exception as msg_error:
                         logger.error(f"Error processing message for {client_id}: {str(msg_error)}")
-                        # Don't break the loop for individual message errors
+                        # Log the problematic message for debugging
+                        logger.error(f"Problematic message: {message}")
                         continue
                     
                     finally:
@@ -352,7 +415,7 @@ class WebSocketManager:
                 
                 except Exception as queue_error:
                     logger.error(f"Queue processing error for {client_id}: {str(queue_error)}")
-                    # Short sleep to prevent tight loop in case of persistent errors
+                    # Add small delay to prevent tight loop in case of persistent errors
                     await asyncio.sleep(0.1)
                     continue
         
@@ -364,12 +427,13 @@ class WebSocketManager:
             # Ensure proper cleanup
             if client_id in self.message_queues:
                 try:
+                    # Clear any remaining messages
                     while not self.message_queues[client_id].empty():
                         await self.message_queues[client_id].get()
                         self.message_queues[client_id].task_done()
                 except Exception as cleanup_error:
                     logger.error(f"Error cleaning up message queue for {client_id}: {str(cleanup_error)}")
-
+                    
     async def _route_message(self, client_id: str, message: Dict[str, Any]) -> None:
         """
         Route messages to appropriate handlers based on message type.

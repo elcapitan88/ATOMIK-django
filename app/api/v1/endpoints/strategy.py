@@ -36,8 +36,9 @@ async def activate_strategy(
     """Activate a new trading strategy"""
     try:
         logger.info(f"Creating strategy for user {current_user.id}")
+        logger.debug(f"Strategy data received: {strategy.dict()}")
 
-        # If subscription checks are skipped, we won't do any tier-based checks
+        # Subscription validation
         if not settings.SKIP_SUBSCRIPTION_CHECK:
             if not current_user.subscription:
                 raise HTTPException(status_code=403, detail="No active subscription found")
@@ -70,7 +71,7 @@ async def activate_strategy(
                     detail=f"Strategy limit reached for your subscription tier"
                 )
 
-        # Find webhook by token and user
+        # Find and validate webhook
         webhook = db.query(Webhook).filter(
             Webhook.token == str(strategy.webhook_id),
             Webhook.user_id == current_user.id
@@ -79,13 +80,10 @@ async def activate_strategy(
         if not webhook:
             raise HTTPException(status_code=404, detail="Webhook not found")
 
-        # Convert webhook_id to string and add user_id
-        strategy_data = strategy.dict()
-        strategy_data['webhook_id'] = str(strategy_data['webhook_id'])
-        strategy_data['user_id'] = current_user.id
-
-        # Handle broker account lookup based on strategy type
         if isinstance(strategy, SingleStrategyCreate):
+            logger.info("Processing single account strategy")
+            
+            # Validate broker account
             broker_account = db.query(BrokerAccount).filter(
                 BrokerAccount.account_id == strategy.account_id,
                 BrokerAccount.user_id == current_user.id,
@@ -98,11 +96,21 @@ async def activate_strategy(
                     detail=f"Broker account {strategy.account_id} not found or inactive"
                 )
             
-            # Use the broker_account.id instead of the account_id
-            strategy_data['account_id'] = broker_account.id
+            # Create single account strategy
+            db_strategy = ActivatedStrategy(
+                user_id=current_user.id,
+                strategy_type="single",
+                webhook_id=str(strategy.webhook_id),
+                ticker=strategy.ticker,
+                account_id=broker_account.id,
+                quantity=strategy.quantity,
+                is_active=True
+            )
             
-        elif isinstance(strategy, MultipleStrategyCreate):
-            # Handle leader account
+        else:  # MultipleStrategyCreate
+            logger.info("Processing multiple account strategy")
+            
+            # Validate leader account
             leader_account = db.query(BrokerAccount).filter(
                 BrokerAccount.account_id == strategy.leader_account_id,
                 BrokerAccount.user_id == current_user.id,
@@ -114,12 +122,28 @@ async def activate_strategy(
                     status_code=404,
                     detail=f"Leader account {strategy.leader_account_id} not found or inactive"
                 )
-            
-            strategy_data['leader_account_id'] = leader_account.id
 
-            # Validate and collect follower accounts
-            follower_accounts = []
-            for follower_id in strategy.follower_account_ids:
+            # Validate follower accounts and collect data
+            follower_data = []
+            existing_account_ids = set()
+            
+            # Validate length match between accounts and quantities
+            if len(strategy.follower_account_ids) != len(strategy.follower_quantities):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Number of follower accounts must match number of quantities"
+                )
+            
+            for idx, follower_id in enumerate(strategy.follower_account_ids):
+                # Check for duplicate accounts
+                if follower_id in existing_account_ids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Duplicate follower account: {follower_id}"
+                    )
+                existing_account_ids.add(follower_id)
+                
+                # Validate each follower account
                 follower = db.query(BrokerAccount).filter(
                     BrokerAccount.account_id == follower_id,
                     BrokerAccount.user_id == current_user.id,
@@ -132,51 +156,88 @@ async def activate_strategy(
                         detail=f"Follower account {follower_id} not found or inactive"
                     )
                 
-                follower_accounts.append(follower)
+                if follower.id == leader_account.id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Leader account cannot be a follower"
+                    )
+                
+                quantity = strategy.follower_quantities[idx]
+                if quantity <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid quantity for follower {follower_id}: {quantity}"
+                    )
+                
+                follower_data.append({
+                    'account': follower,
+                    'quantity': quantity
+                })
 
-        # Create new strategy
-        db_strategy = ActivatedStrategy(**strategy_data)
+            # Create multiple account strategy
+            db_strategy = ActivatedStrategy(
+                user_id=current_user.id,
+                strategy_type="multiple",
+                webhook_id=str(strategy.webhook_id),
+                ticker=strategy.ticker,
+                leader_account_id=leader_account.id,
+                leader_quantity=strategy.leader_quantity,
+                group_name=strategy.group_name,
+                is_active=True
+            )
+            
+            db.add(db_strategy)
+            db.flush()  # Get the strategy ID
+            
+            # Add followers with their quantities
+            for data in follower_data:
+                stmt = strategy_follower_quantities.insert().values(
+                    strategy_id=db_strategy.id,
+                    account_id=data['account'].id,
+                    quantity=data['quantity']
+                )
+                db.execute(stmt)
+
         db.add(db_strategy)
-        
-        # For multiple strategy, add follower accounts
-        if isinstance(strategy, MultipleStrategyCreate):
-            for follower in follower_accounts:
-                db_strategy.follower_accounts.append(follower)
-        
         db.commit()
         db.refresh(db_strategy)
-
-        # Create response with proper structure
-        response = StrategyResponse(
-            id=db_strategy.id,
-            strategy_type=db_strategy.strategy_type,
-            webhook_id=db_strategy.webhook_id,
-            ticker=db_strategy.ticker,
-            is_active=db_strategy.is_active,
-            created_at=db_strategy.created_at,
-            last_triggered=db_strategy.last_triggered,
-            stats=StrategyStats(
+        
+        # Prepare response data
+        response_data = {
+            "id": db_strategy.id,
+            "strategy_type": db_strategy.strategy_type,
+            "webhook_id": db_strategy.webhook_id,
+            "ticker": db_strategy.ticker,
+            "is_active": db_strategy.is_active,
+            "created_at": db_strategy.created_at,
+            "last_triggered": db_strategy.last_triggered,
+            "stats": StrategyStats(
                 total_trades=0,
                 successful_trades=0,
                 failed_trades=0,
                 total_pnl=Decimal('0.00')
             )
-        )
-
+        }
+        
         if db_strategy.strategy_type == "single":
-            response.account_id = strategy.account_id  # Use original account_id for response
-            response.quantity = db_strategy.quantity
+            response_data.update({
+                "account_id": strategy.account_id,
+                "quantity": db_strategy.quantity
+            })
         else:
-            response.leader_account_id = strategy.leader_account_id  # Use original account_id
-            response.leader_quantity = db_strategy.leader_quantity
-            response.follower_quantity = db_strategy.follower_quantity
-            response.group_name = db_strategy.group_name
-            response.follower_account_ids = strategy.follower_account_ids  # Use original account_ids
+            response_data.update({
+                "leader_account_id": strategy.leader_account_id,
+                "leader_quantity": db_strategy.leader_quantity,
+                "group_name": db_strategy.group_name,
+                "follower_account_ids": strategy.follower_account_ids,
+                "follower_quantities": strategy.follower_quantities
+            })
 
-        logger.info(f"Created strategy with ID: {db_strategy.id}")
-        return response
+        logger.info(f"Successfully created strategy with ID: {db_strategy.id}")
+        return StrategyResponse(**response_data)
 
     except HTTPException as he:
+        logger.error(f"HTTP Exception in activate_strategy: {str(he)}")
         raise he
     except Exception as e:
         logger.error(f"Error activating strategy: {str(e)}")
