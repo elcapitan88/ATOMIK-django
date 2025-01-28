@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 from datetime import datetime
 import logging
+import json
+import asyncio
 from typing import Optional, Dict, Any
 
 from app.core.config import settings
@@ -58,75 +60,86 @@ async def websocket_endpoint(
     token: str = Query(...),
     db: Session = Depends(get_db)
 ):
-    """WebSocket endpoint for real-time trading data"""
+    """WebSocket endpoint for trading accounts"""
+    metrics = HeartbeatMetrics()
+    
     try:
-        logger.info(f"WebSocket connection attempt for account: {account_id}")
-        
-        # Validate token first
+        # Validate token and get user
         user = await validate_ws_token(token, db)
         if not user:
-            logger.error(f"Invalid token for account {account_id}")
+            logger.warning(f"Invalid token for WebSocket connection: {account_id}")
             await websocket.close(code=4001)
             return
 
         # Verify account access
         account = await verify_account_access(user.id, account_id, db)
         if not account:
-            logger.error(f"Account access verification failed for account {account_id}")
+            logger.warning(f"Invalid account access: {account_id} for user {user.id}")
             await websocket.close(code=4003)
             return
 
-        # Accept connection initially to prevent timeout
+        # Accept connection and initialize monitoring
         await websocket.accept()
-        logger.info(f"WebSocket connection accepted for account: {account_id}")
-
-        # Use manager to handle connection and setup
-        connected = await websocket_manager.connect(
-            websocket=websocket,
-            client_id=account_id,
-            user_id=user.id
-        )
-
-        if not connected:
-            logger.error(f"Failed to establish managed connection for account {account_id}")
-            await websocket.close(code=4000)
-            return
+        await websocket_manager.connect(websocket, account_id, user.id)
+        await heartbeat_monitor.start_monitoring(websocket, account_id, metrics)
+        
+        logger.info(f"WebSocket connection established for account {account_id}")
 
         try:
-            # Main connection loop
             while True:
-                message = await websocket.receive_json()
-                logger.debug(f"Received message from {account_id}: {message}")
-                
-                # Handle empty array response (Tradovate heartbeat)
-                if message == '[]':
-                    continue
-                
-                # Process message through manager
-                response = await websocket_manager._process_messages(account_id)
-                if response:
-                    await websocket.send_json(response)
+                try:
+                    # Receive message with timeout
+                    data = await websocket.receive_text()
+                    
+                    # Handle heartbeat message
+                    if data == '[]':
+                        await heartbeat_monitor.process_heartbeat(account_id)
+                        continue
 
-        except WebSocketDisconnect:
-            logger.info(f"WebSocket disconnected normally for account: {account_id}")
-        except ValueError as e:
-            logger.error(f"Invalid message format from {account_id}: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error processing messages for {account_id}: {str(e)}")
-            if websocket.client_state == WebSocketState.CONNECTED:
-                await websocket.close(code=4000)
-    
+                    # Process non-heartbeat messages
+                    try:
+                        message = json.loads(data)
+                        await websocket_manager.process_message(account_id, message)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON received from {account_id}: {data}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error processing message from {account_id}: {str(e)}")
+                        continue
+
+                except WebSocketDisconnect:
+                    logger.info(f"Client disconnected normally: {account_id}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error receiving message from {account_id}: {str(e)}")
+                    break
+
+        finally:
+            # Cleanup on connection end
+            await websocket_manager.disconnect(account_id)
+            await heartbeat_monitor.stop_monitoring(account_id)
+            logger.info(f"WebSocket connection closed for account {account_id}")
+
+    except WebSocketDisconnect:
+        # Handle normal disconnection
+        logger.info(f"WebSocket disconnected normally: {account_id}")
+        
     except Exception as e:
-        logger.error(f"WebSocket error for account {account_id}: {str(e)}")
-        if websocket.client_state.connected:
+        # Handle unexpected errors
+        logger.error(f"WebSocket error for {account_id}: {str(e)}")
+        error_details = await handle_websocket_error(e, websocket, account_id)
+        logger.error(f"Error details: {error_details}")
+        
+        if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=4000)
+    
     finally:
-        # Ensure proper cleanup through manager
+        # Ensure everything is cleaned up
         try:
             await websocket_manager.disconnect(account_id)
-            logger.info(f"WebSocket connection cleanup completed for account: {account_id}")
-        except Exception as e:
-            logger.error(f"Error during connection cleanup for {account_id}: {str(e)}")
+            await heartbeat_monitor.stop_monitoring(account_id)
+        except Exception as cleanup_error:
+            logger.error(f"Error during cleanup for {account_id}: {str(cleanup_error)}")
 
 @router.get("/health")
 async def websocket_health():
