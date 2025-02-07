@@ -12,7 +12,7 @@ class BrokerAccount(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     broker_id = Column(String(50))  # e.g., "tradovate"
-    account_id = Column(String(100))
+    account_id = Column(String, unique=True, nullable=False)
     name = Column(String(200))
     environment = Column(String(10))
     is_active = Column(Boolean, default=True)

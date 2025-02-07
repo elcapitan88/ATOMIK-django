@@ -1,20 +1,23 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Numeric, Table, UniqueConstraint
-from sqlalchemy.orm import relationship, attribute_mapped_collection
+from sqlalchemy.orm import relationship, attribute_mapped_collection, backref
 from datetime import datetime
 import uuid
-from typing import List, Optional, Dict, Any
+import logging
+from typing import List, Optional, Dict, Any, Union
 from decimal import Decimal
 from ..db.base_class import Base
 from .user import User
 import json
 from .broker import BrokerAccount
 
+logger = logging.getLogger(__name__)
+
 # Association table for strategy followers with quantities
 strategy_follower_quantities = Table(
     'strategy_follower_quantities',
     Base.metadata,
-    Column('strategy_id', Integer, ForeignKey('activated_strategies.id')),
-    Column('account_id', Integer, ForeignKey('broker_accounts.id')),
+    Column('strategy_id', Integer, ForeignKey('activated_strategies.id', ondelete="CASCADE")),
+    Column('account_id', String, ForeignKey('broker_accounts.account_id', ondelete="CASCADE")),
     Column('quantity', Integer, nullable=False),
     UniqueConstraint('strategy_id', 'account_id', name='unique_strategy_follower')
 )
@@ -31,15 +34,15 @@ class ActivatedStrategy(Base):
 
     # Strategy Type and Configuration
     strategy_type = Column(String(20), nullable=False)  # 'single' or 'multiple'
-    webhook_id = Column(String(64), index=True)
+    webhook_id = Column(String(64), ForeignKey("webhooks.token"), index=True)
     ticker = Column(String(10), nullable=False)
 
     # Single Strategy Fields
-    account_id = Column(Integer, ForeignKey("broker_accounts.id"), nullable=True)
+    account_id = Column(String, ForeignKey("broker_accounts.account_id", ondelete="CASCADE"))
     quantity = Column(Integer, nullable=True)
 
     # Multiple Strategy Fields
-    leader_account_id = Column(Integer, ForeignKey("broker_accounts.id"), nullable=True)
+    leader_account_id = Column(String, ForeignKey("broker_accounts.account_id"), nullable=True)
     leader_quantity = Column(Integer, nullable=True)
     group_name = Column(String(100), nullable=True)
 
@@ -80,13 +83,20 @@ class ActivatedStrategy(Base):
 
     # Relationships
     user = relationship("User", back_populates="strategies")
+    webhook = relationship(
+        "Webhook",
+        primaryjoin="ActivatedStrategy.webhook_id == Webhook.token",
+        foreign_keys=[webhook_id],  # Add this line
+        back_populates="strategies"
+    )
+
     
     # Updated relationship for followers with quantities
     follower_accounts_with_quantities = relationship(
         "BrokerAccount",
         secondary=strategy_follower_quantities,
         backref="following_strategies_with_quantities",
-        collection_class=attribute_mapped_collection('account_id')
+        lazy="joined"  # This ensures quantities are loaded with the query
     )
     
     trades = relationship("Order", back_populates="strategy", cascade="all, delete-orphan")
@@ -105,12 +115,46 @@ class ActivatedStrategy(Base):
         super().__init__(**kwargs)
         self.webhook_id = str(uuid.uuid4()) if 'webhook_id' not in kwargs else kwargs['webhook_id']
 
-    def add_follower_with_quantity(self, account: BrokerAccount, quantity: int):
-        """Helper method to add a follower with its quantity"""
-        self.follower_accounts_with_quantities[account.id] = {
-            'account': account,
-            'quantity': quantity
-        }
+    def add_follower_with_quantity(self, account: BrokerAccount, quantity: int) -> None:
+        """Helper method to add a follower with its quantity
+        
+        Args:
+            account (BrokerAccount): The follower account to add
+            quantity (int): The quantity for this follower
+            
+        Raises:
+            ValueError: If account is already a follower or if quantity is invalid
+            TypeError: If invalid account type is provided
+        """
+        try:
+            # Input validation
+            if not isinstance(account, BrokerAccount):
+                raise TypeError("account must be a BrokerAccount instance")
+                
+            if not isinstance(quantity, int) or quantity <= 0:
+                raise ValueError("quantity must be a positive integer")
+                
+            # Check if account is leader account
+            if account.id == self.leader_account_id:
+                raise ValueError("Leader account cannot be added as a follower")
+            
+            # Check if account is already a follower
+            existing = self.follower_accounts_with_quantities.get(account.id)
+            if existing is not None:
+                raise ValueError(f"Account {account.id} is already a follower")
+
+            # Create the insert statement for the association table
+            insert_stmt = strategy_follower_quantities.insert().values(
+                strategy_id=self.id,
+                account_id=account.id,
+                quantity=quantity
+            )
+            
+            return insert_stmt
+
+        except Exception as e:
+            logger.error(f"Error adding follower account {account.id}: {str(e)}")
+            raise ValueError(f"Failed to add follower account: {str(e)}")
 
     def update_follower_quantity(self, account: BrokerAccount, quantity: int) -> None:
         """Update the quantity for a specific follower account."""
@@ -144,19 +188,35 @@ class ActivatedStrategy(Base):
             account_id: relationship['quantity']
             for account_id, relationship in self.follower_accounts_with_quantities.items()
         }
+    
+    def validate_follower_accounts(self) -> bool:
+        """Validate follower accounts and their quantities"""
+        try:
+            for follower_id in self.follower_accounts_with_quantities:
+                if not self.follower_accounts_with_quantities.get(follower_id):
+                    logger.error(f"Missing quantity data for follower {follower_id}")
+                    return False
+            return True
+        except Exception as e:
+            logger.error(f"Error validating follower accounts: {str(e)}")
+            return False
 
-    def update_stats(self, trade_result: bool, pnl: float) -> None:
+    def update_stats(self, trade_result: bool, pnl: Optional[float] = 0) -> None:
         """Update strategy statistics after a trade."""
-        self.total_trades += 1
-        if trade_result:
-            self.successful_trades += 1
-        else:
-            self.failed_trades += 1
-        
-        self.total_pnl += Decimal(str(pnl))
-        
-        if self.total_trades > 0:
-            self.win_rate = Decimal(str(self.successful_trades / self.total_trades * 100))
+        try:
+            self.total_trades = (self.total_trades or 0) + 1
+            if trade_result:
+                self.successful_trades = (self.successful_trades or 0) + 1
+            else:
+                self.failed_trades = (self.failed_trades or 0) + 1
+            
+            if pnl is not None:
+                self.total_pnl = (self.total_pnl or Decimal('0')) + Decimal(str(pnl))
+            
+            if self.total_trades > 0:
+                self.win_rate = Decimal(str(self.successful_trades / self.total_trades * 100))
+        except Exception as e:
+            logger.error(f"Error updating strategy stats: {str(e)}")
 
     def get_performance_metrics(self) -> dict:
         """Get comprehensive performance metrics."""
@@ -201,6 +261,41 @@ class ActivatedStrategy(Base):
             except json.JSONDecodeError:
                 return {}
         return {}
+    
+    def get_follower_accounts(self) -> List[dict]:
+        follower_data = []
+        try:
+            # Convert account_id to string when querying
+            for follower_account in self.follower_accounts_with_quantities:
+                follower_data.append({
+                    'account_id': str(follower_account.account_id),  # Ensure string type
+                    'quantity': self.get_follower_quantity(follower_account.account_id)
+                })
+            return follower_data
+        except Exception as e:
+            logger.error(f"Error getting follower accounts for strategy {self.id}: {str(e)}")
+            return []
+
+    def get_follower_quantity(self, account_id: Union[int, str]) -> int:
+        """
+        Get the quantity for a specific follower account
+        """
+        try:
+            # Convert account_id to string
+            account_id_str = str(account_id)
+            
+            result = self._sa_instance_state.session.query(strategy_follower_quantities).filter_by(
+                strategy_id=self.id,
+                account_id=account_id_str  # Use string version
+            ).first()
+            
+            if result:
+                return result.quantity
+            return 0
+        except Exception as e:
+            self._sa_instance_state.session.rollback()  # Roll back on error
+            logger.error(f"Error getting follower quantity: {str(e)}")
+            return 0
 
     def __str__(self):
         return f"Strategy {self.id} - {self.ticker} ({self.strategy_type})"

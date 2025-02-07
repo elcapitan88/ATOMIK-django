@@ -21,6 +21,23 @@ from ....core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+class TradovateOrderType:
+    Market = "Market"
+    Limit = "Limit"
+    Stop = "Stop"
+    StopLimit = "StopLimit"
+
+class TradovateOrderAction:
+    Buy = "Buy"
+    Sell = "Sell"
+
+class TradovateTimeInForce:
+    Day = "Day"
+    GTC = "GTC"  # Good Till Cancel
+    IOC = "IOC"  # Immediate or Cancel
+    FOK = "FOK" 
+
 class TradovateBroker(BaseBroker):
     """Tradovate broker implementation"""
     
@@ -39,8 +56,8 @@ class TradovateBroker(BaseBroker):
         self, 
         method: str, 
         url: str, 
-        data: Optional[dict | str] = None, 
-        headers: Optional[dict] = None
+        data: Optional[Dict[str, Any] | str] = None, 
+        headers: Optional[Dict[str, str]] = None
     ) -> Any:
         """Make HTTP request to Tradovate API"""
         try:
@@ -48,27 +65,25 @@ class TradovateBroker(BaseBroker):
                 request_kwargs = {
                     'method': method,
                     'url': url,
-                    'headers': headers or {}
+                    'headers': headers or {},
                 }
 
                 if data:
-                    # Always send JSON data
                     request_kwargs['json'] = data if isinstance(data, dict) else json.loads(data)
 
-                async with session.request(**request_kwargs) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"Request failed - Status: {response.status}, URL: {url}, Error: {error_text}")
-                        raise AuthenticationError(f"Request failed with status {response.status}: {error_text}")
-                    
-                    return await response.json()
+                logger.debug(f"Making request to {url}")
 
-        except aiohttp.ClientError as e:
-            logger.error(f"HTTP request failed: {str(e)}")
-            raise AuthenticationError(f"HTTP request failed: {str(e)}")
+                async with session.request(**request_kwargs) as response:
+                    response_text = await response.text()
+                    
+                    if response.status != 200:
+                        raise ConnectionError(f"Request failed with status {response.status}: {response_text}")
+                    
+                    return json.loads(response_text) if response_text else None
+
         except Exception as e:
-            logger.error(f"Unexpected error in request: {str(e)}")
-            raise AuthenticationError(f"Request error: {str(e)}")
+            logger.error(f"Request error: {str(e)}")
+            raise
 
 
 
@@ -609,17 +624,59 @@ class TradovateBroker(BaseBroker):
             api_url = self.api_urls[account.environment]
             headers = self._get_auth_headers(account.credentials)
             
-            response = requests.get(
-                f"{api_url}/account/status",
+            logger.info(f"""
+            Checking account status:
+            Account Name (accountSpec): {account.name}
+            Account ID: {account.account_id}
+            Environment: {account.environment}
+            API URL: {api_url}
+            """)
+
+            # Get account details using the name (accountSpec)
+            account_response = await self._make_request(
+                'GET',
+                f"{api_url}/account/find",
+                params={"name": account.name},  # Query by name which is accountSpec
                 headers=headers
             )
             
-            if response.status_code != 200:
-                raise ConnectionError(f"Failed to get account status: {response.text}")
-                
-            return response.json()
+            if not account_response:
+                raise ConnectionError("Empty account response from Tradovate API")
+
+            # Get cash balance using accountId
+            cash_response = await self._make_request(
+                'GET',
+                f"{api_url}/cashBalance/find",
+                params={"accountId": int(account.account_id)},
+                headers=headers
+            )
+
+            # Get P&L info using accountId
+            pnl_response = await self._make_request(
+                'GET',
+                f"{api_url}/account/getDayPnL",
+                params={"accountId": int(account.account_id)},
+                headers=headers
+            )
+
+            # Combine all information
+            return {
+                "status": "active",
+                "account_id": str(account_response.get('id')),
+                "name": account_response.get('name', ''),
+                "balance": float(cash_response.get('cashBalance', 0)) if cash_response else 0.0,
+                "available_margin": float(cash_response.get('availableForTrading', 0)) if cash_response else 0.0,
+                "day_pnl": float(pnl_response.get('pnl', 0)) if pnl_response else 0.0,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
         except Exception as e:
-            logger.error(f"Error getting account status: {str(e)}")
+            logger.error(f"""
+            Failed to get account status:
+            Account ID: {account.account_id}
+            Account Name: {account.name}
+            Error: {str(e)}
+            """)
             raise
 
     async def get_positions(self, account: BrokerAccount) -> List[Dict[str, Any]]:
@@ -661,24 +718,81 @@ class TradovateBroker(BaseBroker):
             raise
 
     async def place_order(self, account: BrokerAccount, order_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Place a trading order"""
+        """Place a trading order with Tradovate"""
         try:
             api_url = self.api_urls[account.environment]
             headers = self._get_auth_headers(account.credentials)
-            
-            response = requests.post(
-                f"{api_url}/order/placeOrder",
-                headers=headers,
-                json=order_data
-            )
-            
-            if response.status_code != 200:
-                raise OrderError(f"Failed to place order: {response.text}")
+
+            # Map generic order type to Tradovate-specific order type
+            order_type_mapping = {
+                "market": TradovateOrderType.Market,
+                "limit": TradovateOrderType.Limit,
+                "stop": TradovateOrderType.Stop,
+                "stop_limit": TradovateOrderType.StopLimit
+            }
+
+            # Map generic side/action to Tradovate-specific action
+            action_mapping = {
+                "buy": TradovateOrderAction.Buy,
+                "sell": TradovateOrderAction.Sell
+            }
+
+            # Construct Tradovate-specific order payload
+            tradovate_order = {
+                "accountSpec": account.name,
+                "accountId": int(account.account_id),
+                "symbol": order_data["symbol"],
+                "orderQty": order_data["quantity"],
+                "orderType": order_type_mapping[order_data["type"].lower()],
+                "action": action_mapping[order_data["side"].lower()],
+                "timeInForce": order_data.get("time_in_force", "GTC"),
+                "isAutomated": True
+            }
+
+            # Add conditional fields based on order type
+            if order_data.get("price") and order_data["type"].lower() in ["limit", "stop_limit"]:
+                tradovate_order["price"] = order_data["price"]
                 
-            return response.json()
+            if order_data.get("stop_price") and order_data["type"].lower() in ["stop", "stop_limit"]:
+                tradovate_order["stopPrice"] = order_data["stop_price"]
+
+            logger.info(f"""
+            Preparing Tradovate order:
+            Account Spec: {tradovate_order['accountSpec']}
+            Account ID: {tradovate_order['accountId']}
+            Symbol: {tradovate_order['symbol']}
+            Action: {tradovate_order['action']}
+            Order Type: {tradovate_order['orderType']}
+            Quantity: {tradovate_order['orderQty']}
+            """)
+
+            response = await self._make_request(
+                'POST',
+                f"{api_url}/order/placeOrder",
+                data=tradovate_order,
+                headers=headers
+            )
+
+            if not response:
+                raise OrderError("Empty response when placing order")
+
+            return {
+                "order_id": str(response.get('orderId')),
+                "status": response.get('orderStatus', 'pending'),
+                "filled_quantity": response.get('filledQty', 0),
+                "remaining_quantity": response.get('remainingQty', order_data["quantity"]),
+                "average_price": response.get('avgFillPrice'),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
         except Exception as e:
-            logger.error(f"Error placing order: {str(e)}")
-            raise
+            logger.error(f"""
+            Order placement failed:
+            Error: {str(e)}
+            Account: {account.name} ({account.account_id})
+            Order Data: {json.dumps(order_data, indent=2)}
+            """)
+            raise OrderError(f"Failed to place order: {str(e)}")
 
     async def cancel_order(self, account: BrokerAccount, order_id: str) -> bool:
         """Cancel an order"""

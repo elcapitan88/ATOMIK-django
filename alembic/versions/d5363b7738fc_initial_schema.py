@@ -1,8 +1,8 @@
-"""add_broker_account_updates
+"""initial_schema
 
-Revision ID: 0344bb8c1e66
-Revises: 17b39efede11
-Create Date: 2025-01-15 10:31:12.741966
+Revision ID: d5363b7738fc
+Revises: 4c8f07501550
+Create Date: 2025-02-03 16:08:51.021876
 
 """
 from typing import Sequence, Union
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '0344bb8c1e66'
-down_revision: Union[str, None] = '17b39efede11'
+revision: str = 'd5363b7738fc'
+down_revision: Union[str, None] = '4c8f07501550'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

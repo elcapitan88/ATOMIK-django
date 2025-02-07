@@ -6,10 +6,19 @@ from starlette.websockets import WebSocket, WebSocketState
 from fastapi import WebSocketDisconnect, HTTPException
 import json
 from rx.subject import Subject
+from decimal import Decimal
 
-from ..core.config import settings
-from .metrics import HeartbeatMetrics
+from .types.messages import (
+    WSMessageType,
+    WSAccountState,
+    AccountBalance,
+    Position,
+    Order,
+    WSErrorMessage,
+    ErrorCode
+)
 from .monitoring.monitor import MonitoringService
+from .metrics import HeartbeatMetrics
 from .errors import WebSocketError, handle_websocket_error
 from .websocket_config import WebSocketConfig
 
@@ -38,26 +47,31 @@ class WebSocketManager:
         self.order_update_subject = Subject()
         self.account_update_subject = Subject()
         
-        # Monitoring and Metrics
-        self.metrics: Dict[str, HeartbeatMetrics] = {}
-        self.monitoring_service = MonitoringService()
-        self.last_message_times: Dict[str, float] = {}
-        
         # State Management
         self._initialized = False
         self._lock = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
         self.is_accepted: Dict[str, bool] = {}
         
+        # Subscription Management
+        self.account_subscriptions: Dict[str, Set[str]] = {}
+        self.account_states: Dict[str, WSAccountState] = {}
+        self.sequence_numbers: Dict[str, int] = {}
+        
+        # Monitoring and Metrics
+        self.metrics: Dict[str, HeartbeatMetrics] = {}
+        self.monitoring_service = MonitoringService()
+        self.last_message_times: Dict[str, float] = {}
+        
         # Configuration
         self.config = WebSocketConfig.HEARTBEAT
         self.MAX_RECONNECT_ATTEMPTS = 5
-        self.CONNECTION_TIMEOUT = 10  # seconds
+        self.CONNECTION_TIMEOUT = 10
         self.MAX_CONNECTIONS_PER_USER = 5
-        self.HEARTBEAT_THRESHOLD = 2500  # 2.5 seconds in milliseconds
+        self.HEARTBEAT_THRESHOLD = 2500
 
     async def initialize(self) -> bool:
-        """Initialize the WebSocket manager and its dependencies"""
+        """Initialize the WebSocket manager"""
         if self._initialized:
             return True
 
@@ -65,7 +79,7 @@ class WebSocketManager:
             async with self._lock:
                 logger.info("Initializing WebSocket manager...")
                 
-                # Initialize message queues and state tracking
+                # Initialize collections
                 self.active_connections = {}
                 self.connection_states = {}
                 self.connection_details = {}
@@ -75,7 +89,7 @@ class WebSocketManager:
                 await self.monitoring_service.start()
                 logger.info("Monitoring service started")
 
-                # Start background cleanup task
+                # Start cleanup task
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
                 logger.info("Cleanup task started")
                 
@@ -91,7 +105,6 @@ class WebSocketManager:
     async def connect(self, websocket: WebSocket, client_id: str, user_id: Optional[int] = None) -> bool:
         """Accept and initialize a new WebSocket connection"""
         try:
-            # Don't try to accept again, just track the connection
             self.active_connections[client_id] = websocket
             self.connection_states[client_id] = ConnectionState.CONNECTED
             self.is_accepted[client_id] = True
@@ -108,6 +121,9 @@ class WebSocketManager:
                 'message_count': 0
             }
 
+            # Initialize message queue for this connection
+            self.message_queues[client_id] = asyncio.Queue()
+
             logger.info(f"WebSocket connected - Client: {client_id}, User: {user_id}")
             return True
                 
@@ -118,13 +134,15 @@ class WebSocketManager:
     async def disconnect(self, client_id: str) -> None:
         """Handle WebSocket disconnection and cleanup"""
         try:
+            # Close WebSocket if still connected
             ws = self.active_connections.get(client_id)
             if ws and ws.client_state == WebSocketState.CONNECTED:
                 await ws.close()
 
+            # Clean up connection tracking
             self.active_connections.pop(client_id, None)
             self.connection_states.pop(client_id, None)
-            self.is_accepted.pop(client_id, None)  # Clean up acceptance tracking
+            self.is_accepted.pop(client_id, None)
             
             # Clean up user connections
             user_id = self.connection_details.get(client_id, {}).get('user_id')
@@ -133,14 +151,48 @@ class WebSocketManager:
                 if not self.user_connections[user_id]:
                     del self.user_connections[user_id]
 
+            # Clean up message queues
+            self.message_queues.pop(client_id, None)
+            self.pending_messages.pop(client_id, None)
+            
+            # Clean up connection details
             self.connection_details.pop(client_id, None)
+            
+            # Clean up subscriptions and state
+            await self.cleanup_account(client_id)
             
             logger.info(f"WebSocket disconnected - Client: {client_id}")
 
         except Exception as e:
             logger.error(f"Error in disconnect: {str(e)}")
 
-    async def process_message(self, client_id: str, message: str) -> None:
+    async def get_account_state(self, account_id: str) -> Optional[WSAccountState]:
+        """Get current account state"""
+        try:
+            if account_id not in self.account_states:
+                # Initialize empty state if none exists
+                self.account_states[account_id] = WSAccountState(
+                    account_id=account_id,
+                    balance=AccountBalance(
+                        cash_balance=Decimal('0'),
+                        available_balance=Decimal('0'),
+                        margin_used=Decimal('0'),
+                        unrealized_pl=Decimal('0'),
+                        realized_pl=Decimal('0')
+                    ),
+                    positions=[],
+                    orders=[],
+                    sequence_number=0
+                )
+                self.sequence_numbers[account_id] = 0
+
+            return self.account_states[account_id]
+
+        except Exception as e:
+            logger.error(f"Error getting account state for {account_id}: {str(e)}")
+            return None
+
+    async def process_message(self, client_id: str, message: Dict[str, Any]) -> None:
         """Process incoming WebSocket messages"""
         if client_id not in self.message_queues:
             logger.warning(f"No message queue for client {client_id}")
@@ -156,8 +208,8 @@ class WebSocketManager:
                 if client_id in self.metrics:
                     await self.metrics[client_id].record_heartbeat()
                 return
-            
-            # Process non-heartbeat message
+
+            # Process non-heartbeat messages
             await self.message_queues[client_id].put(message)
             
             # Update message stats
@@ -179,40 +231,15 @@ class WebSocketManager:
                 for client_id, last_time in list(self.last_message_times.items()):
                     time_since_last = current_time - last_time
                     
-                    # Check for stale connections (no messages for 7.5 seconds - 3 missed heartbeats)
                     if time_since_last > (self.HEARTBEAT_THRESHOLD * 3):
                         logger.warning(f"Stale connection detected for {client_id}")
-                        await self.disconnect(
-                            client_id,
-                            code=4000,
-                            reason="Connection stale - no heartbeat"
-                        )
+                        await self.disconnect(client_id)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in cleanup loop: {str(e)}")
-                await asyncio.sleep(5)  # Wait before retrying
-
-    def get_connection_info(self, client_id: str) -> Optional[Dict[str, Any]]:
-        """Get detailed information about a specific connection"""
-        metrics = self.metrics.get(client_id)
-        return {
-            "status": self.connection_states.get(client_id),
-            "details": self.connection_details.get(client_id),
-            "metrics": metrics.get_metrics() if metrics else None,
-            "last_message": self.last_message_times.get(client_id)
-        }
-
-    def get_status(self) -> Dict[str, Any]:
-        """Get comprehensive WebSocket manager status"""
-        return {
-            "active_connections": len(self.active_connections),
-            "user_count": len(self.user_connections),
-            "initialized": self._initialized,
-            "monitoring_active": self.monitoring_service.is_running(),
-            "connection_states": self.connection_states.copy()
-        }
+                await asyncio.sleep(5)
 
     async def cleanup(self) -> None:
         """Cleanup all WebSocket manager resources"""
@@ -233,11 +260,7 @@ class WebSocketManager:
 
                 # Disconnect all clients
                 for client_id in list(self.active_connections.keys()):
-                    await self.disconnect(
-                        client_id,
-                        code=1001,
-                        reason="Server shutdown"
-                    )
+                    await self.disconnect(client_id)
 
                 # Clear all collections
                 self.active_connections.clear()
@@ -253,6 +276,37 @@ class WebSocketManager:
 
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
+
+    async def cleanup_account(self, account_id: str) -> None:
+        """Clean up account resources"""
+        try:
+            async with self._lock:
+                self.account_subscriptions.pop(account_id, None)
+                self.account_states.pop(account_id, None)
+                self.sequence_numbers.pop(account_id, None)
+                logger.info(f"Cleaned up resources for account {account_id}")
+
+        except Exception as e:
+            logger.error(f"Error cleaning up account {account_id}: {str(e)}")
+
+    def get_connection_info(self, client_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed information about a specific connection"""
+        return {
+            "status": self.connection_states.get(client_id),
+            "details": self.connection_details.get(client_id),
+            "metrics": self.metrics.get(client_id),
+            "last_message": self.last_message_times.get(client_id)
+        }
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get comprehensive WebSocket manager status"""
+        return {
+            "active_connections": len(self.active_connections),
+            "user_count": len(self.user_connections),
+            "initialized": self._initialized,
+            "monitoring_active": self.monitoring_service.is_running(),
+            "connection_states": self.connection_states.copy()
+        }
 
 # Create singleton instance
 websocket_manager = WebSocketManager()

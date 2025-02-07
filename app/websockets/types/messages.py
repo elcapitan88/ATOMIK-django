@@ -20,6 +20,8 @@ class WSMessageType(str, Enum):
     HEARTBEAT_ACK = "heartbeat_ack"
     ERROR = "error"
     SYSTEM = "system"
+    SYNC_REQUEST = "sync_request"  # Added for Tradovate sync
+    ACCOUNT_STATE = "account_state"  # Added for combined account state
 
 class OrderStatus(str, Enum):
     """Order status enumeration"""
@@ -47,6 +49,7 @@ class SubscriptionAction(str, Enum):
     """Subscription actions"""
     SUBSCRIBE = "subscribe"
     UNSUBSCRIBE = "unsubscribe"
+    SYNC = "sync"  # Added for Tradovate sync request
 
 class ErrorCode(str, Enum):
     """Error codes for WebSocket messages"""
@@ -61,6 +64,7 @@ class ErrorCode(str, Enum):
     SYSTEM_ERROR = "system_error"
     HEARTBEAT_TIMEOUT = "heartbeat_timeout"
     HEARTBEAT_MISSED = "heartbeat_missed"
+    SYNC_FAILED = "sync_failed"  # Added for sync failures
 
 # Base message model
 class WSBaseMessage(BaseModel):
@@ -72,8 +76,68 @@ class WSBaseMessage(BaseModel):
 
     class Config:
         json_encoders = {
-            datetime: lambda dt: dt.isoformat()
+            datetime: lambda dt: dt.isoformat(),
+            Decimal: str
         }
+
+# Sync Request Messages
+class WSSyncRequest(WSBaseMessage):
+    """Sync request message for Tradovate"""
+    type: WSMessageType = WSMessageType.SYNC_REQUEST
+    account_id: str
+    request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    endpoints: List[str]  # List of endpoints to sync (e.g., ['user', 'account', 'position'])
+
+class WSSyncResponse(WSBaseMessage):
+    """Sync response message"""
+    type: WSMessageType = WSMessageType.SYNC_REQUEST
+    request_id: str
+    success: bool
+    message: Optional[str] = None
+
+# Account State Message (Combined Updates)
+class AccountBalance(BaseModel):
+    """Account balance information"""
+    cash_balance: Decimal
+    available_balance: Decimal
+    margin_used: Decimal
+    unrealized_pl: Decimal
+    realized_pl: Decimal
+    initial_margin: Optional[Decimal] = None
+    maintenance_margin: Optional[Decimal] = None
+
+class Position(BaseModel):
+    """Position information"""
+    contract_id: str
+    symbol: str
+    net_position: Decimal
+    average_price: Decimal
+    unrealized_pl: Decimal
+    realized_pl: Decimal
+    timestamp: datetime
+
+class Order(BaseModel):
+    """Order information"""
+    order_id: str
+    contract_id: str
+    symbol: str
+    order_type: OrderType
+    side: OrderSide
+    quantity: Decimal
+    filled_quantity: Decimal
+    price: Optional[Decimal] = None
+    status: OrderStatus
+    timestamp: datetime
+
+class WSAccountState(WSBaseMessage):
+    """Combined account state message"""
+    type: WSMessageType = WSMessageType.ACCOUNT_STATE
+    account_id: str
+    balance: AccountBalance
+    positions: List[Position] = []
+    orders: List[Order] = []
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    sequence_number: int  # For tracking message order
 
 # Authentication messages
 class WSAuthRequest(WSBaseMessage):
@@ -89,106 +153,20 @@ class WSAuthResponse(WSBaseMessage):
     message: Optional[str] = None
     user_id: Optional[int] = None
 
-# Market data messages
-class MarketDataLevel(BaseModel):
-    """Price level for order book"""
-    price: Decimal
-    size: Decimal
-
-class WSMarketDataMessage(WSBaseMessage):
-    """Market data message"""
-    type: WSMessageType = WSMessageType.MARKET_DATA
-    symbol: str
-    last_price: Decimal
-    volume: Optional[Decimal] = None
-    bid: Optional[Decimal] = None
-    ask: Optional[Decimal] = None
-    high: Optional[Decimal] = None
-    low: Optional[Decimal] = None
-    open: Optional[Decimal] = None
-    close: Optional[Decimal] = None
-    orderbook: Optional[Dict[str, List[MarketDataLevel]]] = None
-
-# Order messages
-class WSOrderRequest(WSBaseMessage):
-    """Order request message"""
-    type: WSMessageType = WSMessageType.ORDER
-    symbol: str
-    side: OrderSide
-    order_type: OrderType
-    quantity: Decimal
-    price: Optional[Decimal] = None
-    stop_price: Optional[Decimal] = None
-    time_in_force: str = "GTC"
-    client_order_id: Optional[str] = None
-
-class WSOrderResponse(WSBaseMessage):
-    """Order response message"""
-    type: WSMessageType = WSMessageType.ORDER
-    order_id: str
-    client_order_id: Optional[str] = None
-    symbol: str
-    side: OrderSide
-    order_type: OrderType
-    quantity: Decimal
-    filled_quantity: Decimal = Decimal(0)
-    remaining_quantity: Decimal
-    price: Optional[Decimal] = None
-    stop_price: Optional[Decimal] = None
-    status: OrderStatus
-    message: Optional[str] = None
-
-class WSOrderUpdate(WSBaseMessage):
-    """Order update message"""
-    type: WSMessageType = WSMessageType.ORDER
-    order_id: str
-    client_order_id: Optional[str] = None
-    symbol: str
-    side: OrderSide
-    status: OrderStatus
-    filled_quantity: Decimal
-    remaining_quantity: Decimal
-    average_price: Optional[Decimal] = None
-    last_fill_price: Optional[Decimal] = None
-    last_fill_quantity: Optional[Decimal] = None
-
-# Position messages
-class WSPosition(WSBaseMessage):
-    """Position message"""
-    type: WSMessageType = WSMessageType.POSITION
-    symbol: str
-    quantity: Decimal
-    entry_price: Decimal
-    current_price: Decimal
-    unrealized_pnl: Decimal
-    realized_pnl: Decimal
-    liquidation_price: Optional[Decimal] = None
-    margin_used: Optional[Decimal] = None
-
-# Account messages
-class WSAccountUpdate(WSBaseMessage):
-    """Account update message"""
-    type: WSMessageType = WSMessageType.ACCOUNT
-    account_id: str
-    balance: Decimal
-    available_balance: Decimal
-    margin_used: Optional[Decimal] = None
-    positions: List[WSPosition] = []
-    currency: str = "USD"
-
 # Subscription messages
 class WSSubscriptionRequest(WSBaseMessage):
     """Subscription request message"""
     type: WSMessageType = WSMessageType.SUBSCRIPTION
     action: SubscriptionAction
-    symbols: List[str]
-    channels: Optional[List[str]] = None
+    account_id: str
+    endpoints: List[str] = []  # For specifying which endpoints to subscribe to
 
 class WSSubscriptionResponse(WSBaseMessage):
     """Subscription response message"""
     type: WSMessageType = WSMessageType.SUBSCRIPTION
     success: bool
-    symbols: List[str]
+    account_id: str
+    endpoints: List[str]
     message: Optional[str] = None
 
 # Error messages
@@ -206,39 +184,16 @@ class WSSystemMessage(WSBaseMessage):
     event: str
     details: Optional[Dict[str, Any]] = None
 
-# Heartbeat messages
-class HeartbeatMessage(WSBaseMessage):
-    """Heartbeat message"""
-    type: WSMessageType = WSMessageType.HEARTBEAT
-    sequence_number: int
-    client_id: Optional[str] = None
-    account_id: str
-    metrics: Optional[Dict[str, Any]] = None
-
-class HeartbeatAckMessage(WSBaseMessage):
-    """Heartbeat acknowledgment message"""
-    type: WSMessageType = WSMessageType.HEARTBEAT_ACK
-    sequence_number: int
-    original_timestamp: datetime
-    account_id: str
-    latency: Optional[float] = None
-    client_metrics: Optional[Dict[str, Any]] = None
-
 # Message type union
 WSMessage = Union[
     WSAuthRequest,
     WSAuthResponse,
-    WSMarketDataMessage,
-    WSOrderRequest,
-    WSOrderResponse,
-    WSOrderUpdate,
-    WSPosition,
-    WSAccountUpdate,
+    WSSyncRequest,
+    WSSyncResponse,
+    WSAccountState,
     WSSubscriptionRequest,
     WSSubscriptionResponse,
     WSErrorMessage,
-    HeartbeatMessage,
-    HeartbeatAckMessage,
     WSSystemMessage
 ]
 
@@ -246,32 +201,31 @@ def parse_ws_message(data: Dict[str, Any]) -> WSMessage:
     """Parse a raw WebSocket message into the appropriate type"""
     try:
         message_type = data.get("type")
+        logger.info(f"Parsing message of type: {message_type}")  # Add this line
+        
         if not message_type:
             raise ValueError("Message type not specified")
 
         message_classes = {
+            WSMessageType.SYNC_REQUEST: WSSyncRequest,
+            WSMessageType.SUBSCRIPTION: WSSubscriptionRequest,
             WSMessageType.AUTH: WSAuthRequest if "token" in data else WSAuthResponse,
-            WSMessageType.MARKET_DATA: WSMarketDataMessage,
-            WSMessageType.ORDER: (
-                WSOrderRequest if "client_order_id" in data 
-                else WSOrderResponse if "order_id" in data 
-                else WSOrderUpdate
-            ),
-            WSMessageType.POSITION: WSPosition,
-            WSMessageType.ACCOUNT: WSAccountUpdate,
-            WSMessageType.SUBSCRIPTION: (
-                WSSubscriptionRequest if "action" in data 
-                else WSSubscriptionResponse
-            ),
             WSMessageType.ERROR: WSErrorMessage,
-            WSMessageType.HEARTBEAT: HeartbeatMessage,
-            WSMessageType.HEARTBEAT_ACK: HeartbeatAckMessage,
             WSMessageType.SYSTEM: WSSystemMessage
         }
 
-        message_class = message_classes.get(message_type)
-        if not message_class:
+        # Log the available message types and the one we're trying to match
+        logger.info(f"Looking for type {message_type} in available types: {[t.value for t in WSMessageType]}")
+
+        try:
+            message_type_enum = WSMessageType(message_type)
+            message_class = message_classes.get(message_type_enum)
+        except ValueError as e:
+            logger.error(f"Invalid message type: {message_type}")
             raise ValueError(f"Unknown message type: {message_type}")
+
+        if not message_class:
+            raise ValueError(f"No handler for message type: {message_type}")
 
         return message_class(**data)
         
@@ -279,25 +233,19 @@ def parse_ws_message(data: Dict[str, Any]) -> WSMessage:
         logger.error(f"Error parsing WebSocket message: {str(e)}")
         raise ValueError(f"Invalid message format: {str(e)}")
 
-def create_heartbeat_message(account_id: str, sequence_number: int, metrics: Optional[Dict[str, Any]] = None) -> HeartbeatMessage:
-    """Create a heartbeat message"""
-    return HeartbeatMessage(
+def create_account_state_message(
+    account_id: str,
+    balance: AccountBalance,
+    positions: List[Position],
+    orders: List[Order],
+    sequence_number: int
+) -> WSAccountState:
+    """Create a combined account state message"""
+    return WSAccountState(
         account_id=account_id,
+        balance=balance,
+        positions=positions,
+        orders=orders,
         sequence_number=sequence_number,
-        metrics=metrics,
         timestamp=datetime.utcnow()
-    )
-
-def create_heartbeat_ack(
-    original_message: HeartbeatMessage,
-    latency: Optional[float] = None,
-    client_metrics: Optional[Dict[str, Any]] = None
-) -> HeartbeatAckMessage:
-    """Create a heartbeat acknowledgment message"""
-    return HeartbeatAckMessage(
-        sequence_number=original_message.sequence_number,
-        original_timestamp=original_message.timestamp,
-        account_id=original_message.account_id,
-        latency=latency,
-        client_metrics=client_metrics
     )

@@ -1,12 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Body
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional
+from pydantic import BaseModel
 import hmac
 import hashlib
 import secrets
 from datetime import datetime
 import logging
 
+from ....models.webhook import Webhook, WebhookLog, WebhookSubscription, WebhookRating
 from ....core.security import get_current_user
 from ....core.permissions import check_subscription_feature
 from ....db.session import get_db
@@ -194,6 +197,7 @@ async def list_webhooks(
             require_signature=webhook.require_signature,
             max_retries=webhook.max_retries,
             is_active=webhook.is_active,
+            is_shared=webhook.is_shared,
             created_at=webhook.created_at,
             last_triggered=webhook.last_triggered,
             secret_key=webhook.secret_key,  # Include the secret key
@@ -387,4 +391,349 @@ async def test_webhook(
         raise HTTPException(
             status_code=500,
             detail=f"Webhook test failed: {str(e)}"
+        )
+@router.post("/{token}/share", response_model=WebhookOut)
+async def toggle_share_webhook(
+    token: str,
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        webhook = db.query(Webhook).filter(
+            Webhook.token == token,
+            Webhook.user_id == current_user.id
+        ).first()
+
+        if not webhook:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+
+        try:
+            new_shared_state = data.get("isActive", False)
+            webhook.is_shared = new_shared_state
+            webhook.details = data.get("description", webhook.details)
+            
+            # Only update strategy_type if it's provided and valid
+            if strategy_type := data.get("strategyType"):
+                webhook.strategy_type = strategy_type
+            elif new_shared_state:
+                # If activating sharing, strategy type is required
+                raise HTTPException(
+                    status_code=400,
+                    detail="Update Strategy Type before sharing"
+                )
+
+            webhook.sharing_enabled_at = datetime.utcnow() if new_shared_state else None
+
+            db.commit()
+            db.refresh(webhook)
+
+            # Create a properly formatted response using the model
+            return WebhookOut(
+                id=webhook.id,
+                user_id=webhook.user_id,
+                token=webhook.token,
+                name=webhook.name,
+                source_type=webhook.source_type,
+                details=webhook.details,
+                allowed_ips=webhook.allowed_ips,
+                max_triggers_per_minute=webhook.max_triggers_per_minute,
+                require_signature=webhook.require_signature,
+                max_retries=webhook.max_retries,
+                is_active=webhook.is_active,
+                is_shared=webhook.is_shared,
+                created_at=webhook.created_at,
+                last_triggered=webhook.last_triggered,
+                webhook_url=generate_webhook_url(webhook),
+                secret_key=webhook.secret_key,
+                strategy_type=webhook.strategy_type,
+                subscriber_count=webhook.subscriber_count,
+                rating=webhook.rating,
+                username=current_user.username
+            )
+
+        except SQLAlchemyError as db_error:
+            db.rollback()
+            logger.error(f"Database error while updating webhook: {str(db_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Database error occurred while updating webhook"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating webhook sharing status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update webhook sharing status: {str(e)}"
+        )
+
+@router.get("/shared", response_model=List[WebhookOut])
+async def list_shared_strategies(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List all shared strategies"""
+    try:
+        webhooks = (
+            db.query(Webhook)
+            .join(User)
+            .filter(Webhook.is_shared == True)
+            .all()
+        )
+
+        # Generate response with webhook URLs
+        response = []
+        for webhook in webhooks:
+            webhook_data = webhook.__dict__.copy()
+            
+            # Generate webhook URL
+            base_url = settings.SERVER_HOST.rstrip('/')
+            webhook_data["webhook_url"] = f"{base_url}/api/v1/webhooks/{webhook.token}"
+            
+            # Add username from relationship
+            webhook_data["username"] = webhook.user.username
+            
+            # Remove SQLAlchemy state
+            webhook_data.pop('_sa_instance_state', None)
+            # Remove user object as we already have username
+            webhook_data.pop('user', None)
+            
+            response.append(webhook_data)
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error fetching shared strategies: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch shared strategies: {str(e)}"
+        )
+    
+# app/api/v1/endpoints/webhooks.py
+
+@router.get("/subscribed", response_model=List[WebhookOut])
+async def get_subscribed_strategies(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all strategies the current user is subscribed to"""
+    try:
+        subscriptions = (
+            db.query(Webhook)
+            .join(WebhookSubscription)
+            .filter(
+                WebhookSubscription.user_id == current_user.id,
+                Webhook.is_shared == True
+            )
+            .all()
+        )
+
+        return [
+            WebhookOut(
+                **webhook.__dict__,
+                webhook_url=generate_webhook_url(webhook),
+                username=webhook.user.username
+            ) 
+            for webhook in subscriptions
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching subscribed strategies: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch subscribed strategies: {str(e)}"
+        )
+
+@router.post("/{token}/subscribe")
+async def subscribe_to_strategy(
+    token: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Subscribe to a strategy"""
+    try:
+        webhook = db.query(Webhook).filter(
+            Webhook.token == token,
+            Webhook.is_shared == True
+        ).first()
+
+        if not webhook:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        # Check if already subscribed
+        existing_subscription = db.query(WebhookSubscription).filter(
+            WebhookSubscription.webhook_id == webhook.id,
+            WebhookSubscription.user_id == current_user.id
+        ).first()
+
+        if existing_subscription:
+            raise HTTPException(
+                status_code=400,
+                detail="Already subscribed to this strategy"
+            )
+
+        # Create subscription
+        subscription = WebhookSubscription(
+            webhook_id=webhook.id,
+            user_id=current_user.id
+        )
+        db.add(subscription)
+        
+        # Update subscriber count
+        webhook.subscriber_count = (webhook.subscriber_count or 0) + 1
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Successfully subscribed to strategy"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error subscribing to strategy: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to subscribe to strategy: {str(e)}"
+        )
+
+@router.post("/{token}/unsubscribe")
+async def unsubscribe_from_strategy(
+    token: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Unsubscribe from a strategy"""
+    try:
+        webhook = db.query(Webhook).filter(
+            Webhook.token == token
+        ).first()
+
+        if not webhook:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        subscription = db.query(WebhookSubscription).filter(
+            WebhookSubscription.webhook_id == webhook.id,
+            WebhookSubscription.user_id == current_user.id
+        ).first()
+
+        if not subscription:
+            raise HTTPException(
+                status_code=400,
+                detail="Not subscribed to this strategy"
+            )
+
+        # Delete subscription
+        db.delete(subscription)
+        
+        # Update subscriber count
+        if webhook.subscriber_count:
+            webhook.subscriber_count = max(0, webhook.subscriber_count - 1)
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Successfully unsubscribed from strategy"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error unsubscribing from strategy: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to unsubscribe from strategy: {str(e)}"
+        )
+    
+# app/api/v1/endpoints/webhooks.py
+class RatingRequest(BaseModel):
+    rating: int
+
+
+@router.post("/{token}/rate")
+async def rate_strategy(
+    token: str,
+    rating: int = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    
+    print(f"Received rating request - Token: {token}, Rating: {rating}")
+
+    """Rate a strategy"""
+    try:
+        rating = rating_data.rating
+        # Get the webhook
+        webhook = db.query(Webhook).filter(
+            Webhook.token == token,
+            Webhook.is_shared == True
+        ).first()
+
+        if not webhook:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        # Check if user is subscribed
+        subscription = db.query(WebhookSubscription).filter(
+            WebhookSubscription.webhook_id == webhook.id,
+            WebhookSubscription.user_id == current_user.id
+        ).first()
+
+        if not subscription:
+            raise HTTPException(
+                status_code=403,
+                detail="You must be subscribed to rate this strategy"
+            )
+
+        # Get existing rating if any
+        existing_rating = db.query(WebhookRating).filter(
+            WebhookRating.webhook_id == webhook.id,
+            WebhookRating.user_id == current_user.id
+        ).first()
+
+        if existing_rating:
+            # Update existing rating
+            existing_rating.rating = rating
+            existing_rating.rated_at = datetime.utcnow()
+        else:
+            # Create new rating
+            new_rating = WebhookRating(
+                webhook_id=webhook.id,
+                user_id=current_user.id,
+                rating=rating
+            )
+            db.add(new_rating)
+
+        # Update webhook's average rating
+        all_ratings = db.query(WebhookRating).filter(
+            WebhookRating.webhook_id == webhook.id
+        ).all()
+        
+        total_ratings = len(all_ratings) + (1 if not existing_rating else 0)
+        rating_sum = sum(r.rating for r in all_ratings) + (rating if not existing_rating else 0)
+        
+        webhook.rating = rating_sum / total_ratings
+        webhook.total_ratings = total_ratings
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Rating updated successfully",
+            "new_rating": webhook.rating,
+            "total_ratings": webhook.total_ratings
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error rating strategy: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update rating: {str(e)}"
         )

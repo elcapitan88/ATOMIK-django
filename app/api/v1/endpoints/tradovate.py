@@ -114,7 +114,7 @@ async def tradovate_callback(
 ):
     """Handle the OAuth callback from Tradovate"""
     logger.info("=== Tradovate OAuth Callback Started ===")
-    logger.info(f"Received code: {code[:10]}...")
+    logger.info(f"Received code: {code}")
     logger.info(f"Received state: {state[:30]}..." if state else "No state received")
 
     try:

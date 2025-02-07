@@ -5,7 +5,7 @@ from datetime import datetime
 import logging
 import json
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from app.core.config import settings
 from app.db.session import get_db
@@ -15,6 +15,16 @@ from app.models.broker import BrokerAccount
 from app.websockets.manager import websocket_manager
 from app.websockets.heartbeat_monitor import heartbeat_monitor
 from app.websockets.metrics import HeartbeatMetrics
+from app.websockets.types.messages import (
+    WSMessageType, 
+    WSSyncRequest, 
+    WSAccountState, 
+    WSSubscriptionRequest,
+    WSErrorMessage,
+    ErrorCode,
+    SubscriptionAction,
+    parse_ws_message
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,7 +63,100 @@ async def verify_account_access(user_id: int, account_id: str, db: Session) -> O
         logger.error(f"Account verification error: {str(e)}")
         return None
 
-@router.websocket("/tradovate/{account_id}")
+async def handle_sync_request(
+    websocket: WebSocket,
+    message: WSSyncRequest,
+    account: BrokerAccount
+) -> None:
+    """Handle account sync request"""
+    try:
+        # Validate endpoints requested
+        valid_endpoints = {'user', 'account', 'position', 'order'}
+        requested_endpoints = set(message.endpoints)
+        
+        if not requested_endpoints.issubset(valid_endpoints):
+            invalid_endpoints = requested_endpoints - valid_endpoints
+            error_msg = f"Invalid endpoints requested: {invalid_endpoints}"
+            await websocket.send_json(
+                WSErrorMessage(
+                    code=ErrorCode.INVALID_MESSAGE,
+                    message=error_msg
+                ).dict()
+            )
+            return
+
+        # Initialize account state
+        account_state = await websocket_manager.get_account_state(account.account_id)
+        if account_state:
+            await websocket.send_json(account_state.dict())
+        else:
+            await websocket.send_json(
+                WSErrorMessage(
+                    code=ErrorCode.SYNC_FAILED,
+                    message="Failed to get account state"
+                ).dict()
+            )
+
+    except Exception as e:
+        logger.error(f"Error handling sync request: {str(e)}")
+        await websocket.send_json(
+            WSErrorMessage(
+                code=ErrorCode.SYNC_FAILED,
+                message="Internal error during sync"
+            ).dict()
+        )
+
+async def handle_subscription_request(
+    websocket: WebSocket,
+    message: WSSubscriptionRequest,
+    account: BrokerAccount
+) -> None:
+    """Handle subscription request"""
+    try:
+        if message.action == SubscriptionAction.SUBSCRIBE:
+            # Subscribe to requested endpoints
+            success = await websocket_manager.subscribe_account(
+                account.account_id,
+                message.endpoints
+            )
+            if success:
+                await websocket.send_json({
+                    "type": WSMessageType.SUBSCRIPTION,
+                    "success": True,
+                    "account_id": account.account_id,
+                    "endpoints": message.endpoints
+                })
+            else:
+                await websocket.send_json(
+                    WSErrorMessage(
+                        code=ErrorCode.SUBSCRIPTION_FAILED,
+                        message="Failed to subscribe to endpoints"
+                    ).dict()
+                )
+                
+        elif message.action == SubscriptionAction.UNSUBSCRIBE:
+            # Unsubscribe from endpoints
+            await websocket_manager.unsubscribe_account(
+                account.account_id,
+                message.endpoints
+            )
+            await websocket.send_json({
+                "type": WSMessageType.SUBSCRIPTION,
+                "success": True,
+                "account_id": account.account_id,
+                "endpoints": message.endpoints
+            })
+
+    except Exception as e:
+        logger.error(f"Error handling subscription request: {str(e)}")
+        await websocket.send_json(
+            WSErrorMessage(
+                code=ErrorCode.SUBSCRIPTION_FAILED,
+                message="Internal error during subscription"
+            ).dict()
+        )
+
+#@router.websocket("/tradovate/{account_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     account_id: str,
@@ -96,15 +199,54 @@ async def websocket_endpoint(
                         await heartbeat_monitor.process_heartbeat(account_id)
                         continue
 
+                    # Log raw message received
+                    logger.info(f"Raw message received for account {account_id}: {data}")
+
                     # Process non-heartbeat messages
                     try:
-                        message = json.loads(data)
-                        await websocket_manager.process_message(account_id, message)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Invalid JSON received from {account_id}: {data}")
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error processing message from {account_id}: {str(e)}")
+                        message_data = json.loads(data)
+                        logger.info(f"Parsed JSON for account {account_id}: {message_data}")
+                        
+                        # Check message type before parsing
+                        message_type = message_data.get('type')
+                        logger.info(f"Processing message type: {message_type}")
+
+                        # Parse and process message
+                        try:
+                            message = parse_ws_message(message_data)
+                            logger.info(f"Successfully parsed message of type: {message.type}")
+
+                            # Handle sync request
+                            if isinstance(message, WSSyncRequest):
+                                logger.info(f"Processing sync request for account {account_id}")
+                                await handle_sync_request(websocket, message, account)
+                            
+                            # Handle subscription request
+                            elif isinstance(message, WSSubscriptionRequest):
+                                logger.info(f"Processing subscription request for account {account_id}")
+                                await handle_subscription_request(websocket, message, account)
+                            
+                            # Handle other messages
+                            else:
+                                logger.info(f"Processing message via manager for account {account_id}")
+                                await websocket_manager.process_message(account_id, message_data)
+
+                        except ValueError as parse_error:
+                            logger.error(f"Message parsing error for {account_id}: {str(parse_error)}")
+                            error_msg = WSErrorMessage(
+                                code=ErrorCode.INVALID_MESSAGE,
+                                message=f"Invalid message format: {str(parse_error)}"
+                            )
+                            await websocket.send_json(error_msg.dict())
+                            continue
+
+                    except json.JSONDecodeError as json_error:
+                        logger.error(f"Invalid JSON received from {account_id}: {data}")
+                        error_msg = WSErrorMessage(
+                            code=ErrorCode.INVALID_MESSAGE,
+                            message="Invalid JSON format"
+                        )
+                        await websocket.send_json(error_msg.dict())
                         continue
 
                 except WebSocketDisconnect:
@@ -121,11 +263,9 @@ async def websocket_endpoint(
             logger.info(f"WebSocket connection closed for account {account_id}")
 
     except WebSocketDisconnect:
-        # Handle normal disconnection
         logger.info(f"WebSocket disconnected normally: {account_id}")
         
     except Exception as e:
-        # Handle unexpected errors
         logger.error(f"WebSocket error for {account_id}: {str(e)}")
         error_details = await handle_websocket_error(e, websocket, account_id)
         logger.error(f"Error details: {error_details}")
@@ -140,6 +280,8 @@ async def websocket_endpoint(
             await heartbeat_monitor.stop_monitoring(account_id)
         except Exception as cleanup_error:
             logger.error(f"Error during cleanup for {account_id}: {str(cleanup_error)}")
+
+
 
 @router.get("/health")
 async def websocket_health():
