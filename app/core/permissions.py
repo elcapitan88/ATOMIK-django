@@ -3,81 +3,53 @@ from fastapi import HTTPException
 import logging
 from typing import Callable
 from .config import settings
-from app.models.subscription import SubscriptionTier, SubscriptionStatus
+from app.services.stripe_service import StripeService
 
 logger = logging.getLogger(__name__)
 
-def check_subscription_feature(required_tier: SubscriptionTier):
-    """
-    Decorator to check if user has required subscription tier for a feature.
-    In development mode (SKIP_SUBSCRIPTION_CHECK=True), all checks are bypassed.
-    """
-    def decorator(func: Callable):
-        @wraps(func)
-        async def wrapper(*args, current_user=None, **kwargs):
-            # Development mode - skip all subscription checks
-            if settings.SKIP_SUBSCRIPTION_CHECK:
-                logger.debug("Skipping subscription check - Development Mode")
-                return await func(*args, current_user=current_user, **kwargs)
-            
-            try:
-                # Production mode - verify subscription
-                if not current_user or not current_user.subscription:
-                    logger.warning(f"No subscription found for user {current_user.id if current_user else 'unknown'}")
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Active subscription required to access this feature"
-                    )
-
-                subscription = current_user.subscription
-                
-                # Check subscription status
-                if subscription.status not in [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING]:
-                    logger.warning(f"Invalid subscription status: {subscription.status}")
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Your subscription is not active"
-                    )
-
-                # Lifetime subscribers have access to all features
-                if subscription.tier == SubscriptionTier.LIFETIME:
-                    return await func(*args, current_user=current_user, **kwargs)
-
-                # Define tier hierarchy
-                tier_levels = {
-                    SubscriptionTier.STARTED: 1,
-                    SubscriptionTier.PLUS: 2,
-                    SubscriptionTier.PRO: 3,
-                    SubscriptionTier.LIFETIME: 4
-                }
-
-                # Check if user's tier is sufficient
-                if tier_levels[subscription.tier] < tier_levels[required_tier]:
-                    logger.warning(
-                        f"Insufficient subscription tier. Required: {required_tier}, "
-                        f"Current: {subscription.tier}"
-                    )
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"This feature requires {required_tier.value} subscription or higher"
-                    )
-
-                return await func(*args, current_user=current_user, **kwargs)
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error in subscription check: {str(e)}")
+def check_subscription(func: Callable):
+    @wraps(func)
+    async def wrapper(*args, current_user=None, **kwargs):
+        if settings.SKIP_SUBSCRIPTION_CHECK:
+            logger.debug("Skipping subscription check - Development Mode")
+            return await func(*args, current_user=current_user, **kwargs)
+        
+        try:
+            if not current_user or not current_user.subscription:
                 raise HTTPException(
-                    status_code=500,
-                    detail="Error verifying subscription access"
+                    status_code=403,
+                    detail="Active subscription required"
                 )
 
-        return wrapper
-    return decorator
+            stripe_service = StripeService()
+            has_active_subscription = await stripe_service.verify_subscription_status(
+                current_user.subscription.stripe_customer_id
+            )
+
+            if not has_active_subscription:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Your subscription is not active"
+                )
+
+            return await func(*args, current_user=current_user, **kwargs)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Subscription check error: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Error verifying subscription"
+            )
+
+    return wrapper
 
 def check_account_ownership(func: Callable):
-    """Decorator to verify user owns the account they're trying to access"""
+    """
+    Decorator to verify user owns the account they're trying to access.
+    Used for broker account operations and webhook management.
+    """
     @wraps(func)
     async def wrapper(*args, current_user=None, account_id=None, **kwargs):
         if settings.SKIP_SUBSCRIPTION_CHECK:
@@ -91,9 +63,15 @@ def check_account_ownership(func: Callable):
                     detail="Missing required parameters"
                 )
 
-            # Account ownership check would go here
-            # This is a placeholder for when you implement account ownership verification
-            
+            # Check if account belongs to user
+            account = current_user.broker_accounts.filter(id=account_id).first()
+            if not account:
+                logger.warning(f"User {current_user.id} attempted to access unauthorized account {account_id}")
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have permission to access this account"
+                )
+
             return await func(*args, current_user=current_user, account_id=account_id, **kwargs)
 
         except HTTPException:
@@ -106,3 +84,67 @@ def check_account_ownership(func: Callable):
             )
 
     return wrapper
+
+def check_webhook_ownership(func: Callable):
+    """
+    Decorator to verify user owns the webhook they're trying to access.
+    """
+    @wraps(func)
+    async def wrapper(*args, current_user=None, webhook_id=None, **kwargs):
+        if settings.SKIP_SUBSCRIPTION_CHECK:
+            logger.debug("Skipping webhook ownership check - Development Mode")
+            return await func(*args, current_user=current_user, webhook_id=webhook_id, **kwargs)
+
+        try:
+            if not webhook_id or not current_user:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Missing required parameters"
+                )
+
+            # Check if webhook belongs to user
+            webhook = current_user.webhooks.filter(id=webhook_id).first()
+            if not webhook:
+                logger.warning(f"User {current_user.id} attempted to access unauthorized webhook {webhook_id}")
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have permission to access this webhook"
+                )
+
+            return await func(*args, current_user=current_user, webhook_id=webhook_id, **kwargs)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error checking webhook ownership: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Error verifying webhook access"
+            )
+
+    return wrapper
+
+def check_rate_limit(max_requests: int = 100, window_seconds: int = 60):
+    """
+    Decorator to implement rate limiting for API endpoints.
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(*args, current_user=None, **kwargs):
+            if settings.SKIP_SUBSCRIPTION_CHECK:
+                return await func(*args, current_user=current_user, **kwargs)
+
+            try:
+                # In a production environment, you would implement rate limiting
+                # using Redis or a similar caching system
+                return await func(*args, current_user=current_user, **kwargs)
+
+            except Exception as e:
+                logger.error(f"Rate limit error: {str(e)}")
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many requests. Please try again later."
+                )
+
+        return wrapper
+    return decorator

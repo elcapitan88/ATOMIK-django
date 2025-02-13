@@ -1,10 +1,12 @@
 # app/api/v1/endpoints/auth.py
+from ....services.stripe_service import StripeService 
+from ....models.subscription import Subscription 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
-from datetime import datetime, timedelta
+from sqlalchemy import or_
 import logging
+from typing import Optional
 
 from ....core.security import (
     verify_password, 
@@ -12,153 +14,157 @@ from ....core.security import (
     create_access_token,
     get_current_user
 )
-from ....core.config import settings
 from ....schemas.user import UserCreate, UserOut, Token
 from ....models.user import User
 from ....db.base import get_db
+from ....core.config import settings
 
-# Set up logging
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
 
 @router.post("/register", response_model=UserOut)
-def register(*, db: Session = Depends(get_db), user_in: UserCreate):
+async def register(
+    user_in: UserCreate,
+    db: Session = Depends(get_db)
+):
     """
-    Register a new user.
+    Register new user
     """
     try:
-        # Check for existing email
-        if db.query(User).filter(User.email == user_in.email).first():
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this email already exists"
+        # Check for existing user
+        existing_user = db.query(User).filter(
+            or_(
+                User.email == user_in.email,
+                User.username == user_in.username
             )
-            
-        # Check for existing username
-        if db.query(User).filter(User.username == user_in.username).first():
-            raise HTTPException(
-                status_code=400,
-                detail="This username is already taken"
-            )
+        ).first()
         
+        if existing_user:
+            raise HTTPException(
+                status_code=400,
+                detail="Email or username already registered"
+            )
+
         # Create new user
         user = User(
             email=user_in.email,
             username=user_in.username,
             hashed_password=get_password_hash(user_in.password),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            is_active=True
         )
+        
         db.add(user)
         db.commit()
         db.refresh(user)
         
-        logger.info(f"New user registered: {user.email}")
+        logger.info(f"User registered successfully: {user.email}")
         return user
-        
-    except IntegrityError as e:
-        db.rollback()
-        logger.error(f"Registration failed due to integrity error: {str(e)}")
-        if "users.username" in str(e):
-            raise HTTPException(
-                status_code=400,
-                detail="This username is already taken"
-            )
-        elif "users.email" in str(e):
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this email already exists"
-            )
-        raise HTTPException(
-            status_code=400,
-            detail="Registration failed. Please try again."
-        )
+
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Unexpected error during registration: {str(e)}")
+        logger.error(f"Registration error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="An unexpected error occurred. Please try again later."
+            detail="Registration failed"
         )
 
+# app/api/v1/endpoints/auth.py
+from ....services.stripe_service import StripeService  # Add this import
+from sqlalchemy import or_
+from ....models.subscription import Subscription  # Add this import
+
 @router.post("/login", response_model=Token)
-def login(
-    db: Session = Depends(get_db),
-    form_data: OAuth2PasswordRequestForm = Depends()
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
 ):
     """
-    OAuth2 compatible token login, get an access token for future requests.
+    OAuth2 compatible token login with subscription verification
     """
     try:
-        # Authenticate user
+        # Find user by email
         user = db.query(User).filter(User.email == form_data.username).first()
         if not user or not verify_password(form_data.password, user.hashed_password):
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
+                status_code=401,
+                detail="Incorrect email or password"
             )
 
-        # Check if user is active
         if not user.is_active:
             raise HTTPException(
                 status_code=400,
                 detail="Inactive user"
             )
-        
-        # Generate access token
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            subject=user.email, expires_delta=access_token_expires
+
+        # Skip subscription check if in development mode
+        if settings.SKIP_SUBSCRIPTION_CHECK:
+            logger.debug(f"Skipping subscription check for {user.email} - Development Mode")
+            access_token = create_access_token(subject=user.email)
+            return {
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "username": user.username
+                }
+            }
+
+        # Verify subscription status
+        stripe_service = StripeService()
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == user.id
+        ).first()
+
+        if not subscription:
+            logger.warning(f"No subscription found for user {user.email}")
+            raise HTTPException(
+                status_code=403,
+                detail="No active subscription found"
+            )
+
+        has_active_subscription = await stripe_service.verify_subscription_status(
+            subscription.stripe_customer_id
         )
+
+        if not has_active_subscription:
+            logger.warning(f"Inactive subscription for user {user.email}")
+            raise HTTPException(
+                status_code=403,
+                detail="Your subscription is not active"
+            )
+
+        # Create access token only after subscription verification
+        access_token = create_access_token(subject=user.email)
         
-        logger.info(f"User logged in: {user.email}")
+        logger.info(f"User logged in successfully: {user.email}")
+        
         return {
-            "access_token": access_token, 
-            "token_type": "bearer"
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username
+            }
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Login error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="An unexpected error occurred during login"
+            detail="Login failed"
         )
 
-@router.post("/logout")
-async def logout(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@router.get("/verify", response_model=dict)
+async def verify_token(current_user: User = Depends(get_current_user)):
     """
-    Logout the current user.
+    Verify access token and return user info
     """
-    try:
-        # You could add token to a blacklist here if implementing token invalidation
-        
-        logger.info(f"User {current_user.email} logged out successfully")
-        return {
-            "status": "success",
-            "message": "Successfully logged out"
-        }
-    except Exception as e:
-        logger.error(f"Logout error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Error during logout"
-        )
-
-@router.get("/verify/")  # Add support for both GET and POST
-@router.post("/verify/")
-async def verify_token(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Verify the current access token"""
     try:
         return {
             "valid": True,
@@ -169,45 +175,36 @@ async def verify_token(
             }
         }
     except Exception as e:
-        logger.error(f"Token verification failed: {str(e)}")
+        logger.error(f"Token verification error: {str(e)}")
         raise HTTPException(
             status_code=401,
             detail="Invalid token"
         )
 
-@router.post("/refresh-token", response_model=Token)
-async def refresh_token(
-    current_user: User = Depends(get_current_user)
-):
+@router.post("/logout")
+async def logout(current_user: User = Depends(get_current_user)):
     """
-    Refresh access token.
+    Logout current user
     """
     try:
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            subject=current_user.email,
-            expires_delta=access_token_expires
-        )
-        
-        logger.info(f"Token refreshed for user: {current_user.email}")
-        return {
-            "access_token": access_token,
-            "token_type": "bearer"
-        }
+        # In a more complex implementation, you might want to invalidate the token
+        # or add it to a blacklist
+        logger.info(f"User logged out: {current_user.email}")
+        return {"message": "Successfully logged out"}
     except Exception as e:
-        logger.error(f"Token refresh error: {str(e)}")
+        logger.error(f"Logout error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Error refreshing token"
+            detail="Logout failed"
         )
-    
-# app/api/v1/endpoints/auth.py
 
 @router.get("/check-username/{username}")
 async def check_username(
     username: str,
     db: Session = Depends(get_db)
 ):
-    """Check if a username is already taken"""
+    """
+    Check if username is available
+    """
     user = db.query(User).filter(User.username == username).first()
     return {"exists": bool(user)}

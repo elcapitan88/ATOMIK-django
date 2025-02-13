@@ -13,11 +13,9 @@ from datetime import datetime, timedelta
 
 from ....core.security import get_current_user
 from ....core.config import settings
-from ....core.permissions import check_subscription_feature
 from ....db.session import get_db
 from ....models.user import User
 from ....models.broker import BrokerAccount, BrokerCredentials
-from ....models.subscription import SubscriptionTier, SubscriptionStatus
 from ....core.brokers.base import BaseBroker
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from app.services.broker_token_service import BrokerTokenService
@@ -163,7 +161,6 @@ async def disconnect_broker_account(
         )
 
 @router.get("/accounts/{account_id}/status")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def get_account_status(
     account_id: str,
     current_user: User = Depends(get_current_user),
@@ -198,7 +195,6 @@ async def get_account_status(
         )
 
 @router.get("/accounts/{account_id}/positions")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def get_positions(
     account_id: str,
     current_user: User = Depends(get_current_user),
@@ -294,7 +290,6 @@ async def validate_account_token(account: BrokerAccount, db: Session):
 
 
 @router.post("/accounts/{account_id}/orders")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def place_order(
     account_id: str,
     order_data: Dict[str, Any],
@@ -329,7 +324,6 @@ async def place_order(
         )
 
 @router.get("/{broker_id}/accounts")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def get_broker_accounts(
     broker_id: str,
     current_user: User = Depends(get_current_user),
@@ -365,7 +359,6 @@ async def get_broker_accounts(
         )
 
 @router.delete("/accounts/{account_id}/orders/{order_id}")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def cancel_order(
     account_id: str,
     order_id: str,
@@ -423,7 +416,6 @@ async def cleanup_deleted_accounts(
     return {"message": f"Cleaned up {len(deleted_accounts)} accounts"}
 
 @router.get("/{broker_id}/accounts")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def get_broker_accounts(
     broker_id: str,
     current_user: User = Depends(get_current_user),

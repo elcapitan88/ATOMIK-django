@@ -9,12 +9,10 @@ from app.core.config import settings
 from decimal import Decimal
 
 from app.core.security import get_current_user
-from app.core.permissions import check_subscription_feature
 from app.db.session import get_db
 from app.models.strategy import ActivatedStrategy, strategy_follower_quantities 
-from app.models.webhook import Webhook
+from app.models.webhook import Webhook, WebhookSubscription
 from app.models.broker import BrokerAccount
-from app.models.subscription import SubscriptionTier
 from app.schemas.strategy import (
     SingleStrategyCreate,
     MultipleStrategyCreate,
@@ -29,7 +27,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 @router.post("/activate", response_model=StrategyResponse)
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def activate_strategy(
     *,
     db: Session = Depends(get_db),
@@ -37,14 +34,11 @@ async def activate_strategy(
     current_user = Depends(get_current_user),
     idempotency_key: Optional[str] = Header(None)
 ):
-    """
-    Activate a new trading strategy. Supports both single account and multiple account strategies.
-    """
     try:
         logger.info(f"Creating strategy for user {current_user.id}")
         logger.debug(f"Strategy data received: {strategy.dict()}")
 
-        # Subscription validation (if enabled)
+        # Check subscription (if enabled)
         if not settings.SKIP_SUBSCRIPTION_CHECK:
             if not current_user.subscription:
                 raise HTTPException(status_code=403, detail="No active subscription found")
@@ -56,14 +50,26 @@ async def activate_strategy(
                     detail="Multiple account strategies require Plus subscription or higher"
                 )
 
-        # Validate webhook
+        # Updated webhook validation to support subscriptions
         webhook = db.query(Webhook).filter(
-            Webhook.token == str(strategy.webhook_id),
-            Webhook.user_id == current_user.id
+            Webhook.token == str(strategy.webhook_id)
         ).first()
 
         if not webhook:
             raise HTTPException(status_code=404, detail="Webhook not found")
+
+        # Check if user owns or is subscribed to the webhook
+        is_owner = webhook.user_id == current_user.id
+        is_subscriber = db.query(WebhookSubscription).filter(
+            WebhookSubscription.webhook_id == webhook.id,
+            WebhookSubscription.user_id == current_user.id
+        ).first() is not None
+
+        if not (is_owner or is_subscriber):
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have access to this webhook"
+            )
 
         try:
             if isinstance(strategy, SingleStrategyCreate):
@@ -107,8 +113,8 @@ async def activate_strategy(
                 )
                 
                 db.add(db_strategy)
-                db.flush()  # Get ID without committing
-                
+                db.flush()
+
                 logger.debug(f"Created strategy object with ID: {db_strategy.id}")
 
                 # Create empty stats for new strategy
@@ -136,11 +142,6 @@ async def activate_strategy(
                     },
                     "stats": stats.to_summary_dict()
                 }
-
-                db.commit()
-                logger.info(f"Successfully created strategy with ID: {db_strategy.id}")
-                
-                return StrategyResponse(**strategy_data)
 
             else:  # MultipleStrategyCreate
                 logger.info("Processing multiple account strategy")
@@ -248,10 +249,10 @@ async def activate_strategy(
                     "stats": stats.to_summary_dict()
                 }
 
-                db.commit()
-                logger.info(f"Successfully created strategy with ID: {db_strategy.id}")
-                
-                return StrategyResponse(**strategy_data)
+            db.commit()
+            logger.info(f"Successfully created strategy with ID: {db_strategy.id}")
+            
+            return StrategyResponse(**strategy_data)
 
         except HTTPException:
             db.rollback()
@@ -407,7 +408,6 @@ async def toggle_strategy(
         )
 
 @router.delete("/{strategy_id}")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def delete_strategy(
     strategy_id: int,
     db: Session = Depends(get_db),

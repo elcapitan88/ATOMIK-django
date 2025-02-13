@@ -184,10 +184,16 @@ app.middleware("http")(CSPMiddleware(app))
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,  # Changed from ALLOWED_ORIGINS to CORS_ORIGINS
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "https://js.stripe.com",
+        "https://checkout.stripe.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 class Config:

@@ -4,6 +4,8 @@ from functools import lru_cache
 from typing import Optional, List, Any
 from pathlib import Path
 import secrets
+from pydantic import validator
+from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Base Settings
@@ -55,15 +57,44 @@ class Settings(BaseSettings):
     TRADOVATE_LIVE_RENEW_TOKEN_URL: Optional[str] = None
     TRADOVATE_DEMO_RENEW_TOKEN_URL: Optional[str] = None
 
-    # Optional Settings
+    STRIPE_SECRET_KEY: str
+    STRIPE_WEBHOOK_SECRET: str  
+    STRIPE_PUBLIC_KEY: str
+    STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
+    STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
+    SKIP_SUBSCRIPTION_CHECK: bool = False
+
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
-    STRIPE_SECRET_KEY: Optional[str] = None
-    STRIPE_WEBHOOK_SECRET: Optional[str] = None
-    STRIPE_PUBLIC_KEY: Optional[str] = None
+    
     FRONTEND_URL: str = "http://localhost:3000"
     LOG_LEVEL: str = "DEBUG"
-    SKIP_SUBSCRIPTION_CHECK: bool = True
+
+    @validator("STRIPE_SECRET_KEY")
+    def validate_stripe_secret_key(cls, v):
+        if not v or not v.startswith("sk_"):
+            raise ValueError("Invalid Stripe secret key format")
+        return v
+
+    @validator("STRIPE_WEBHOOK_SECRET")
+    def validate_stripe_webhook_secret(cls, v):
+        if not v or not v.startswith("whsec_"):
+            raise ValueError("Invalid Stripe webhook secret format")
+        return v
+
+    @validator("STRIPE_PUBLIC_KEY")
+    def validate_stripe_public_key(cls, v):
+        if not v or not v.startswith("pk_"):
+            raise ValueError("Invalid Stripe public key format")
+        return v
+
+    # Add assertions for critical Stripe settings
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.ENVIRONMENT != "test":  # Skip validation in test environment
+            assert self.STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY is required"
+            assert self.STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET is required"
+            assert self.STRIPE_PUBLIC_KEY, "STRIPE_PUBLIC_KEY is required"
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -85,6 +116,18 @@ def get_settings() -> Settings:
 # Create settings instance
 settings = get_settings()
 
+
+
 # Validate critical settings on import
 assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
 assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
+assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
+assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
+assert settings.STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY environment variable is required"
+assert settings.STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET environment variable is required"
+assert settings.STRIPE_PUBLIC_KEY, "STRIPE_PUBLIC_KEY environment variable is required"
+
+# Validate Stripe key formats
+assert settings.STRIPE_SECRET_KEY.startswith("sk_"), "Invalid Stripe secret key format"
+assert settings.STRIPE_WEBHOOK_SECRET.startswith("whsec_"), "Invalid Stripe webhook secret format"
+assert settings.STRIPE_PUBLIC_KEY.startswith("pk_"), "Invalid Stripe public key format"

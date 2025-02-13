@@ -20,11 +20,9 @@ from pydantic import BaseModel
 
 # Local imports
 from ....core.security import get_current_user
-from ....core.permissions import check_subscription_feature
 from ....db.session import get_db
 from ....models.user import User
 from ....models.broker import BrokerAccount, BrokerCredentials
-from ....models.subscription import SubscriptionTier, SubscriptionStatus
 from ....core.brokers.base import BaseBroker
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from ....core.config import settings
@@ -47,7 +45,6 @@ class CallbackRequest(BaseModel):
     state: Optional[str] = None
 
 @router.post("/connect")
-@check_subscription_feature(SubscriptionTier.STARTED)
 async def initiate_oauth(
     request: OAuthInitRequest,
     current_user: User = Depends(get_current_user),

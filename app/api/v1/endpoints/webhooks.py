@@ -11,11 +11,9 @@ import logging
 
 from ....models.webhook import Webhook, WebhookLog, WebhookSubscription, WebhookRating
 from ....core.security import get_current_user
-from ....core.permissions import check_subscription_feature
 from ....db.session import get_db
 from ....models.user import User
 from ....models.webhook import Webhook, WebhookLog
-from ....models.subscription import SubscriptionTier
 from ....schemas.webhook import (
     WebhookCreate,
     WebhookUpdate,
@@ -42,7 +40,6 @@ def generate_webhook_url(webhook: Webhook) -> str:
     return f"{base_url}/api/v1/webhooks/{webhook.token}"
 
 @router.post("/generate", response_model=WebhookOut)
-#@check_subscription_feature(SubscriptionTier.STARTED)
 async def generate_webhook(
     webhook_in: WebhookCreate,
     db: Session = Depends(get_db),
@@ -174,7 +171,6 @@ async def webhook_endpoint(
         )
 
 @router.get("/list", response_model=List[WebhookOut])
-#@check_subscription_feature(SubscriptionTier.STARTED)
 async def list_webhooks(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -266,7 +262,6 @@ async def generate_webhook(
         )
 
 @router.patch("/{token}", response_model=WebhookOut)
-#@check_subscription_feature(SubscriptionTier.STARTED)
 async def update_webhook(
     token: str,
     webhook_update: WebhookUpdate,
@@ -295,7 +290,6 @@ async def update_webhook(
     )
 
 @router.delete("/{token}")
-#@check_subscription_feature(SubscriptionTier.STARTED)
 async def delete_webhook(
     token: str,
     db: Session = Depends(get_db),
@@ -319,7 +313,6 @@ async def delete_webhook(
     }
 
 @router.get("/{token}/logs", response_model=List[WebhookLogOut])
-#@check_subscription_feature(SubscriptionTier.STARTED)
 async def get_webhook_logs(
     token: str,
     db: Session = Depends(get_db),
@@ -345,7 +338,6 @@ async def get_webhook_logs(
     return logs
 
 @router.post("/{token}/test")
-#@check_subscription_feature(SubscriptionTier.STARTED)
 async def test_webhook(
     token: str,
     db: Session = Depends(get_db),

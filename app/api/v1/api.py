@@ -1,6 +1,6 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, webhooks, strategy, websocket, subscription, tradovate
+from .endpoints import auth, broker, subscriptions, webhooks, strategy, websocket, tradovate
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -15,7 +15,7 @@ api_router.include_router(broker.router, prefix="/brokers", tags=["brokers"])
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])
-api_router.include_router(subscription.router, prefix="/subscriptions", tags=["subscriptions"])
+api_router.include_router(subscriptions.router, prefix="/subscriptions", tags=["subscriptions"])
 
 # Define the callback route - Notice the change in the path
 @tradovate_callback_router.get("/tradovate/callback")  # Changed from "/api/tradovate/callback"
