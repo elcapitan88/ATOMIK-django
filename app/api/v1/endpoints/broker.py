@@ -5,12 +5,15 @@ import logging
 import json
 import base64
 import uuid
+import traceback
 
 from enum import Enum
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 
-
+from app.models.order import Order, OrderStatus
+from sqlalchemy import or_
+from app.models.strategy import ActivatedStrategy
 from ....core.security import get_current_user
 from ....core.config import settings
 from ....db.session import get_db
@@ -89,26 +92,6 @@ async def initiate_oauth(
         raise HTTPException(
             status_code=500,
             detail=f"OAuth initiation failed: {str(e)}"
-        )
-
-
-@router.get("/accounts")
-async def list_broker_accounts(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    try:
-        accounts = db.query(BrokerAccount).filter(
-            BrokerAccount.user_id == current_user.id,
-            BrokerAccount.is_active == True
-        ).all()
-
-        return [account.to_dict() for account in accounts]
-    except Exception as e:
-        logger.error(f"Error fetching accounts: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
         )
 
 @router.delete("/accounts/{account_id}")
@@ -268,6 +251,75 @@ async def list_broker_accounts(
             detail=f"Failed to fetch accounts: {str(e)}"
         )
     
+class CloseAllPositionsRequest(BaseModel):
+    account_ids: List[str]
+
+@router.post("/accounts/close-all", name="close_all_positions")
+async def close_all_positions(
+    request: CloseAllPositionsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Close all positions for specified accounts"""
+    logger.info(f"Closing positions for accounts: {request.account_ids}")
+    
+    try:
+        # Validate account ownership and get account objects
+        accounts = db.query(BrokerAccount).filter(
+            BrokerAccount.account_id.in_(request.account_ids),
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True
+        ).all()
+
+        if not accounts:
+            logger.warning(f"No valid accounts found for user {current_user.id}")
+            raise HTTPException(
+                status_code=404,
+                detail="No valid accounts found"
+            )
+
+        # Verify account ownership
+        found_account_ids = {acc.account_id for acc in accounts}
+        missing_accounts = set(request.account_ids) - found_account_ids
+        if missing_accounts:
+            logger.warning(f"Unauthorized accounts requested: {missing_accounts}")
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized access to one or more accounts"
+            )
+
+        # Verify all accounts have valid credentials
+        invalid_accounts = [acc for acc in accounts if not acc.credentials or not acc.credentials.is_valid]
+        if invalid_accounts:
+            invalid_ids = [acc.account_id for acc in invalid_accounts]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid credentials for accounts: {invalid_ids}"
+            )
+
+        # Get broker instance (assuming all accounts use same broker)
+        broker = BaseBroker.get_broker_instance(accounts[0].broker_id, db)
+        
+        # Execute close all operation
+        logger.info(f"Executing close all positions for {len(accounts)} accounts")
+        results = await broker.close_all_positions_for_accounts(accounts)
+
+        return {
+            "status": "success",
+            "results": results,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error closing positions: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        ) 
+    
 async def validate_account_token(account: BrokerAccount, db: Session):
     """Validate account token before trading operations"""
     token_service = BrokerTokenService(db)
@@ -415,46 +467,81 @@ async def cleanup_deleted_accounts(
     db.commit()
     return {"message": f"Cleaned up {len(deleted_accounts)} accounts"}
 
-@router.get("/{broker_id}/accounts")
-async def get_broker_accounts(
-    broker_id: str,
+
+
+    
+@router.post("/accounts/{account_id}/discretionary/orders")
+async def place_discretionary_order(
+    account_id: str,
+    order_data: Dict[str, Any],
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get all accounts for a specific broker"""
+    """Place a discretionary trading order"""
     try:
+        # Validate account ownership and status
+        account = db.query(BrokerAccount).filter(
+            BrokerAccount.account_id == account_id,
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True
+        ).first()
+
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        # Validate account is not in use by active strategies
+        strategy_check = db.query(ActivatedStrategy).filter(
+            or_(
+                ActivatedStrategy.account_id == account_id,
+                ActivatedStrategy.leader_account_id == account_id
+            ),
+            ActivatedStrategy.is_active == True
+        ).first()
+
+        if strategy_check:
+            raise HTTPException(
+                status_code=400, 
+                detail="Account is currently in use by active strategies"
+            )
+
         # Get broker instance
-        try:
-            broker = BaseBroker.get_broker_instance(broker_id, db)
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported broker: {broker_id}"
-            )
-        except Exception as e:
-            logger.error(f"Error creating broker instance: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to initialize broker service"
-            )
+        broker = BaseBroker.get_broker_instance(account.broker_id, db)
 
-        # Fetch accounts using broker implementation
-        try:
-            accounts = await broker.fetch_accounts(current_user)
-            return accounts
-        except Exception as e:
-            logger.error(f"Error fetching accounts from {broker_id}: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to fetch accounts: {str(e)}"
-            )
+        # Place the order
+        order_result = await broker.place_order(account, {
+            **order_data,
+            'order_type': 'discretionary'  # Mark as discretionary order
+        })
 
-    except HTTPException:
-        raise
+        logger.info(f"Tradovate order response: {order_result}")
+
+        # Log the discretionary order
+        new_order = Order(
+            user_id=current_user.id,
+            broker_account_id=account.id,
+            broker_order_id=order_result.get('order_id'),
+            symbol=order_data['symbol'],
+            side=order_data['side'],
+            order_type=order_data['type'],
+            quantity=order_data['quantity'],
+            status=OrderStatus.PENDING,
+            submitted_at=datetime.utcnow(),
+            broker_response=json.dumps(order_result)
+        )
+        
+        db.add(new_order)
+        db.commit()
+
+        return {
+            "status": "success",
+            "order": order_result,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
     except Exception as e:
-        logger.error(f"Unexpected error in get_broker_accounts: {str(e)}")
+        logger.error(f"Error placing discretionary order: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="An unexpected error occurred"
+            detail=f"Failed to place order: {str(e)}"
         )
-
+    

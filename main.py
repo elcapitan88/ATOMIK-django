@@ -37,11 +37,18 @@ from app.websockets.errors import WebSocketError, handle_websocket_error
 from app.websockets.websocket_config import WebSocketConfig
 
 # Configure logging
+log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=log_level,
+    format='%(asctime)s - %(process)d - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # Railway captures stdout/stderr
+    ]
 )
 logger = logging.getLogger(__name__)
+
+# Add environment info to logs
+logger.info(f"Starting application in {settings.ENVIRONMENT} environment")
 
 # Define CSP Middleware
 class CSPMiddleware:
@@ -164,16 +171,26 @@ async def cleanup_on_failed_startup():
         logger.error(f"Error during failed startup cleanup: {str(e)}")
     
 # Create FastAPI app instance
-app = FastAPI(
-    title="Trading API",
-    description="API for trading strategy automation and signal processing",
-    version="1.0.0",
-    contact={
+app_kwargs = {
+    "title": "Trading API",
+    "description": "API for trading strategy automation and signal processing",
+    "version": "1.0.0",
+    "contact": {
         "name": "API Support",
         "email": "support@example.com",
     },
-    lifespan=lifespan
-)
+    "lifespan": lifespan
+}
+
+# Only show docs in development and testing environments
+if settings.ENVIRONMENT == "production":
+    app_kwargs.update({
+        "docs_url": None,  # Disable /docs in production
+        "redoc_url": None,  # Disable /redoc in production
+        "openapi_url": None  # Disable OpenAPI schema in production
+    })
+
+app = FastAPI(**app_kwargs)
 
 # Track background tasks
 background_tasks: Set[asyncio.Task] = set()
@@ -184,12 +201,7 @@ app.middleware("http")(CSPMiddleware(app))
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "https://js.stripe.com",
-        "https://checkout.stripe.com"
-    ],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -3,7 +3,7 @@ uvicorn>=0.24.0
 sqlalchemy>=2.0.23
 pydantic>=2.5.1
 pydantic-settings>=2.1.0
-python-jose[cryptography]>=3.3.0
+python-jose[cryptography]==3.3.0
 passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.6
 python-dotenv>=1.0.0
@@ -12,6 +12,6 @@ websockets>=12.0
 slowapi==0.1.8
 redis==5.0.1
 aiosmtplib==2.0.2
-python-jose[cryptography]==3.3.0
 stripe>=5.0.0
 psycopg2-binary>=2.9.9
+gunicorn>=20.1.0

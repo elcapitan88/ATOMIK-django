@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env.local
+.env.development
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/

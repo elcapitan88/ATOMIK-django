@@ -1,11 +1,12 @@
 # app/core/config.py
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from pathlib import Path
 import secrets
 from pydantic import validator
 from pydantic_settings import BaseSettings
+import os
 
 class Settings(BaseSettings):
     # Base Settings
@@ -15,11 +16,61 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
 
     # Server Settings
-    SERVER_HOST: str = "http://localhost:8000"
-    
+    SERVER_HOST: str = ""
+    FRONTEND_URL: str = ""
+
+    DEV_SERVER_HOST: str = "http://localhost:8000"
+    DEV_FRONTEND_URL: str = "http://localhost:3000"
+    DEV_TRADOVATE_REDIRECT_URI: str = "http://localhost:8000/api/tradovate/callback"
+
+    PROD_SERVER_HOST: str = "https://api.atomiktrading.io"
+    PROD_FRONTEND_URL: str = "https://atomiktrading.io"
+    PROD_TRADOVATE_REDIRECT_URI: str = "https://api.atomiktrading.io/api/tradovate/callback"
+        
     # Database Settings
     DATABASE_URL: str
+    DEV_DATABASE_URL: str = ""  # Add default empty values
+    PROD_DATABASE_URL: str = ""
     SQL_ECHO: bool = False 
+
+    @property
+    def active_database_url(self) -> str:
+        if self.ENVIRONMENT == "production" and self.PROD_DATABASE_URL:
+            return self.PROD_DATABASE_URL
+        elif self.ENVIRONMENT == "development" and self.DEV_DATABASE_URL:
+            return self.DEV_DATABASE_URL
+        return self.DATABASE_URL
+    
+    def get_db_params(self) -> Dict[str, Any]:
+        """Return database connection parameters based on environment"""
+        if self.ENVIRONMENT == "production":
+            return {
+                "pool_size": self.DB_POOL_SIZE if hasattr(self, "DB_POOL_SIZE") else 5,
+                "max_overflow": self.DB_MAX_OVERFLOW if hasattr(self, "DB_MAX_OVERFLOW") else 10,
+                "pool_timeout": self.DB_POOL_TIMEOUT if hasattr(self, "DB_POOL_TIMEOUT") else 30,
+                "pool_recycle": self.DB_POOL_RECYCLE if hasattr(self, "DB_POOL_RECYCLE") else 1800,
+                "pool_pre_ping": True,
+                "echo": self.SQL_ECHO if hasattr(self, "SQL_ECHO") else False,
+            }
+        else:
+            # Development parameters
+            return {
+                "pool_size": 2,
+                "max_overflow": 5,
+                "pool_timeout": 30,
+                "pool_recycle": 900,  # 15 minutes
+                "pool_pre_ping": True,
+                "echo": self.SQL_ECHO if hasattr(self, "SQL_ECHO") else True,
+            }
+        
+    @lru_cache()
+    def get_settings() -> Settings:
+        """
+        Get cached settings instance.
+        Using lru_cache to avoid loading .env file for each request
+        """
+        return Settings()
+
     
     # Security and Authentication Settings
     SECRET_KEY: str
@@ -60,14 +111,38 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str
     STRIPE_WEBHOOK_SECRET: str  
     STRIPE_PUBLIC_KEY: str
+
+
+    DEV_STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
+    DEV_STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
+
+    PROD_STRIPE_SUCCESS_URL: str = "https://atomiktrading.io/payment/success"
+    PROD_STRIPE_CANCEL_URL: str = "https://atomiktrading.io/pricing"
+
     STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
     STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
+
+    @property
+    def active_stripe_success_url(self) -> str:
+        if self.ENVIRONMENT == "production" and self.PROD_STRIPE_SUCCESS_URL:
+            return self.PROD_STRIPE_SUCCESS_URL
+        elif self.ENVIRONMENT == "development" and self.DEV_STRIPE_SUCCESS_URL:
+            return self.DEV_STRIPE_SUCCESS_URL
+        return self.STRIPE_SUCCESS_URL
+
+    @property
+    def active_stripe_cancel_url(self) -> str:
+        if self.ENVIRONMENT == "production" and self.PROD_STRIPE_CANCEL_URL:
+            return self.PROD_STRIPE_CANCEL_URL
+        elif self.ENVIRONMENT == "development" and self.DEV_STRIPE_CANCEL_URL:
+            return self.DEV_STRIPE_CANCEL_URL
+        return self.STRIPE_CANCEL_URL
+
     SKIP_SUBSCRIPTION_CHECK: bool = False
 
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
     
-    FRONTEND_URL: str = "http://localhost:3000"
     LOG_LEVEL: str = "DEBUG"
 
     @validator("STRIPE_SECRET_KEY")
@@ -107,6 +182,30 @@ class Settings(BaseSettings):
         env_file = ".env"
         case_sensitive = True
         env_file_encoding = 'utf-8'
+
+    @property
+    def active_server_host(self) -> str:
+        if self.ENVIRONMENT == "production" and self.PROD_SERVER_HOST:
+            return self.PROD_SERVER_HOST
+        elif self.ENVIRONMENT == "development" and self.DEV_SERVER_HOST:
+            return self.DEV_SERVER_HOST
+        return self.SERVER_HOST
+
+    @property
+    def active_frontend_url(self) -> str:
+        if self.ENVIRONMENT == "production" and self.PROD_FRONTEND_URL:
+            return self.PROD_FRONTEND_URL
+        elif self.ENVIRONMENT == "development" and self.DEV_FRONTEND_URL:
+            return self.DEV_FRONTEND_URL
+        return self.FRONTEND_URL
+
+    @property
+    def active_tradovate_redirect_uri(self) -> str:
+        if self.ENVIRONMENT == "production" and self.PROD_TRADOVATE_REDIRECT_URI:
+            return self.PROD_TRADOVATE_REDIRECT_URI
+        elif self.ENVIRONMENT == "development" and self.DEV_TRADOVATE_REDIRECT_URI:
+            return self.DEV_TRADOVATE_REDIRECT_URI
+        return self.TRADOVATE_REDIRECT_URI
 
 @lru_cache()
 def get_settings() -> Settings:

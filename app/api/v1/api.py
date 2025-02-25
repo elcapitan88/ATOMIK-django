@@ -9,9 +9,9 @@ from app.db.session import get_db
 api_router = APIRouter()
 tradovate_callback_router = APIRouter()
 
-# Include all standard routes under /api/v1
-api_router.include_router(tradovate.router, prefix="/brokers/tradovate", tags=["tradovate"])
+
 api_router.include_router(broker.router, prefix="/brokers", tags=["brokers"])
+api_router.include_router(tradovate.router, prefix="/brokers/tradovate", tags=["tradovate"])
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])

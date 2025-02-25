@@ -38,18 +38,6 @@ async def activate_strategy(
         logger.info(f"Creating strategy for user {current_user.id}")
         logger.debug(f"Strategy data received: {strategy.dict()}")
 
-        # Check subscription (if enabled)
-        if not settings.SKIP_SUBSCRIPTION_CHECK:
-            if not current_user.subscription:
-                raise HTTPException(status_code=403, detail="No active subscription found")
-
-            if (isinstance(strategy, MultipleStrategyCreate) and 
-                current_user.subscription.tier == SubscriptionTier.STARTED):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Multiple account strategies require Plus subscription or higher"
-                )
-
         # Updated webhook validation to support subscriptions
         webhook = db.query(Webhook).filter(
             Webhook.token == str(strategy.webhook_id)

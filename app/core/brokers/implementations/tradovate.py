@@ -718,72 +718,52 @@ class TradovateBroker(BaseBroker):
             raise
 
     async def place_order(self, account: BrokerAccount, order_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Place a trading order with Tradovate"""
         try:
             api_url = self.api_urls[account.environment]
             headers = self._get_auth_headers(account.credentials)
 
-            # Map generic order type to Tradovate-specific order type
-            order_type_mapping = {
-                "market": TradovateOrderType.Market,
-                "limit": TradovateOrderType.Limit,
-                "stop": TradovateOrderType.Stop,
-                "stop_limit": TradovateOrderType.StopLimit
-            }
+            # Log incoming order data
+            logger.info(f"Incoming order data to place_order: {json.dumps(order_data, indent=2)}")
 
-            # Map generic side/action to Tradovate-specific action
-            action_mapping = {
-                "buy": TradovateOrderAction.Buy,
-                "sell": TradovateOrderAction.Sell
-            }
-
-            # Construct Tradovate-specific order payload
             tradovate_order = {
                 "accountSpec": account.name,
                 "accountId": int(account.account_id),
                 "symbol": order_data["symbol"],
                 "orderQty": order_data["quantity"],
-                "orderType": order_type_mapping[order_data["type"].lower()],
-                "action": action_mapping[order_data["side"].lower()],
-                "timeInForce": order_data.get("time_in_force", "GTC"),
-                "isAutomated": True
+                "orderType": "Market",  # Hardcode for now to debug
+                "action": order_data["side"].capitalize(),
+                "timeInForce": "GTC",
+                "isAutomated": False
             }
 
-            # Add conditional fields based on order type
-            if order_data.get("price") and order_data["type"].lower() in ["limit", "stop_limit"]:
-                tradovate_order["price"] = order_data["price"]
-                
-            if order_data.get("stop_price") and order_data["type"].lower() in ["stop", "stop_limit"]:
-                tradovate_order["stopPrice"] = order_data["stop_price"]
+            # Log the exact payload being sent to Tradovate
+            logger.info(f"Sending to Tradovate API: {json.dumps(tradovate_order, indent=2)}")
 
-            logger.info(f"""
-            Preparing Tradovate order:
-            Account Spec: {tradovate_order['accountSpec']}
-            Account ID: {tradovate_order['accountId']}
-            Symbol: {tradovate_order['symbol']}
-            Action: {tradovate_order['action']}
-            Order Type: {tradovate_order['orderType']}
-            Quantity: {tradovate_order['orderQty']}
-            """)
-
-            response = await self._make_request(
+            # Store raw response before any transformation
+            raw_response = await self._make_request(
                 'POST',
                 f"{api_url}/order/placeOrder",
                 data=tradovate_order,
                 headers=headers
             )
 
-            if not response:
-                raise OrderError("Empty response when placing order")
+            # Log raw response immediately
+            logger.info(f"Raw Tradovate API Response: {json.dumps(raw_response, indent=2)}")
 
-            return {
-                "order_id": str(response.get('orderId')),
-                "status": response.get('orderStatus', 'pending'),
-                "filled_quantity": response.get('filledQty', 0),
-                "remaining_quantity": response.get('remainingQty', order_data["quantity"]),
-                "average_price": response.get('avgFillPrice'),
-                "timestamp": datetime.utcnow().isoformat()
+            # Then transform for our normalized response
+            normalized_response = {
+                "order_id": str(raw_response.get('orderId')),
+                "status": raw_response.get('orderStatus', 'pending'),
+                "filled_quantity": raw_response.get('filledQty', 0),
+                "remaining_quantity": raw_response.get('remainingQty', order_data["quantity"]),
+                "average_price": raw_response.get('avgFillPrice'),
+                "timestamp": datetime.utcnow().isoformat(),
+                "raw_response": raw_response  # Include full raw response
             }
+
+            logger.info(f"Normalized response: {json.dumps(normalized_response, indent=2)}")
+
+            return normalized_response
 
         except Exception as e:
             logger.error(f"""
@@ -791,6 +771,7 @@ class TradovateBroker(BaseBroker):
             Error: {str(e)}
             Account: {account.name} ({account.account_id})
             Order Data: {json.dumps(order_data, indent=2)}
+            Traceback: {traceback.format_exc()}
             """)
             raise OrderError(f"Failed to place order: {str(e)}")
 
@@ -831,3 +812,66 @@ class TradovateBroker(BaseBroker):
             "Authorization": f"Bearer {credentials.access_token}",
             "Content-Type": "application/json"
         }
+    
+    async def close_all_positions_for_accounts(self, accounts: List[BrokerAccount]) -> Dict[str, List[Dict[str, Any]]]:
+        """Close all open positions across multiple accounts"""
+        try:
+            results = {}
+            
+            for account in accounts:
+                try:
+                    # Get positions for this account
+                    positions = await self.get_positions(account)
+                    
+                    if not positions:
+                        logger.info(f"No open positions found for account {account.account_id}")
+                        results[account.account_id] = []
+                        continue
+
+                    account_results = []
+                    for position in positions:
+                        try:
+                            # Determine closing order details
+                            closing_side = "SELL" if position.get("quantity", 0) > 0 else "BUY"
+                            quantity = abs(position.get("quantity", 0))
+                            
+                            # Prepare order data
+                            order_data = {
+                                "account_id": account.account_id,
+                                "symbol": position.get("symbol"),
+                                "quantity": quantity,
+                                "side": closing_side,
+                                "type": "MARKET",
+                                "time_in_force": "GTC"
+                            }
+
+                            # Place closing order
+                            result = await self.place_order(account, order_data)
+                            account_results.append({
+                                "position": position,
+                                "close_order": result,
+                                "status": "success"
+                            })
+
+                        except Exception as e:
+                            logger.error(f"Error closing position {position}: {str(e)}")
+                            account_results.append({
+                                "position": position,
+                                "error": str(e),
+                                "status": "failed"
+                            })
+
+                    results[account.account_id] = account_results
+
+                except Exception as e:
+                    logger.error(f"Error processing account {account.account_id}: {str(e)}")
+                    results[account.account_id] = [{
+                        "error": str(e),
+                        "status": "failed"
+                    }]
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in close_all_positions_for_accounts: {str(e)}")
+            raise OrderError(f"Failed to close positions across accounts: {str(e)}")
