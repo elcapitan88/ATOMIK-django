@@ -5,6 +5,7 @@ from typing import Optional, List, Any, Dict
 from pathlib import Path
 import secrets
 from pydantic import validator
+from pydantic_settings import BaseSettings
 import os
 
 class Settings(BaseSettings):
@@ -31,6 +32,15 @@ class Settings(BaseSettings):
     DEV_DATABASE_URL: str = ""  # Add default empty values
     PROD_DATABASE_URL: str = ""
     SQL_ECHO: bool = False 
+    
+    # Database pool settings (add these to fix validation errors)
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
+    
+    # Worker settings
+    WORKERS: int = 4
 
     @property
     def active_database_url(self) -> str:
@@ -44,12 +54,12 @@ class Settings(BaseSettings):
         """Return database connection parameters based on environment"""
         if self.ENVIRONMENT == "production":
             return {
-                "pool_size": self.DB_POOL_SIZE if hasattr(self, "DB_POOL_SIZE") else 5,
-                "max_overflow": self.DB_MAX_OVERFLOW if hasattr(self, "DB_MAX_OVERFLOW") else 10,
-                "pool_timeout": self.DB_POOL_TIMEOUT if hasattr(self, "DB_POOL_TIMEOUT") else 30,
-                "pool_recycle": self.DB_POOL_RECYCLE if hasattr(self, "DB_POOL_RECYCLE") else 1800,
+                "pool_size": self.DB_POOL_SIZE,
+                "max_overflow": self.DB_MAX_OVERFLOW,
+                "pool_timeout": self.DB_POOL_TIMEOUT,
+                "pool_recycle": self.DB_POOL_RECYCLE,
                 "pool_pre_ping": True,
-                "echo": self.SQL_ECHO if hasattr(self, "SQL_ECHO") else False,
+                "echo": self.SQL_ECHO,
             }
         else:
             # Development parameters
@@ -59,8 +69,11 @@ class Settings(BaseSettings):
                 "pool_timeout": 30,
                 "pool_recycle": 900,  # 15 minutes
                 "pool_pre_ping": True,
-                "echo": self.SQL_ECHO if hasattr(self, "SQL_ECHO") else True,
+                "echo": self.SQL_ECHO,
             }
+        
+    
+
     
     # Security and Authentication Settings
     SECRET_KEY: str
@@ -102,6 +115,7 @@ class Settings(BaseSettings):
     STRIPE_WEBHOOK_SECRET: str  
     STRIPE_PUBLIC_KEY: str
 
+
     DEV_STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
     DEV_STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
 
@@ -110,9 +124,6 @@ class Settings(BaseSettings):
 
     STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
     STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
-
-    # Worker settings
-    WORKERS: int = 4
 
     @property
     def active_stripe_success_url(self) -> str:
@@ -175,17 +186,6 @@ class Settings(BaseSettings):
         case_sensitive = True
         env_file_encoding = 'utf-8'
 
-        @classmethod
-        def parse_env_var(cls, field_name: str, raw_val: str) -> Any:
-            if field_name == "CORS_ORIGINS":
-                if isinstance(raw_val, str):
-                    # Remove quotes if present
-                    cleaned_val = raw_val.strip('"').strip("'")
-                    # Split by comma and clean each value
-                    return [origin.strip() for origin in cleaned_val.split(",") if origin.strip()]
-                return raw_val
-            return raw_val
-
     @property
     def active_server_host(self) -> str:
         if self.ENVIRONMENT == "production" and self.PROD_SERVER_HOST:
@@ -210,7 +210,6 @@ class Settings(BaseSettings):
             return self.DEV_TRADOVATE_REDIRECT_URI
         return self.TRADOVATE_REDIRECT_URI
 
-# Move get_settings outside of the Settings class
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance"""
@@ -219,7 +218,11 @@ def get_settings() -> Settings:
 # Create settings instance
 settings = get_settings()
 
+
+
 # Validate critical settings on import
+assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
+assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
 assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
 assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
 assert settings.STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY environment variable is required"
