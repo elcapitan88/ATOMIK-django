@@ -5,7 +5,6 @@ from typing import Optional, List, Any, Dict
 from pathlib import Path
 import secrets
 from pydantic import validator
-from pydantic_settings import BaseSettings
 import os
 
 class Settings(BaseSettings):
@@ -62,15 +61,6 @@ class Settings(BaseSettings):
                 "pool_pre_ping": True,
                 "echo": self.SQL_ECHO if hasattr(self, "SQL_ECHO") else True,
             }
-        
-    @lru_cache()
-    def get_settings() -> Settings:
-        """
-        Get cached settings instance.
-        Using lru_cache to avoid loading .env file for each request
-        """
-        return Settings()
-
     
     # Security and Authentication Settings
     SECRET_KEY: str
@@ -112,7 +102,6 @@ class Settings(BaseSettings):
     STRIPE_WEBHOOK_SECRET: str  
     STRIPE_PUBLIC_KEY: str
 
-
     DEV_STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
     DEV_STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
 
@@ -121,6 +110,9 @@ class Settings(BaseSettings):
 
     STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
     STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
+
+    # Worker settings
+    WORKERS: int = 4
 
     @property
     def active_stripe_success_url(self) -> str:
@@ -183,6 +175,17 @@ class Settings(BaseSettings):
         case_sensitive = True
         env_file_encoding = 'utf-8'
 
+        @classmethod
+        def parse_env_var(cls, field_name: str, raw_val: str) -> Any:
+            if field_name == "CORS_ORIGINS":
+                if isinstance(raw_val, str):
+                    # Remove quotes if present
+                    cleaned_val = raw_val.strip('"').strip("'")
+                    # Split by comma and clean each value
+                    return [origin.strip() for origin in cleaned_val.split(",") if origin.strip()]
+                return raw_val
+            return raw_val
+
     @property
     def active_server_host(self) -> str:
         if self.ENVIRONMENT == "production" and self.PROD_SERVER_HOST:
@@ -207,6 +210,7 @@ class Settings(BaseSettings):
             return self.DEV_TRADOVATE_REDIRECT_URI
         return self.TRADOVATE_REDIRECT_URI
 
+# Move get_settings outside of the Settings class
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance"""
@@ -215,11 +219,7 @@ def get_settings() -> Settings:
 # Create settings instance
 settings = get_settings()
 
-
-
 # Validate critical settings on import
-assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
-assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
 assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
 assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
 assert settings.STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY environment variable is required"
