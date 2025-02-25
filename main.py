@@ -74,6 +74,35 @@ class CSPMiddleware:
         response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
         return response
 
+# Track background tasks
+background_tasks: Set[asyncio.Task] = set()
+
+# Consolidated cleanup function that works for both lifespan and startup
+async def cleanup_on_failed_startup():
+    """Cleanup resources if startup fails"""
+    try:
+        logger.info("Performing cleanup after failed startup...")
+        
+        # Cancel any running background tasks
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        # Cleanup WebSocket manager if initialized
+        global websocket_manager
+        await websocket_manager.cleanup()
+            
+        # Close database connections
+        if engine is not None:
+            engine.dispose()
+        
+        logger.info("Cleanup after failed startup completed")
+    except Exception as e:
+        logger.error(f"Error during failed startup cleanup: {str(e)}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -88,7 +117,7 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("Initializing database...")
             init_db()
-            health_status = check_database_health()
+            health_status = await check_database_health()  # Make sure to await this
             if health_status['status'] != 'healthy':
                 raise Exception("Database health check failed")
             logger.info("Database initialization successful")
@@ -111,7 +140,7 @@ async def lifespan(app: FastAPI):
 
     except Exception as e:
         logger.critical(f"Application startup failed: {str(e)}")
-        await cleanup_on_failed_startup()
+        await cleanup_on_failed_startup()  # No arguments needed now
         raise
 
     finally:
@@ -144,31 +173,6 @@ async def lifespan(app: FastAPI):
             
         except Exception as e:
             logger.error(f"Error during shutdown: {str(e)}")
-
-async def cleanup_on_failed_startup():
-    """Cleanup resources if startup fails"""
-    try:
-        logger.info("Performing cleanup after failed startup...")
-        
-        # Cancel any running background tasks
-        for task in background_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        
-        # Cleanup WebSocket manager if initialized
-        if hasattr(app.state, 'websocket_manager'):
-            await websocket_manager.cleanup()
-            
-        # Close database connections
-        await engine.dispose()
-        
-        logger.info("Cleanup after failed startup completed")
-    except Exception as e:
-        logger.error(f"Error during failed startup cleanup: {str(e)}")
     
 # Create FastAPI app instance
 app_kwargs = {
@@ -191,9 +195,6 @@ if settings.ENVIRONMENT == "production":
     })
 
 app = FastAPI(**app_kwargs)
-
-# Track background tasks
-background_tasks: Set[asyncio.Task] = set()
 
 # Add CSP middleware first
 app.middleware("http")(CSPMiddleware(app))
@@ -231,8 +232,6 @@ app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 
 app.state.websocket_manager = websocket_manager
-
-
 
 # Request logging middleware
 @app.middleware("http")
@@ -278,7 +277,7 @@ async def startup_event():
         try:
             logger.info("Initializing database...")
             init_db()
-            health_status = check_database_health()
+            health_status = await check_database_health()  # Make sure to await this
             if health_status['status'] != 'healthy':
                 raise Exception("Database health check failed")
             startup_status["database"] = True
@@ -308,29 +307,8 @@ async def startup_event():
     except Exception as e:
         logger.critical(f"Startup failed: {str(e)}")
         logger.critical("Service cannot start properly - shutting down")
-        await cleanup_on_failed_startup(startup_status)
+        await cleanup_on_failed_startup()  # Simplified call with no arguments
         raise
-
-async def cleanup_on_failed_startup(startup_status: dict):
-    """Cleanup any initialized components after failed startup"""
-    try:
-        logger.info("Performing cleanup after failed startup...")
-        
-        if startup_status["websocket_manager"]:
-            await websocket_manager.cleanup()
-            
-        if startup_status["background_tasks"]:
-            for task in background_tasks:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                        
-        logger.info("Cleanup completed")
-    except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -355,7 +333,8 @@ async def shutdown_event():
         # Step 3: Close database connections
         logger.info("Closing database connections...")
         from app.db.session import engine
-        await engine.dispose()
+        if engine is not None:
+            engine.dispose()  # Engine should be synchronous
 
         logger.info("Trading API Service shutdown completed successfully")
     except Exception as e:
@@ -393,7 +372,7 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "version": "1.0.0",
         "components": {
-            "database": check_database_health(),
+            "database": await check_database_health(),  # Make sure to await this
             "websocket": websocket_manager.get_status(),
             "background_tasks": {
                 "total": len(background_tasks),
