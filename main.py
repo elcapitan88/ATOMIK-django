@@ -117,13 +117,30 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("Initializing database...")
             init_db()
-            health_status = await check_database_health()  # Make sure to await this
-            if health_status['status'] != 'healthy':
-                raise Exception("Database health check failed")
-            logger.info("Database initialization successful")
+            health_status = await check_database_health(retries=3, retry_delay=2)  # Add retries
+            
+            # Be more forgiving in production
+            if settings.ENVIRONMENT == "production":
+                if health_status['status'] in ["critical", "error"]:
+                    logger.error(f"Database health check returned {health_status['status']}: {health_status['message']}")
+                    logger.warning("Continuing startup despite database health check failure in production")
+                else:
+                    logger.info(f"Database health check: {health_status['status']}")
+            else:
+                # In development, be more strict
+                if health_status['status'] not in ["healthy", "degraded"]:
+                    raise Exception(f"Database health check failed: {health_status['message']}")
+                
+            logger.info("Database initialization completed")
         except Exception as db_error:
-            logger.error(f"Database initialization failed: {str(db_error)}")
-            raise
+            if settings.ENVIRONMENT == "production":
+                # Log error but continue in production
+                logger.error(f"Database initialization issue in production: {str(db_error)}")
+                logger.warning("Continuing startup despite database initialization issue")
+            else:
+                # In development, fail fast
+                logger.error(f"Database initialization failed: {str(db_error)}")
+                raise
 
         # Start token refresh task
         try:
@@ -133,14 +150,15 @@ async def lifespan(app: FastAPI):
             logger.info("Token refresh task started successfully")
         except Exception as task_error:
             logger.error(f"Token refresh task initialization failed: {str(task_error)}")
-            raise
+            if settings.ENVIRONMENT != "production":
+                raise
 
         logger.info("Application startup completed successfully")
         yield
 
     except Exception as e:
         logger.critical(f"Application startup failed: {str(e)}")
-        await cleanup_on_failed_startup()  # No arguments needed now
+        await cleanup_on_failed_startup()
         raise
 
     finally:

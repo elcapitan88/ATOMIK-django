@@ -9,9 +9,9 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-async def check_database_health() -> Dict[str, Any]:
+async def check_database_health(retries=3, retry_delay=2) -> Dict[str, Any]:
     """
-    Comprehensive database health check with detailed diagnostics
+    Comprehensive database health check with detailed diagnostics and retry logic
     """
     start_time = time.time()
     result = {
@@ -25,64 +25,104 @@ async def check_database_health() -> Dict[str, Any]:
         "details": {}
     }
     
-    try:
-        # Step 1: Check basic connection
-        if engine is None:
-            result["status"] = "critical"
-            result["message"] = "Database engine not initialized"
-            return result
-        
-        # Step 2: Verify connection and measure response time
-        logger.debug("Testing database connection...")
-        try:
-            with get_db_context() as db:
-                query_start = time.time()
-                db.execute(text("SELECT 1"))
-                query_time = time.time() - query_start
-                
-                result["connection"] = True
-                result["query_response_time_ms"] = round(query_time * 1000, 2)
-                
-                # Step 3: Check if tables exist
-                inspector = inspect(engine)
-                tables = inspector.get_table_names()
-                result["table_count"] = len(tables)
-                result["tables_exist"] = len(tables) > 0
-                
-                # Get additional diagnostics in development mode
-                if settings.ENVIRONMENT != "production":
-                    # Table details
-                    result["details"]["tables"] = tables
-                    
-                    # Connection pool stats
-                    pool_stats = {
-                        "pool_size": engine.pool.size(),
-                        "checkedin": engine.pool.checkedin(),
-                        "overflow": engine.pool.overflow(),
-                        "checkedout": engine.pool.checkedout(),
-                    }
-                    result["details"]["connection_pool"] = pool_stats
-                
-                # Determine overall status
-                if result["query_response_time_ms"] < 100:
-                    status = "healthy"
-                elif result["query_response_time_ms"] < 500:
-                    status = "degraded"
-                else:
-                    status = "slow"
-                    
-                result["status"] = status
-                result["message"] = f"Database connection {status} ({result['query_response_time_ms']}ms)"
-                
-        except Exception as conn_error:
-            result["status"] = "critical"
-            result["message"] = f"Database query failed: {str(conn_error)}"
-            logger.error(f"Database health check query error: {str(conn_error)}")
+    # Log connection details (masking sensitive info)
+    db_url = settings.active_database_url
+    masked_url = db_url.replace(db_url.split('@')[0], '***:***')
+    logger.info(f"Checking database health for {masked_url}")
     
-    except Exception as e:
-        result["status"] = "error"
-        result["message"] = f"Health check failed: {str(e)}"
-        logger.error(f"Database health check failed: {str(e)}")
+    # Add retries for database connection
+    for attempt in range(retries):
+        try:
+            # Step 1: Check basic connection
+            if engine is None:
+                logger.critical("Database engine is None - initialization failed")
+                result["status"] = "critical"
+                result["message"] = "Database engine not initialized"
+                if attempt < retries - 1:
+                    logger.info(f"Retry {attempt+1}/{retries} in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    continue
+                return result
+            
+            # Step 2: Verify connection and measure response time
+            logger.debug(f"Testing database connection (attempt {attempt+1}/{retries})...")
+            
+            try:
+                with get_db_context() as db:
+                    query_start = time.time()
+                    db.execute(text("SELECT 1"))
+                    query_time = time.time() - query_start
+                    
+                    result["connection"] = True
+                    result["query_response_time_ms"] = round(query_time * 1000, 2)
+                    
+                    # Step 3: Check if tables exist
+                    inspector = inspect(engine)
+                    tables = inspector.get_table_names()
+                    result["table_count"] = len(tables)
+                    result["tables_exist"] = len(tables) > 0
+                    
+                    logger.info(f"Database connection successful. Found {len(tables)} tables.")
+                    
+                    # Get additional diagnostics in development mode
+                    if settings.ENVIRONMENT != "production":
+                        # Table details
+                        result["details"]["tables"] = tables
+                        
+                        # Connection pool stats
+                        try:
+                            pool_stats = {
+                                "pool_size": engine.pool.size(),
+                                "checkedin": engine.pool.checkedin(),
+                                "overflow": engine.pool.overflow(),
+                                "checkedout": engine.pool.checkedout(),
+                            }
+                            result["details"]["connection_pool"] = pool_stats
+                        except Exception as pool_err:
+                            logger.warning(f"Could not get pool stats: {str(pool_err)}")
+                    
+                    # Determine overall status
+                    if result["query_response_time_ms"] < 100:
+                        status = "healthy"
+                    elif result["query_response_time_ms"] < 500:
+                        status = "degraded"
+                    else:
+                        status = "slow"
+                        
+                    # In production, treat table count of 0 as a warning but not failure
+                    if result["table_count"] == 0:
+                        if settings.ENVIRONMENT == "production":
+                            logger.warning("No tables found in the database - might need migration")
+                            status = "degraded"
+                        else:
+                            logger.error("No tables found in the database")
+                            status = "critical"
+                    
+                    result["status"] = status
+                    result["message"] = f"Database connection {status} ({result['query_response_time_ms']}ms)"
+                    
+                    # Return on successful connection
+                    break
+                    
+            except Exception as conn_error:
+                result["status"] = "critical"
+                result["message"] = f"Database query failed: {str(conn_error)}"
+                logger.error(f"Database connection error: {str(conn_error)}")
+                
+                if attempt < retries - 1:
+                    logger.info(f"Retry {attempt+1}/{retries} in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.critical(f"Failed to connect to database after {retries} attempts")
+        
+        except Exception as e:
+            result["status"] = "error"
+            result["message"] = f"Health check failed: {str(e)}"
+            logger.error(f"Database health check error: {str(e)}")
+            
+            if attempt < retries - 1:
+                logger.info(f"Retry {attempt+1}/{retries} in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
     
     # Calculate total check time
     result["check_duration_ms"] = round((time.time() - start_time) * 1000, 2)
