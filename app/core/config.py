@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Trading API"
     DEBUG: bool = True
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = "production"
 
     # Server Settings
     SERVER_HOST: str = ""
@@ -122,8 +122,8 @@ class Settings(BaseSettings):
     PROD_STRIPE_SUCCESS_URL: str = "https://atomiktrading.io/payment/success"
     PROD_STRIPE_CANCEL_URL: str = "https://atomiktrading.io/pricing"
 
-    STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
-    STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
+    STRIPE_SUCCESS_URL: str = "https://atomiktrading.io/payment/success"
+    STRIPE_CANCEL_URL: str = "https://atomiktrading.io/pricing"
 
     @property
     def active_stripe_success_url(self) -> str:
