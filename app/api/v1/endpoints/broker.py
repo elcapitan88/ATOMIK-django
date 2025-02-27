@@ -38,7 +38,9 @@ class BrokerConnectRequest(BaseModel):
     environment: str
     credentials: BrokerConnectCredentials
 
-
+class CloseAllPositionsRequest(BaseModel):
+    account_ids: List[str]
+    
 @router.get("/supported")
 async def get_supported_brokers():
     """Get list of supported brokers and their features"""
