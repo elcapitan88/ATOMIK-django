@@ -40,7 +40,10 @@ class BrokerConnectRequest(BaseModel):
 
 class CloseAllPositionsRequest(BaseModel):
     account_ids: List[str]
-    
+
+class AccountUpdateRequest(BaseModel):
+    nickname: Optional[str] = None
+
 @router.get("/supported")
 async def get_supported_brokers():
     """Get list of supported brokers and their features"""
@@ -168,6 +171,7 @@ async def get_account_status(
         return {
             "account_id": account.account_id,
             "broker_id": account.broker_id,
+            "nickname": account.nickname,
             "status": status,
             "last_updated": datetime.utcnow().isoformat()
         }
@@ -250,6 +254,7 @@ async def list_broker_accounts(
             account_list.append({
                 "account_id": account.account_id,
                 "name": account.name,
+                "nickname": account.nickname,  # Add nickname field
                 "environment": account.environment,
                 "status": "active" if is_valid else "token_expired",
                 "balance": 0.0,  # This would come from broker API when token is valid
@@ -409,6 +414,7 @@ async def get_broker_accounts(
             {
                 "account_id": account.account_id,
                 "name": account.name,
+                "nickname": account.nickname,  # Add nickname field
                 "environment": account.environment,
                 "status": account.status,
                 "balance": 0.0,  # You'll need to fetch this from broker API
@@ -559,5 +565,60 @@ async def place_discretionary_order(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to place order: {str(e)}"
+        )
+    
+@router.patch("/accounts/{account_id}")
+async def update_account(
+    account_id: str,
+    update_data: AccountUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update broker account nickname"""
+    try:
+        # Find the account and verify ownership
+        account = db.query(BrokerAccount).filter(
+            BrokerAccount.account_id == account_id,
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True
+        ).first()
+
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        # Update the nickname if provided
+        if update_data.nickname is not None:
+            # Validate nickname length
+            if len(update_data.nickname) > 200:
+                raise HTTPException(status_code=400, detail="Nickname too long")
+            
+            # Update the nickname
+            account.nickname = update_data.nickname
+            account.updated_at = datetime.utcnow()
+            
+        # Commit the changes
+        db.commit()
+        
+        # Return the updated account
+        return {
+            "status": "success",
+            "message": "Account updated successfully",
+            "account": {
+                "account_id": account.account_id,
+                "name": account.name,
+                "nickname": account.nickname,
+                "environment": account.environment,
+                "updated_at": account.updated_at.isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating account nickname: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update account nickname: {str(e)}"
         )
     

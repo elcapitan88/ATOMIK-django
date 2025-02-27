@@ -14,6 +14,7 @@ class BrokerAccount(Base):
     broker_id = Column(String(50))  # e.g., "tradovate"
     account_id = Column(String, unique=True, nullable=False)
     name = Column(String(200))
+    nickname = Column(String(200), nullable=True)
     environment = Column(String(10))
     is_active = Column(Boolean, default=True)
     status = Column(String(20), default='inactive')
@@ -23,6 +24,7 @@ class BrokerAccount(Base):
     last_connected = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
     is_deleted = Column(Boolean, default=False)
+
 
     # Relationships
     user = relationship("User", back_populates="broker_accounts")
@@ -46,6 +48,7 @@ class BrokerAccount(Base):
             "account_id": self.account_id,
             "broker_id": self.broker_id,
             "name": self.name,
+            "nickname": self.nickname,  # Add nickname field here
             "environment": self.environment,
             "is_active": self.is_active,
             "status": self.status,
