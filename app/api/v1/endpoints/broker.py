@@ -223,13 +223,27 @@ async def list_broker_accounts(
             BrokerAccount.is_active == True
         ).all()
 
+        logger.info(f"Found {len(accounts)} active accounts for user {current_user.id}")
         account_list = []
+        
         for account in accounts:
             is_valid = False
             if account.credentials:
+                # Log the token state before validation
+                logger.info(f"Account {account.account_id} credential check - ID: {account.credentials.id}, expires_at: {account.credentials.expires_at}, is_valid: {account.credentials.is_valid}")
+                
                 # Try to refresh token if needed
-                await token_service.refresh_token_if_needed(account.credentials)
+                refresh_result = await token_service.refresh_token_if_needed(account.credentials)
+                logger.info(f"Token refresh attempt for account {account.account_id} - Result: {refresh_result}")
+                
+                # Validate token
+                validation_start = datetime.utcnow()
                 is_valid = await token_service.validate_token(account.credentials)
+                validation_time = (datetime.utcnow() - validation_start).total_seconds() * 1000
+                
+                logger.info(f"Token validation for account {account.account_id} - Valid: {is_valid}, Took: {validation_time:.2f}ms")
+            else:
+                logger.warning(f"Account {account.account_id} has no credentials")
 
             account_list.append({
                 "account_id": account.account_id,
@@ -241,6 +255,9 @@ async def list_broker_accounts(
                 "is_token_expired": not is_valid,
                 "last_connected": account.last_connected
             })
+            
+            # Log the final account state being returned to frontend
+            logger.info(f"Returning account state: {account.account_id}, is_token_expired: {not is_valid}")
 
         return account_list
 
@@ -250,9 +267,6 @@ async def list_broker_accounts(
             status_code=500,
             detail=f"Failed to fetch accounts: {str(e)}"
         )
-    
-class CloseAllPositionsRequest(BaseModel):
-    account_ids: List[str]
 
 @router.post("/accounts/close-all", name="close_all_positions")
 async def close_all_positions(

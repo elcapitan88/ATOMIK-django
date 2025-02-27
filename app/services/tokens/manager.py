@@ -104,65 +104,66 @@ class TokenManager:
         lock = await self.get_lock(credential_id)
 
         try:
-            async with asyncio.timeout(self.LOCK_TIMEOUT):
-                async with lock:
-                    # Create new session for this operation
-                    new_db = SessionLocal()
-                    try:
-                        # Get fresh credential instance
-                        credential = new_db.query(BrokerCredentials).get(credential.id)
-                        if not credential:
-                            logger.error(f"Credential {credential_id} not found")
-                            return False
-
-                        # Calculate how long the token has been used
-                        token_age = (datetime.utcnow() - credential.last_refresh_attempt).total_seconds()
-                        refresh_threshold = broker_config['TOKEN_LIFETIME'] * broker_config['REFRESH_THRESHOLD']
-
-                        logger.info(
-                            f"Checking credential {credential_id}: "
-                            f"Used for {token_age:.0f}s, "
-                            f"Will refresh after {refresh_threshold:.0f}s of use"
-                        )
-
-                        # Only refresh if we've used it longer than threshold
-                        if token_age < refresh_threshold:
-                            logger.debug(f"No refresh needed yet for credential {credential_id}")
-                            return True
-
-                        if self._refresh_attempts.get(credential_id, 0) >= broker_config['MAX_RETRY_ATTEMPTS']:
-                            await self._handle_max_retries_exceeded(credential, new_db)
-                            return False
-
-                        logger.info(f"Attempting to refresh token for credential {credential_id}")
-                        broker = BaseBroker.get_broker_instance(credential.broker_id, new_db)
-                        refreshed_credential = await broker.refresh_credentials(credential)
-                        
-                        if refreshed_credential and refreshed_credential.is_valid:
-                            credential.access_token = refreshed_credential.access_token
-                            credential.refresh_token = refreshed_credential.refresh_token
-                            credential.expires_at = refreshed_credential.expires_at
-                            credential.is_valid = True
-                            credential.refresh_fail_count = 0
-                            credential.last_refresh_attempt = datetime.utcnow()
-                            credential.last_refresh_error = None
-                            
-                            new_db.commit()
-                            self._reset_refresh_attempts(credential_id)
-                            logger.info(f"Successfully refreshed token for credential {credential_id}")
-                            await self._notify_refresh_success(credential)
-                            return True
-                        else:
-                            raise ValueError("Invalid response from broker refresh")
-
-                    except Exception as e:
-                        new_db.rollback()
-                        self._increment_refresh_attempts(credential_id)
-                        await self._handle_refresh_error(credential, str(e), new_db)
-                        logger.error(f"Failed to refresh token: {str(e)}")
+            # Define the task that will run inside the lock
+            async def locked_task():
+                # Create new session for this operation
+                new_db = SessionLocal()
+                try:
+                    # Get fresh credential instance
+                    credential = new_db.query(BrokerCredentials).get(credential.id)
+                    if not credential:
+                        logger.error(f"Credential {credential_id} not found in database")
                         return False
-                    finally:
-                        new_db.close()
+                    
+                    # Check if refresh is needed
+                    time_until_expiry = (credential.expires_at - datetime.utcnow()).total_seconds()
+                    refresh_threshold = broker_config['REFRESH_THRESHOLD']
+                    token_lifetime = broker_config['TOKEN_LIFETIME']
+                    
+                    logger.info(
+                        f"Credential {credential_id} expires in {time_until_expiry:.0f} seconds. "
+                        f"Refresh threshold: {refresh_threshold * token_lifetime:.0f} seconds"
+                    )
+
+                    if time_until_expiry > (refresh_threshold * token_lifetime):
+                        return True
+
+                    if self._refresh_attempts.get(credential_id, 0) >= broker_config['MAX_RETRY_ATTEMPTS']:
+                        await self._handle_max_retries_exceeded(credential, new_db)
+                        return False
+
+                    logger.info(f"Attempting to refresh token for credential {credential_id}")
+                    broker = BaseBroker.get_broker_instance(credential.broker_id, new_db)
+                    refreshed_credential = await broker.refresh_credentials(credential)
+                    
+                    if refreshed_credential and refreshed_credential.is_valid:
+                        credential.access_token = refreshed_credential.access_token
+                        credential.refresh_token = refreshed_credential.refresh_token
+                        credential.expires_at = refreshed_credential.expires_at
+                        credential.is_valid = True
+                        credential.refresh_fail_count = 0
+                        credential.last_refresh_attempt = datetime.utcnow()
+                        credential.last_refresh_error = None
+                        
+                        new_db.commit()
+                        self._reset_refresh_attempts(credential_id)
+                        logger.info(f"Successfully refreshed token for credential {credential_id}")
+                        await self._notify_refresh_success(credential)
+                        return True
+                    else:
+                        raise ValueError("Invalid response from broker refresh")
+
+                except Exception as e:
+                    new_db.rollback()
+                    self._increment_refresh_attempts(credential_id)
+                    await self._handle_refresh_error(credential, str(e), new_db)
+                    logger.error(f"Failed to refresh token: {str(e)}")
+                    return False
+                finally:
+                    new_db.close()
+
+            # Execute the task with a timeout
+            return await asyncio.wait_for(locked_task(), timeout=self.LOCK_TIMEOUT)
 
         except asyncio.TimeoutError:
             logger.error(f"Lock acquisition timeout for credential {credential_id}")
@@ -206,6 +207,28 @@ class TokenManager:
                 
         except Exception as e:
             logger.error(f"Error handling refresh error: {str(e)}")
+
+    async def validate_token(self, credential: BrokerCredentials) -> bool:
+        """Validate if a token is still valid"""
+        try:
+            if not credential:
+                logger.error("Cannot validate null credential")
+                return False
+                
+            # Check if token is marked as invalid
+            if not credential.is_valid:
+                return False
+                
+            # Check if token is expired
+            if credential.expires_at and credential.expires_at <= datetime.utcnow():
+                logger.info(f"Token expired for credential {credential.id}")
+                return False
+                
+            # If has access token and isn't expired, it's valid
+            return True
+        except Exception as e:
+            logger.error(f"Error validating token for credential {credential.id}: {str(e)}")
+            return False
 
     async def _notify_refresh_success(self, credential: BrokerCredentials):
         """Notify successful token refresh"""
