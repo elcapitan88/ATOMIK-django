@@ -59,6 +59,7 @@ async def get_db():
             logger.debug("Database session created")
         yield db
     except Exception as e:
+        db.rollback()
         logger.error(f"Database session error: {str(e)}")
         raise
     finally:
