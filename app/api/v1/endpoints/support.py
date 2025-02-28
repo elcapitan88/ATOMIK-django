@@ -4,11 +4,12 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 import logging
 
-from db.session import get_db
-from core.security import get_current_user
-from models.user import User
-from schemas.support import TicketCreate, TicketResponse, IssueType, TicketPriority
-from services.hubspot_service import hubspot_service
+# Fix these imports by adding the 'app.' prefix
+from app.db.session import get_db
+from app.core.security import get_current_user
+from app.models.user import User
+from app.schemas.support import TicketCreate, TicketResponse, IssueType, TicketPriority
+from app.services.hubspot_service import hubspot_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
