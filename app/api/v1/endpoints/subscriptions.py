@@ -282,3 +282,19 @@ async def debug_session(
             status_code=500,
             detail=str(e)
         )
+    
+@router.get("/debug-environment")
+async def debug_environment():
+    """Debug endpoint for checking environment settings"""
+    from app.core.config import settings
+    
+    return {
+        "environment": settings.ENVIRONMENT,
+        "stripe_success_url": settings.STRIPE_SUCCESS_URL,
+        "active_stripe_success_url": getattr(settings, 'active_stripe_success_url', None) or settings.STRIPE_SUCCESS_URL,
+        "stripe_cancel_url": settings.STRIPE_CANCEL_URL,
+        "frontend_url": settings.FRONTEND_URL,
+        "active_server_host": getattr(settings, 'active_server_host', None) or settings.SERVER_HOST,
+        "api_base_url": settings.API_V1_STR,
+        "is_production": settings.ENVIRONMENT == "production",
+    }

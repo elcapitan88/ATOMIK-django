@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     DEV_TRADOVATE_REDIRECT_URI: str = "http://localhost:8000/api/tradovate/callback"
 
     PROD_SERVER_HOST: str = "https://api.atomiktrading.io"
-    PROD_FRONTEND_URL: str = "https://atomiktrading.io"
+    PROD_FRONTEND_URL: str = "https://www.atomiktrading.io"
     PROD_TRADOVATE_REDIRECT_URI: str = "https://api.atomiktrading.io/api/tradovate/callback"
         
     # Database Settings
@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     
     # Worker settings
     WORKERS: int = 4
+
+    HUBSPOT_API_KEY: Optional[str] = None
 
     @property
     def active_database_url(self) -> str:

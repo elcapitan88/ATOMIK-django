@@ -22,6 +22,7 @@ class User(Base):
     websocket_connections = relationship("WebSocketConnection", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("Subscription", back_populates="user", uselist=False)
     orders = relationship("Order", back_populates="user", cascade="all, delete-orphan")
+    support_tickets = relationship("SupportTicketLog", back_populates="user")
     
     def __str__(self):
         return f"User(email={self.email})"
