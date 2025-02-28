@@ -23,7 +23,7 @@ class HubspotService:
         if not self.api_key:
             logger.warning("HUBSPOT_API_KEY environment variable not set")
 
-    def map_priority_to_hubspot(priority):
+    def map_priority_to_hubspot(self, priority):
         """Map our priority values to HubSpot's accepted values"""
         priority_map = {
             "low": "LOW",
@@ -56,10 +56,6 @@ class HubspotService:
         """
         screenshot_url = None
         
-        # Upload screenshot if provided
-        if screenshot:
-            screenshot_url = await self._upload_file(screenshot)
-        
         # Prepare payload for HubSpot
         hubspot_payload = {
             "properties": {
@@ -73,7 +69,7 @@ class HubspotService:
                         (f"\nScreenshot URL: {screenshot_url}" if screenshot_url else ""),
                 "hs_pipeline": "support",
                 "hs_pipeline_stage": "1",  # New/Open stage
-                "hs_ticket_priority": map_priority_to_hubspot(ticket_data.priority)
+                "hs_ticket_priority": self.map_priority_to_hubspot(ticket_data.priority)
             }
         }
         
