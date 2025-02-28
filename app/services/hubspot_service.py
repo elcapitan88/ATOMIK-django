@@ -22,6 +22,16 @@ class HubspotService:
         
         if not self.api_key:
             logger.warning("HUBSPOT_API_KEY environment variable not set")
+
+    def map_priority_to_hubspot(priority):
+        """Map our priority values to HubSpot's accepted values"""
+        priority_map = {
+            "low": "LOW",
+            "medium": "MEDIUM",
+            "high": "HIGH",
+            "critical": "HIGH"  # Map critical to HIGH since HubSpot doesn't have CRITICAL
+        }
+        return priority_map.get(priority.lower(), "MEDIUM")
     
     async def create_ticket(
         self, 
@@ -54,12 +64,16 @@ class HubspotService:
         hubspot_payload = {
             "properties": {
                 "subject": ticket_data.subject,
-                "content": ticket_data.description,
+                # Include all the extra information in the content/description
+                "content": f"{ticket_data.description}\n\n" + 
+                        f"User ID: {user_id}\n" +
+                        f"User Email: {user_email}\n" +
+                        f"Issue Type: {ticket_data.issue_type}\n" +
+                        f"Original Priority: {ticket_data.priority}" +
+                        (f"\nScreenshot URL: {screenshot_url}" if screenshot_url else ""),
                 "hs_pipeline": "support",
                 "hs_pipeline_stage": "1",  # New/Open stage
-                "hs_ticket_priority": ticket_data.priority.upper(),  # Convert to uppercase
-                # Add a note about user info instead of using custom properties
-                "hs_ticket_note": f"User ID: {user_id}\nEmail: {user_email}\nIssue Type: {ticket_data.issue_type}"
+                "hs_ticket_priority": map_priority_to_hubspot(ticket_data.priority)
             }
         }
         
