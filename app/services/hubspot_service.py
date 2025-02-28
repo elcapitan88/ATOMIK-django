@@ -57,10 +57,9 @@ class HubspotService:
                 "content": ticket_data.description,
                 "hs_pipeline": "support",
                 "hs_pipeline_stage": "1",  # New/Open stage
-                "hs_ticket_priority": ticket_data.priority,
-                "issue_type": ticket_data.issue_type,
-                "source_email": user_email,
-                "atomik_user_id": str(user_id)
+                "hs_ticket_priority": ticket_data.priority.upper(),  # Convert to uppercase
+                # Add a note about user info instead of using custom properties
+                "hs_ticket_note": f"User ID: {user_id}\nEmail: {user_email}\nIssue Type: {ticket_data.issue_type}"
             }
         }
         
