@@ -5,8 +5,8 @@ from typing import Optional
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
-from models.support import SupportTicketLog
-from schemas.support import TicketCreate
+from app.models.support import SupportTicketLog
+from app.schemas.support import TicketCreate
 
 logger = logging.getLogger(__name__)
 
