@@ -66,9 +66,8 @@ class HubspotService:
                         f"Issue Type: {ticket_data.issue_type}\n" +
                         f"Original Priority: {ticket_data.priority}" +
                         (f"\nScreenshot URL: {screenshot_url}" if screenshot_url else ""),
-                "hs_ticket_priority": self.map_priority_to_hubspot(ticket_data.priority),
-                "hs_pipeline": "0",     # Use your pipeline's internal ID "0"
-                "hs_pipeline_stage": "1"  # Use the "New" stage (first stage)
+                "hs_ticket_priority": self.map_priority_to_hubspot(ticket_data.priority)
+               
             }
         }
         
