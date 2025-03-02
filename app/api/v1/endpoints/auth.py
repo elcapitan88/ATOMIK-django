@@ -6,7 +6,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
+from datetime import datetime
 
 from ....core.security import (
     verify_password, 
