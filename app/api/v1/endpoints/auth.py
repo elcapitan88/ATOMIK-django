@@ -70,11 +70,6 @@ async def register(
             detail="Registration failed"
         )
 
-# app/api/v1/endpoints/auth.py
-from ....services.stripe_service import StripeService  # Add this import
-from sqlalchemy import or_
-from ....models.subscription import Subscription  # Add this import
-
 @router.post("/login", response_model=Token)
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -158,6 +153,66 @@ async def login(
         raise HTTPException(
             status_code=500,
             detail="Login failed"
+        )
+    
+@router.patch("/profile", response_model=Dict[str, Any])
+async def update_profile(
+    profile_data: Dict[str, Any],
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update user profile information"""
+    try:
+        # Update allowed fields only
+        allowed_fields = ["full_name", "phone", "username", "email"]
+        update_data = {}
+        
+        for field in allowed_fields:
+            if field in profile_data and profile_data[field] is not None:
+                update_data[field] = profile_data[field]
+        
+        # Handle nested fields like socialMedia
+        if "socialMedia" in profile_data and isinstance(profile_data["socialMedia"], dict):
+            # Serialize social media as JSON or create separate columns as needed
+            # For simplicity in this example, we're not handling nested fields yet
+            pass
+            
+        # Handle preferences
+        if "preferences" in profile_data and isinstance(profile_data["preferences"], dict):
+            # Serialize preferences as JSON or create separate columns as needed
+            pass
+            
+        if update_data:
+            # Update user record
+            for key, value in update_data.items():
+                setattr(current_user, key, value)
+                
+            # Update modified timestamp
+            current_user.updated_at = datetime.utcnow()
+            
+            db.commit()
+            db.refresh(current_user)
+            
+            logger.info(f"Profile updated for user ID {current_user.id}")
+            
+            # Return updated user data (excluding sensitive fields)
+            return {
+                "id": current_user.id,
+                "username": current_user.username, 
+                "email": current_user.email,
+                "full_name": current_user.full_name,
+                "is_active": current_user.is_active,
+                "message": "Profile updated successfully"
+            }
+        else:
+            return {"message": "No valid fields to update"}
+            
+    except Exception as e:
+        logger.error(f"Profile update error: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update profile: {str(e)}"
         )
 
 @router.get("/verify", response_model=dict)
