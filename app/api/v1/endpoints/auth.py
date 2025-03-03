@@ -227,7 +227,8 @@ async def verify_token(current_user: User = Depends(get_current_user)):
             "user": {
                 "id": current_user.id,
                 "email": current_user.email,
-                "username": current_user.username
+                "username": current_user.username,
+                "full_name": current_user.full_name
             }
         }
     except Exception as e:
