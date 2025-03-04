@@ -89,16 +89,32 @@ class TradovateBroker(BaseBroker):
 
     def _validate_token_response(self, tokens: dict) -> bool:
         """Validate token response has required fields"""
-        required_fields = ['access_token', 'expires_in']  
-    
-        for field in required_fields:
-            if not tokens.get(field):
-                logger.error(f"Missing required field in token response: {field}")
-                return False
-            
-        if not isinstance(tokens['expires_in'], (int, float)):
-            logger.error("Invalid expires_in value")
+        # Log the entire response structure to debug
+        logger.debug(f"Token response keys: {list(tokens.keys())}")
+        
+        # Check both camelCase (Tradovate style) and snake_case (standard OAuth) field names
+        access_token_field = None
+        expires_field = None
+        
+        if 'accessToken' in tokens:
+            access_token_field = 'accessToken'
+            expires_field = 'expiresIn'
+        elif 'access_token' in tokens:
+            access_token_field = 'access_token'
+            expires_field = 'expires_in'
+        else:
+            logger.error(f"Could not find access token in response. Available fields: {list(tokens.keys())}")
             return False
+        
+        # Validate token exists
+        if not tokens.get(access_token_field):
+            logger.error(f"Missing or empty {access_token_field} in token response")
+            return False
+            
+        # Validate expiration exists and is numeric
+        if expires_field not in tokens or not isinstance(tokens.get(expires_field), (int, float)):
+            # If expiration is missing but we have a token, still proceed
+            logger.warning(f"Missing or invalid {expires_field}, using default expiration")
         
         return True
 
@@ -276,13 +292,21 @@ class TradovateBroker(BaseBroker):
         try:
             tokens = await self._exchange_code_for_tokens(code, environment)
             logger.info("Processing OAuth callback tokens")
+            
+
+            access_token = tokens.get('accessToken') or tokens.get('access_token')
+            # Get expiration using either naming convention, default to 80 minutes if missing
+            expires_in = tokens.get('expiresIn') or tokens.get('expires_in', 4800)
+
+            if not access_token:
+                raise AuthenticationError("Could not find access token in response")
 
             # Create credentials
             credentials = BrokerCredentials(
                 broker_id=self.broker_id,
                 credential_type='oauth',
-                access_token=tokens.get('access_token'),
-                expires_at=datetime.utcnow() + timedelta(seconds=tokens.get('expires_in', 4800)),
+                access_token=access_token,
+                expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
                 is_valid=True,
                 last_refresh_attempt=datetime.utcnow(),
                 refresh_fail_count=0,
