@@ -122,11 +122,18 @@ class TradovateBroker(BaseBroker):
         """Exchange authorization code for tokens"""
         exchange_url = (
             settings.TRADOVATE_LIVE_EXCHANGE_URL 
-            if environment == 'live'  # Just use the environment parameter directly
+            if environment == 'live'
             else settings.TRADOVATE_DEMO_EXCHANGE_URL
         )
 
         try:
+            logger.info(f"Exchanging auth code for tokens at URL: {exchange_url}")
+            logger.info(f"Using redirect URI: {settings.TRADOVATE_REDIRECT_URI}")
+            
+            # Keep track of the code (without revealing the full value)
+            code_sample = f"{code[:5]}...{code[-5:]}" if len(code) > 10 else "***"
+            logger.info(f"Using auth code: {code_sample}")
+            
             response = requests.post(
                 exchange_url,
                 data={
@@ -141,71 +148,44 @@ class TradovateBroker(BaseBroker):
                 }
             )
 
+            # Log detailed response information
+            logger.info(f"Token exchange response status: {response.status_code}")
+            # Log response headers (excluding any sensitive info)
+            safe_headers = {k: v for k, v in response.headers.items() if 'auth' not in k.lower()}
+            logger.info(f"Token exchange response headers: {safe_headers}")
+            
             if response.status_code != 200:
                 logger.error(f"Token exchange failed with status {response.status_code}")
-                logger.error(f"Response: {response.text}")
+                logger.error(f"Response body: {response.text}")
                 raise AuthenticationError(
                     f"Token exchange failed: {response.text}"
                 )
 
-            tokens = response.json()
-            
-            if not self._validate_token_response(tokens):
-                raise AuthenticationError("Invalid token response from Tradovate")
+            try:
+                tokens = response.json()
+                # Log token response structure (careful not to log actual tokens)
+                logger.info(f"Token response contains fields: {list(tokens.keys())}")
+                
+                # For debugging, log field values lengths without revealing content
+                token_info = {}
+                for key in tokens.keys():
+                    if isinstance(tokens[key], str):
+                        token_info[key] = f"[{len(tokens[key])} chars]"
+                    else:
+                        token_info[key] = str(tokens[key])
+                logger.info(f"Token values info: {token_info}")
+                
+                if not self._validate_token_response(tokens):
+                    raise AuthenticationError("Invalid token response from Tradovate")
 
-            return tokens
+                return tokens
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Failed to parse token response as JSON: {response.text}")
+                raise AuthenticationError(f"Invalid JSON response: {str(json_err)}")
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error during token exchange: {str(e)}")
             raise AuthenticationError("Failed to connect to Tradovate authentication service")
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse token response: {str(e)}")
-            raise AuthenticationError("Invalid response from Tradovate authentication service")
-
-    async def initialize_api_key(
-        self,
-        user: User,
-        environment: str,
-        credentials: Dict[str, Any]
-) -> Dict[str, Any]:
-        """Initialize API key connection - Not supported for Tradovate"""
-        raise NotImplementedError("Tradovate does not support API key authentication")
-
-    async def initialize_oauth(
-        self,
-        user: User,
-        environment: str
-    ) -> Dict[str, Any]:
-        """Initialize OAuth flow for Tradovate"""
-        try:
-            # Generate state token
-            state = self.generate_state_token(user.id, environment)
-
-            # Build OAuth URL
-            base_url = settings.TRADOVATE_AUTH_URL
-            if environment == 'demo':
-                base_url = base_url.replace('live', 'demo')
-
-            params = {
-                "client_id": settings.TRADOVATE_CLIENT_ID,
-                "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
-                "response_type": "code",
-                "scope": "trading",
-                "state": state
-            }
-
-            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-            auth_url = f"{base_url}?{query_string}"
-
-            return {
-                "auth_url": auth_url,
-                "broker_id": self.broker_id,
-                "environment": environment
-            }
-
-        except Exception as e:
-            logger.error(f"OAuth initialization failed: {str(e)}")
-            raise
 
     async def authenticate(self, credentials: Dict[str, Any]) -> BrokerCredentials:
         """
