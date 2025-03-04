@@ -136,36 +136,89 @@ class TradovateBroker(BaseBroker):
             code_sample = f"{code[:5]}...{code[-5:]}" if len(code) > 10 else "***"
             logger.info(f"Using auth code: {code_sample}")
             
+            # Method 1: Standard form-encoded POST with client ID and secret in body
+            form_data = {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
+                "client_id": settings.TRADOVATE_CLIENT_ID,
+                "client_secret": settings.TRADOVATE_CLIENT_SECRET,
+            }
+            
+            logger.info(f"Using form parameters: {[k for k in form_data.keys()]}")
+            
             response = requests.post(
                 exchange_url,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
-                    "client_id": settings.TRADOVATE_CLIENT_ID,
-                    "client_secret": settings.TRADOVATE_CLIENT_SECRET,
-                },
+                data=form_data,  # This sends as application/x-www-form-urlencoded
                 headers={
                     'Content-Type': 'application/x-www-form-urlencoded'
                 }
             )
 
+            # Try alternate auth method if first fails
+            if response.status_code != 200 or ('error' in response.json()):
+                logger.warning("First auth method failed, trying alternative with Basic Auth")
+                
+                # Method 2: Try with client ID and secret in Authorization header
+                response = requests.post(
+                    exchange_url,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": settings.TRADOVATE_REDIRECT_URI
+                    },
+                    auth=(settings.TRADOVATE_CLIENT_ID, settings.TRADOVATE_CLIENT_SECRET),
+                    headers={
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
+                )
+
+            # Log the full request and response for debugging
+            auth_request_info = {
+                "url": exchange_url,
+                "method": "POST",
+                "headers": {k: "REDACTED" if k.lower() in ["authorization", "cookie"] else v 
+                            for k, v in response.request.headers.items()},
+                "params": form_data.keys(),
+            }
+            logger.info(f"Auth request details: {auth_request_info}")
+
             # Log detailed response information
             logger.info(f"Token exchange response status: {response.status_code}")
-            # Log response headers (excluding any sensitive info)
-            safe_headers = {k: v for k, v in response.headers.items() if 'auth' not in k.lower()}
-            logger.info(f"Token exchange response headers: {safe_headers}")
+            logger.info(f"Response headers: {response.headers}")
+            
+            # Always log the response body for OAuth errors
+            try:
+                response_body = response.json()
+                logger.info(f"Response body (keys): {list(response_body.keys())}")
+                if 'error' in response_body:
+                    logger.error(f"OAuth Error: {response_body.get('error')} - {response_body.get('error_description')}")
+            except:
+                logger.error(f"Could not parse response as JSON. Raw response: {response.text[:500]}")
             
             if response.status_code != 200:
                 logger.error(f"Token exchange failed with status {response.status_code}")
-                logger.error(f"Response body: {response.text}")
                 raise AuthenticationError(
                     f"Token exchange failed: {response.text}"
                 )
 
             try:
                 tokens = response.json()
-                # Log token response structure (careful not to log actual tokens)
+                # Handle OAuth error responses
+                if 'error' in tokens:
+                    error_msg = tokens.get('error', 'unknown_error')
+                    error_desc = tokens.get('error_description', 'No description provided')
+                    logger.error(f"OAuth Error: {error_msg} - {error_desc}")
+                    
+                    # Specific guidance based on error
+                    if 'invalid_grant' in error_msg:
+                        error_desc += " (The authorization code may have expired or already been used)"
+                    elif 'redirect_uri_mismatch' in error_msg or error_desc:
+                        error_desc += f" (Check that {settings.TRADOVATE_REDIRECT_URI} matches exactly what's registered with Tradovate)"
+                    
+                    raise AuthenticationError(f"OAuth error: {error_msg} - {error_desc}")
+                
+                # Log token response structure
                 logger.info(f"Token response contains fields: {list(tokens.keys())}")
                 
                 # For debugging, log field values lengths without revealing content
@@ -181,6 +234,7 @@ class TradovateBroker(BaseBroker):
                     raise AuthenticationError("Invalid token response from Tradovate")
 
                 return tokens
+                
             except json.JSONDecodeError as json_err:
                 logger.error(f"Failed to parse token response as JSON: {response.text}")
                 raise AuthenticationError(f"Invalid JSON response: {str(json_err)}")
