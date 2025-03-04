@@ -57,7 +57,8 @@ class TradovateBroker(BaseBroker):
         method: str, 
         url: str, 
         data: Optional[Dict[str, Any] | str] = None, 
-        headers: Optional[Dict[str, str]] = None
+        headers: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None
     ) -> Any:
         """Make HTTP request to Tradovate API"""
         try:
@@ -67,6 +68,9 @@ class TradovateBroker(BaseBroker):
                     'url': url,
                     'headers': headers or {},
                 }
+
+                if params:
+                    request_kwargs['params'] = params
 
                 if data:
                     request_kwargs['json'] = data if isinstance(data, dict) else json.loads(data)
@@ -84,8 +88,6 @@ class TradovateBroker(BaseBroker):
         except Exception as e:
             logger.error(f"Request error: {str(e)}")
             raise
-
-
 
     def _validate_token_response(self, tokens: dict) -> bool:
         """Validate token response has required fields"""
@@ -186,6 +188,52 @@ class TradovateBroker(BaseBroker):
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error during token exchange: {str(e)}")
             raise AuthenticationError("Failed to connect to Tradovate authentication service")
+
+    async def _get_account_info(self, account_id: str, credentials: BrokerCredentials, environment: str = None) -> Dict[str, Any]:
+        """Get account information using credentials"""
+        try:
+            # Determine environment - either from credentials or passed parameter
+            env = environment
+            if hasattr(credentials, 'account') and credentials.account and credentials.account.environment:
+                env = credentials.account.environment
+            
+            if not env:
+                env = 'demo'  # Default to demo if environment not specified
+                
+            api_url = self.api_urls[env]
+            headers = self._get_auth_headers(credentials)
+            
+            logger.info(f"Fetching account info for account ID: {account_id}, environment: {env}")
+            
+            # Try to get account by ID first
+            response = await self._make_request(
+                'GET',
+                f"{api_url}/account/find",
+                params={"id": int(account_id)},
+                headers=headers
+            )
+            
+            if not response:
+                logger.warning(f"Could not find account by ID {account_id}, trying alternative methods")
+                # Try to find by name if ID search fails
+                accounts_response = await self._make_request(
+                    'GET',
+                    f"{api_url}/account/list",
+                    headers=headers
+                )
+                
+                if accounts_response:
+                    # Find account in the list
+                    for acc in accounts_response:
+                        if str(acc.get('id')) == account_id:
+                            return acc
+                            
+                raise ConnectionError(f"Could not find account information for account ID: {account_id}")
+                
+            return response
+        except Exception as e:
+            logger.error(f"Error fetching account info: {str(e)}")
+            raise
 
     async def authenticate(self, credentials: Dict[str, Any]) -> BrokerCredentials:
         """
@@ -440,13 +488,19 @@ class TradovateBroker(BaseBroker):
                 )
                 self.db.add(account)
 
+            # If credentials are provided, try to get account information
             if credentials:
-                # Get account information
-                auth_response = await self.authenticate(credentials)
-                account_info = await self._get_account_info(account_id, auth_response)
+                try:
+                    # Get account information
+                    auth_response = await self.authenticate(credentials)
+                    account_info = await self._get_account_info(account_id, auth_response, environment.value)
 
-                # Update account with retrieved information
-                account.name = account_info.get('name', account.name)
+                    # Update account with retrieved information if available
+                    if account_info and account_info.get('name'):
+                        account.name = account_info.get('name')
+                except Exception as e:
+                    logger.warning(f"Could not retrieve account info: {str(e)}")
+                    # Continue with default name if account info retrieval fails
 
             account.status = 'active'
             account.last_connected = datetime.utcnow()
@@ -577,11 +631,6 @@ class TradovateBroker(BaseBroker):
             credentials.last_refresh_error = str(e)
             credentials.last_refresh_attempt = datetime.utcnow()
             raise AuthenticationError(f"Token refresh failed: {str(e)}")
-        
-        except Exception as e:
-            self.db.rollback()  # Add rollback on error
-            logger.error(f"Failed to refresh token: {str(e)}")
-            raise
 
     async def fetch_accounts(self, user: User) -> List[Dict[str, Any]]:
         """Fetch Tradovate accounts for a user"""
@@ -879,3 +928,49 @@ class TradovateBroker(BaseBroker):
         except Exception as e:
             logger.error(f"Error in close_all_positions_for_accounts: {str(e)}")
             raise OrderError(f"Failed to close positions across accounts: {str(e)}")
+
+    # Abstract method implementations required by BaseBroker
+    async def initialize_oauth(
+        self,
+        user: User,
+        environment: str
+    ) -> Dict[str, Any]:
+        """Initialize OAuth flow for Tradovate"""
+        try:
+            # Generate state token
+            state = self.generate_state_token(user.id, environment)
+
+            # Build OAuth URL
+            base_url = settings.TRADOVATE_AUTH_URL
+            if environment == 'demo':
+                base_url = base_url.replace('live', 'demo')
+
+            params = {
+                "client_id": settings.TRADOVATE_CLIENT_ID,
+                "redirect_uri": settings.TRADOVATE_REDIRECT_URI,
+                "response_type": "code",
+                "scope": "trading",
+                "state": state
+            }
+
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            auth_url = f"{base_url}?{query_string}"
+
+            return {
+                "auth_url": auth_url,
+                "broker_id": self.broker_id,
+                "environment": environment
+            }
+
+        except Exception as e:
+            logger.error(f"OAuth initialization failed: {str(e)}")
+            raise
+
+    async def initialize_api_key(
+        self,
+        user: User,
+        environment: str,
+        credentials: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Initialize API key connection - Not supported for Tradovate"""
+        raise NotImplementedError("Tradovate does not support API key authentication")
