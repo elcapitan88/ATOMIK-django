@@ -181,27 +181,27 @@ class TokenRefreshManager:
             db = None
             try:
                 db = SessionLocal()
-            
-            # Get active credentials needing refresh
+                
+                # Get active credentials needing refresh
                 credentials = await token_manager.get_active_credentials(db)
                 logger.info(f"Checking {len(credentials)} active credentials for refresh")
-            
+                
                 for credential in credentials:
                     try:
-                        # Use token_manager's refresh method instead of our own
+                        # Use token_manager's refresh method exclusively
                         await token_manager.refresh_token_if_needed(credential, db)
                     except Exception as e:
                         logger.error(f"Error processing credential {credential.id}: {str(e)}")
 
                 logger.info("Completed token refresh cycle")
-            
+                
             except Exception as e:
                 logger.error(f"Error in refresh cycle: {str(e)}")
             finally:
                 if db:
                     db.close()
             
-        # Wait for next refresh interval
+            # Wait for next refresh interval
             await asyncio.sleep(self.refresh_interval)
 
     async def start(self):
