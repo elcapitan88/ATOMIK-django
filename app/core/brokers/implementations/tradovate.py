@@ -488,27 +488,33 @@ class TradovateBroker(BaseBroker):
 
 
     async def validate_credentials(self, credentials: BrokerCredentials) -> bool:
-        """Validate stored credentials"""
+        """
+        Validate if stored credentials are valid
+        
+        This method only checks if the token is marked as valid in the database
+        and has not expired. It does NOT attempt to refresh the token as that
+        is now handled by the token-refresh-service.
+        
+        Args:
+            credentials: The credentials to validate
+            
+        Returns:
+            bool: True if credentials are valid, False otherwise
+        """
         try:
-            if not credentials.is_valid:
+            if not credentials or not credentials.is_valid:
                 return False
 
-            if credentials.expires_at <= datetime.utcnow():
+            # Check if token is expired
+            if credentials.expires_at and credentials.expires_at <= datetime.utcnow():
+                logger.info(f"Token expired for credential {credentials.id}")
                 return False
-
-            # Test credentials with a simple API call
-            headers = {
-                "Authorization": f"Bearer {credentials.access_token}"
-            }
-            response = requests.get(
-                f"{self.api_urls[credentials.account.environment]}/user/userinfo",
-                headers=headers
-            )
-
-            return response.status_code == 200
-
+                
+            # If has access token and isn't expired, it's valid
+            return True
+            
         except Exception as e:
-            logger.error(f"Credential validation failed: {str(e)}")
+            logger.error(f"Error validating token: {str(e)}")
             return False
 
 
@@ -572,120 +578,6 @@ class TradovateBroker(BaseBroker):
             raise ConnectionError(f"Account connection failed: {str(e)}")
         
 
-    async def refresh_credentials(self, credentials: BrokerCredentials) -> BrokerCredentials:
-        """
-        Refresh access token for Tradovate using the renewAccessToken endpoint
-    
-        Args:
-            credentials (BrokerCredentials): The current credentials to refresh
-    
-        Returns:
-            BrokerCredentials: Updated credentials with new access token
-    
-        Raises:
-            AuthenticationError: If token refresh fails
-        """
-        try:
-            if not credentials or not credentials.access_token:
-                raise AuthenticationError("Invalid credentials provided for refresh")
-
-        # Construct the URL using the environment-specific base URL
-            
-            exchange_url = (
-                settings.TRADOVATE_LIVE_RENEW_TOKEN_URL 
-                if credentials.account.environment == 'live' 
-                else settings.TRADOVATE_DEMO_RENEW_TOKEN_URL
-            )
-
-            logger.info(
-                f"Initiating token refresh for credential {credentials.id} "
-                f"Environment: {credentials.account.environment} "
-                f"URL: {exchange_url}"
-                f"Attempting to refresh with token: {credentials.access_token[:30]}..."
-            )
-
-        # Prepare the request data according to Tradovate's specifications
-            request_data = {
-                "accessToken": credentials.access_token
-            }
-
-            headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Authorization': f'Bearer {credentials.access_token}'
-            }
-
-        # Make the request with retry logic
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = await self._make_request(
-                        'POST',
-                        exchange_url,
-                        headers=headers
-                    )
-
-                # Log successful response for debugging
-                    logger.info(f"Token refresh response: {response}")
-
-                    if not response:
-                        raise AuthenticationError("Empty response received from Tradovate")
-                
-                    if 'accessToken' not in response:
-                        raise AuthenticationError(
-                            f"Invalid response format. Expected 'accessToken', got: {list(response.keys())}"
-                        )
-                
-                    if 'accessToken' not in response:
-                        raise AuthenticationError("Response missing 'accessToken' field")
-                    if 'expirationTime' not in response:
-                        raise AuthenticationError("Response missing 'expirationTime' field")
-
-                # Update credential using Tradovate's returned values
-                    credentials.access_token = response['accessToken']
-                    credentials.expires_at = datetime.fromisoformat(response['expirationTime'].replace('Z', '+00:00'))
-                    credentials.is_valid = True
-                    credentials.refresh_fail_count = 0
-                    credentials.last_refresh_attempt = datetime.utcnow()  # Update last refresh timestamp
-                    credentials.last_refresh_error = None
-
-                    self.db.commit()
-            
-                    logger.info(
-                        f"Successfully refreshed token for credential {credentials.id}. "
-                        f"New token expires at {credentials.expires_at}"
-                    )
-
-                    return credentials
-
-                except Exception as e:
-                    if attempt == max_retries - 1:  # Last attempt
-                        raise
-                    logger.warning(
-                        f"Refresh attempt {attempt + 1} failed for credential {credentials.id}: {str(e)}. "
-                        "Retrying..."
-                    )
-                    await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
-
-        except AuthenticationError as auth_e:
-            logger.error(
-                f"Authentication error refreshing token for credential {credentials.id}: {str(auth_e)}"
-            )
-            credentials.refresh_fail_count = (credentials.refresh_fail_count or 0) + 1
-            credentials.last_refresh_error = str(auth_e)
-            credentials.last_refresh_attempt = datetime.utcnow()
-            raise
-
-        except Exception as e:
-            logger.error(
-                f"Unexpected error refreshing token for credential {credentials.id}: {str(e)}\n"
-                f"Traceback: {traceback.format_exc()}"
-            )
-            credentials.refresh_fail_count = (credentials.refresh_fail_count or 0) + 1
-            credentials.last_refresh_error = str(e)
-            credentials.last_refresh_attempt = datetime.utcnow()
-            raise AuthenticationError(f"Token refresh failed: {str(e)}")
-
     async def fetch_accounts(self, user: User) -> List[Dict[str, Any]]:
         """Fetch Tradovate accounts for a user"""
         try:
@@ -728,6 +620,48 @@ class TradovateBroker(BaseBroker):
     async def get_account_status(self, account: BrokerAccount) -> Dict[str, Any]:
         """Get account status and information"""
         try:
+            # First, verify credentials are valid (without attempting refresh)
+            if not account.credentials:
+                logger.warning(f"No credentials found for account {account.account_id}")
+                return {
+                    "status": "disconnected",
+                    "account_id": account.account_id,
+                    "name": account.name,
+                    "balance": 0.0,
+                    "available_margin": 0.0,
+                    "day_pnl": 0.0,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "error": "No credentials found. Please reconnect your account."
+                }
+                
+            if not account.credentials.is_valid:
+                logger.warning(f"Invalid credentials for account {account.account_id}")
+                return {
+                    "status": "token_expired",
+                    "account_id": account.account_id,
+                    "name": account.name,
+                    "balance": 0.0,
+                    "available_margin": 0.0,
+                    "day_pnl": 0.0,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "error": "Your authentication token has expired. The system will automatically refresh it soon. If this persists, please reconnect your account."
+                }
+                
+            # Check if token is expired
+            if account.credentials.expires_at and account.credentials.expires_at <= datetime.utcnow():
+                logger.warning(f"Expired token for account {account.account_id}")
+                return {
+                    "status": "token_expired",
+                    "account_id": account.account_id,
+                    "name": account.name,
+                    "balance": 0.0,
+                    "available_margin": 0.0,
+                    "day_pnl": 0.0,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "error": "Your authentication token has expired. The system will automatically refresh it soon. If this persists, please reconnect your account."
+                }
+
+            # If credentials are valid, proceed with API requests
             api_url = self.api_urls[account.environment]
             headers = self._get_auth_headers(account.credentials)
             
@@ -777,6 +711,38 @@ class TradovateBroker(BaseBroker):
                 "timestamp": datetime.utcnow().isoformat()
             }
 
+        except ConnectionError as ce:
+            logger.error(f"""
+            Connection error getting account status:
+            Account ID: {account.account_id}
+            Account Name: {account.name}
+            Error: {str(ce)}
+            """)
+            
+            # Check if this might be a token issue
+            if "401" in str(ce) or "unauthorized" in str(ce).lower() or "authentication" in str(ce).lower():
+                # Mark credentials as invalid to trigger refresh by service
+                if account.credentials:
+                    account.credentials.is_valid = False
+                    self.db.commit()
+                    logger.info(f"Marked credentials as invalid for account {account.account_id} to trigger refresh")
+                
+                return {
+                    "status": "connection_error",
+                    "account_id": account.account_id,
+                    "name": account.name,
+                    "error": "Authentication error. Your token will be automatically refreshed. If this persists, please reconnect your account.",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            else:
+                return {
+                    "status": "connection_error",
+                    "account_id": account.account_id,
+                    "name": account.name,
+                    "error": f"Failed to connect to Tradovate: {str(ce)}",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
         except Exception as e:
             logger.error(f"""
             Failed to get account status:
@@ -784,7 +750,14 @@ class TradovateBroker(BaseBroker):
             Account Name: {account.name}
             Error: {str(e)}
             """)
-            raise
+            
+            return {
+                "status": "error",
+                "account_id": account.account_id,
+                "name": account.name,
+                "error": f"Error retrieving account status: {str(e)}",
+                "timestamp": datetime.utcnow().isoformat()
+            }
 
     async def get_positions(self, account: BrokerAccount) -> List[Dict[str, Any]]:
         """Get current positions for an account"""

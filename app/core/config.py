@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     PROD_DATABASE_URL: str = ""
     SQL_ECHO: bool = False 
     
-    # Database pool settings (add these to fix validation errors)
+    # Database pool settings
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_TIMEOUT: int = 30
@@ -73,9 +73,6 @@ class Settings(BaseSettings):
                 "pool_pre_ping": True,
                 "echo": self.SQL_ECHO,
             }
-        
-    
-
     
     # Security and Authentication Settings
     SECRET_KEY: str
@@ -110,13 +107,15 @@ class Settings(BaseSettings):
     TRADOVATE_DEMO_EXCHANGE_URL: Optional[str] = None
     TRADOVATE_DEMO_API_URL: Optional[str] = None
     TRADOVATE_DEMO_WS_URL: Optional[str] = None
+    
+    # Note: The following URLs are now only used by the token-refresh-service,
+    # but we keep them here for reference and development compatibility
     TRADOVATE_LIVE_RENEW_TOKEN_URL: Optional[str] = None
     TRADOVATE_DEMO_RENEW_TOKEN_URL: Optional[str] = None
 
     STRIPE_SECRET_KEY: str
     STRIPE_WEBHOOK_SECRET: str  
     STRIPE_PUBLIC_KEY: str
-
 
     DEV_STRIPE_SUCCESS_URL: str = "http://localhost:3000/payment/success"
     DEV_STRIPE_CANCEL_URL: str = "http://localhost:3000/pricing"
@@ -220,11 +219,7 @@ def get_settings() -> Settings:
 # Create settings instance
 settings = get_settings()
 
-
-
 # Validate critical settings on import
-assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
-assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
 assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
 assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
 assert settings.STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY environment variable is required"

@@ -238,11 +238,7 @@ async def list_broker_accounts(
                 # Log the token state before validation
                 logger.info(f"Account {account.account_id} credential check - ID: {account.credentials.id}, expires_at: {account.credentials.expires_at}, is_valid: {account.credentials.is_valid}")
                 
-                # Try to refresh token if needed
-                refresh_result = await token_service.refresh_token_if_needed(account.credentials)
-                logger.info(f"Token refresh attempt for account {account.account_id} - Result: {refresh_result}")
-                
-                # Validate token
+                # Only validate token - refresh is now handled by token-refresh-service
                 validation_start = datetime.utcnow()
                 is_valid = await token_service.validate_token(account.credentials)
                 validation_time = (datetime.utcnow() - validation_start).total_seconds() * 1000
@@ -251,16 +247,29 @@ async def list_broker_accounts(
             else:
                 logger.warning(f"Account {account.account_id} has no credentials")
 
+            # Build account info with appropriate status
+            status = "active"
+            if not is_valid:
+                status = "token_expired"
+                # No need to mark for refresh - token-refresh-service handles this automatically
+            elif account.status != "active":
+                status = account.status
+
             account_list.append({
                 "account_id": account.account_id,
                 "name": account.name,
-                "nickname": account.nickname,  # Add nickname field
+                "nickname": account.nickname,
                 "environment": account.environment,
-                "status": "active" if is_valid else "token_expired",
+                "status": status,
                 "balance": 0.0,  # This would come from broker API when token is valid
                 "active": account.is_active,
                 "is_token_expired": not is_valid,
-                "last_connected": account.last_connected
+                "last_connected": account.last_connected,
+                "token_status": {
+                    "valid": is_valid,
+                    "expires_at": account.credentials.expires_at.isoformat() if account.credentials and account.credentials.expires_at else None,
+                    "message": "Your token will be automatically refreshed by the system." if not is_valid else None
+                } if account.credentials else None
             })
             
             # Log the final account state being returned to frontend
@@ -353,13 +362,10 @@ async def validate_account_token(account: BrokerAccount, db: Session):
         
     is_valid = await token_service.validate_token(account.credentials)
     if not is_valid:
-        # Try to refresh
-        refreshed = await token_service.refresh_token_if_needed(account.credentials)
-        if not refreshed:
-            raise HTTPException(
-                status_code=401,
-                detail="Account token is expired and refresh failed"
-            )
+        raise HTTPException(
+            status_code=401,
+            detail="Account token is expired. The system will automatically refresh it. Please try again in a few minutes."
+        )
 
 
 @router.post("/accounts/{account_id}/orders")
