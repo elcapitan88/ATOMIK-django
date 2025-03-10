@@ -26,6 +26,42 @@ from app.schemas.strategy import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+@router.post("/{strategy_id}/execute")
+async def execute_strategy_manually(
+    strategy_id: int,
+    action_data: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Execute a strategy manually from the UI"""
+    try:
+        strategy = db.query(ActivatedStrategy).filter(
+            ActivatedStrategy.id == strategy_id,
+            ActivatedStrategy.user_id == current_user.id
+        ).first()
+        
+        if not strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        # Create signal data from action
+        signal_data = {
+            "action": action_data["action"],
+            "order_type": "MARKET",
+            "time_in_force": "GTC"
+        }
+        
+        # Use existing strategy processor
+        strategy_processor = StrategyProcessor(db)
+        result = await strategy_processor.execute_strategy(strategy, signal_data)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Manual strategy execution error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to execute strategy: {str(e)}"
+        )
+
 @router.post("/activate", response_model=StrategyResponse)
 async def activate_strategy(
     *,
