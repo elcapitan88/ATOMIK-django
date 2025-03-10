@@ -4,6 +4,7 @@ from .endpoints import auth, broker, subscriptions, webhooks, strategy, websocke
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.db.session import get_db
+from .endpoints.admin import admin_router
 
 # Create routers
 api_router = APIRouter()
@@ -17,6 +18,7 @@ api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"]
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(subscriptions.router, prefix="/subscriptions", tags=["subscriptions"])
 api_router.include_router(support.router, prefix="/support", tags=["support"])
+api_router.include_router(admin_router, prefix="/admin", tags=["admin"])
 
 # Define the callback route - Notice the change in the path
 @tradovate_callback_router.get("/tradovate/callback")  # Changed from "/api/tradovate/callback"

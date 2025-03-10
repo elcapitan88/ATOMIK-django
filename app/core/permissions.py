@@ -148,3 +148,14 @@ def check_rate_limit(max_requests: int = 100, window_seconds: int = 60):
 
         return wrapper
     return decorator
+
+def admin_required(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Verify user has admin privileges"""
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator access required"
+        )
+    return current_user

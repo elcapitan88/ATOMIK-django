@@ -15,6 +15,7 @@ class User(Base):
     is_superuser = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
+    is_superuser=
 
     # Relationships
     webhooks = relationship("Webhook", back_populates="user", cascade="all, delete-orphan")
