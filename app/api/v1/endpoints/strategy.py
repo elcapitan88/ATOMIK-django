@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Dict, Any
 import logging
 import traceback
 from pydantic import ValidationError
@@ -9,6 +9,7 @@ from app.core.config import settings
 from decimal import Decimal
 
 from app.core.security import get_current_user
+from app.services.strategy_service import StrategyProcessor
 from app.db.session import get_db
 from app.models.strategy import ActivatedStrategy, strategy_follower_quantities 
 from app.models.webhook import Webhook, WebhookSubscription
