@@ -1,1 +1,1 @@
-web: gunicorn main:app --workers ${WORKERS:-4} --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+web: alembic upgrade head && gunicorn main:app --workers ${WORKERS:-4} --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
