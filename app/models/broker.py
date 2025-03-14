@@ -11,7 +11,7 @@ class BrokerAccount(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    broker_id = Column(String(50))  # e.g., "tradovate"
+    broker_id = Column(String(50))  # e.g., "tradovate", "interactivebrokers"
     account_id = Column(String, unique=True, nullable=False)
     name = Column(String(200))
     nickname = Column(String(200), nullable=True)
@@ -24,7 +24,6 @@ class BrokerAccount(Base):
     last_connected = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
     is_deleted = Column(Boolean, default=False)
-
 
     # Relationships
     user = relationship("User", back_populates="broker_accounts")
@@ -70,6 +69,17 @@ class BrokerAccount(Base):
                 "last_refresh_attempt": self.credentials.last_refresh_attempt.isoformat() if self.credentials.last_refresh_attempt else None,
                 "last_refresh_error": self.credentials.last_refresh_error
             })
+            
+            # Add Railway service info if available
+            if self.credentials.custom_data:
+                try:
+                    import json
+                    service_data = json.loads(self.credentials.custom_data)
+                    if 'status' in service_data:
+                        account_dict["railway_status"] = service_data['status']
+                except:
+                    pass
+                    
         else:
             account_dict.update({
                 "has_credentials": False,
@@ -85,7 +95,7 @@ class BrokerCredentials(Base):
     id = Column(Integer, primary_key=True, index=True)
     broker_id = Column(String, nullable=False)
     account_id = Column(Integer, ForeignKey("broker_accounts.id", ondelete="CASCADE"))
-    credential_type = Column(String(20))  # oauth, api_key, etc.
+    credential_type = Column(String(20))  # oauth, api_key, railway_service, etc.
     access_token = Column(String)
     expires_at = Column(DateTime)
     is_valid = Column(Boolean, default=True)
@@ -94,13 +104,15 @@ class BrokerCredentials(Base):
     refresh_fail_count = Column(Integer, default=0)
     last_refresh_attempt = Column(DateTime, nullable=True)
     last_refresh_error = Column(String, nullable=True)
+    # Add custom_data field for additional broker-specific data (like Railway service info)
+    custom_data = Column(Text, nullable=True)
 
     # Relationship to broker account
     account = relationship("BrokerAccount", back_populates="credentials")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert credentials to dictionary representation"""
-        return {
+        cred_dict = {
             "id": self.id,
             "broker_id": self.broker_id,
             "credential_type": self.credential_type,
@@ -112,3 +124,13 @@ class BrokerCredentials(Base):
             "last_refresh_attempt": self.last_refresh_attempt.isoformat() if self.last_refresh_attempt else None,
             "last_refresh_error": self.last_refresh_error
         }
+        
+        # Include parsed custom_data if available
+        if self.custom_data:
+            try:
+                import json
+                cred_dict["custom_data"] = json.loads(self.custom_data)
+            except:
+                pass
+                
+        return cred_dict

@@ -294,9 +294,11 @@ class BaseBroker(ABC):
         """Factory method to get broker implementation"""
         try:
             from .implementations.tradovate import TradovateBroker
+            from .implementations.interactivebrokers import InteractiveBrokersBroker
             
             broker_implementations = {
                 "tradovate": TradovateBroker,
+                "interactivebrokers": InteractiveBrokersBroker,
             }
 
             broker_class = broker_implementations.get(broker_id)
