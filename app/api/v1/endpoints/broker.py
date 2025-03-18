@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 import logging
@@ -20,8 +20,17 @@ from ....db.session import get_db
 from ....models.user import User
 from ....models.broker import BrokerAccount, BrokerCredentials
 from ....core.brokers.base import BaseBroker
+from app.models.subscription import Subscription
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from app.services.broker_token_service import BrokerTokenService
+from app.core.upgrade_prompts import build_upgrade_response, UpgradeReason
+from app.services.subscription_service import SubscriptionService
+from app.core.permissions import (
+    check_subscription, 
+    check_resource_limit, 
+    check_feature_access, 
+    require_tier
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -45,6 +54,7 @@ class AccountUpdateRequest(BaseModel):
     nickname: Optional[str] = None
 
 @router.get("/supported")
+@check_subscription
 async def get_supported_brokers():
     """Get list of supported brokers and their features"""
     return {
@@ -62,13 +72,38 @@ async def get_supported_brokers():
     }
 
 @router.post("/connect")
+@check_subscription
+@check_resource_limit("connected_accounts")
 async def initiate_oauth(
     environment: str,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    response: Response = None  # Added Response parameter
 ):
     """Initiate the OAuth flow with Tradovate"""
     try:
+        # Check service count first with detailed upgrade information
+        subscription_service = SubscriptionService(db)
+        can_add, message = subscription_service.can_add_resource(
+            current_user.id, 
+            "connected_accounts"
+        )
+        
+        if not can_add and not settings.SKIP_SUBSCRIPTION_CHECK:
+            user_tier = subscription_service.get_user_tier(current_user.id)
+            # Return more detailed upgrade information in the response
+            upgrade_info = build_upgrade_response(
+                reason=UpgradeReason.ACCOUNT_LIMIT,
+                current_tier=user_tier,
+                status_code=403
+            )
+            # We can still raise the HTTPException but with more details
+            raise HTTPException(
+                status_code=403,
+                detail=upgrade_info,
+                headers={"X-Upgrade-Required": "true"}
+            )
+            
         state = base64.urlsafe_b64encode(json.dumps({
             'environment': environment,
             'user_id': current_user.id,
@@ -90,8 +125,19 @@ async def initiate_oauth(
         query_string = "&".join([f"{k}={v}" for k, v in params.items()])
         full_auth_url = f"{auth_url}?{query_string}"
 
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+
+        if subscription:
+            # Increment the connected accounts counter
+            subscription.connected_accounts_count = (subscription.connected_accounts_count or 0) + 1
+            db.commit()
+
         return {"auth_url": full_auth_url}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"OAuth initiation failed: {str(e)}")
         raise HTTPException(
@@ -100,6 +146,7 @@ async def initiate_oauth(
         )
 
 @router.delete("/accounts/{account_id}")
+@check_subscription
 async def disconnect_broker_account(
     account_id: str,
     current_user: User = Depends(get_current_user),
@@ -129,6 +176,13 @@ async def disconnect_broker_account(
         account.deleted_at = datetime.now()
         account.is_deleted = True  # Add this field to your model if not present
 
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if subscription and subscription.connected_accounts_count > 0:
+            subscription.connected_accounts_count -= 1
+
         # 3. Commit changes
         db.commit()
 
@@ -148,11 +202,14 @@ async def disconnect_broker_account(
             detail=str(e)
         )
 
+
 @router.get("/accounts/{account_id}/status")
+@check_subscription
 async def get_account_status(
     account_id: str,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    response: Response = None  # Added Response parameter
 ):
     """Get broker account status and information"""
     account = db.query(BrokerAccount).filter(
@@ -184,10 +241,12 @@ async def get_account_status(
         )
 
 @router.get("/accounts/{account_id}/positions")
+@check_subscription
 async def get_positions(
     account_id: str,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    response: Response = None  # Added Response parameter
 ):
     """Get current positions for a broker account"""
     account = db.query(BrokerAccount).filter(
@@ -217,9 +276,11 @@ async def get_positions(
         )
 
 @router.get("/accounts")
+@check_subscription
 async def list_broker_accounts(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    response: Response = None  # Added Response parameter
 ):
     try:
         token_service = BrokerTokenService(db)
@@ -233,6 +294,7 @@ async def list_broker_accounts(
         account_list = []
         
         for account in accounts:
+            # Process each account as you were doing before
             is_valid = False
             if account.credentials:
                 # Log the token state before validation
@@ -247,11 +309,10 @@ async def list_broker_accounts(
             else:
                 logger.warning(f"Account {account.account_id} has no credentials")
 
-            # Build account info with appropriate status
+            # Build account info
             status = "active"
             if not is_valid:
                 status = "token_expired"
-                # No need to mark for refresh - token-refresh-service handles this automatically
             elif account.status != "active":
                 status = account.status
 
@@ -261,7 +322,7 @@ async def list_broker_accounts(
                 "nickname": account.nickname,
                 "environment": account.environment,
                 "status": status,
-                "balance": 0.0,  # This would come from broker API when token is valid
+                "balance": 0.0,
                 "active": account.is_active,
                 "is_token_expired": not is_valid,
                 "last_connected": account.last_connected,
@@ -271,10 +332,36 @@ async def list_broker_accounts(
                     "message": "Your token will be automatically refreshed by the system." if not is_valid else None
                 } if account.credentials else None
             })
-            
-            # Log the final account state being returned to frontend
-            logger.info(f"Returning account state: {account.account_id}, is_token_expired: {not is_valid}")
 
+        # Add upgrade headers if approaching limits
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if subscription and not settings.SKIP_SUBSCRIPTION_CHECK:
+            user_tier = subscription.tier
+            max_accounts = float('inf')
+            
+            if user_tier == "starter":
+                max_accounts = 1
+            elif user_tier == "pro":
+                max_accounts = 5
+                
+            # Add upgrade suggestion if approaching limit
+            if len(accounts) >= max_accounts - 1 and user_tier != "elite":
+                next_tier = "pro" if user_tier == "starter" else "elite"
+                
+                # Add upgrade headers for frontend to use
+                if response:
+                    response.headers["X-Upgrade-Recommended"] = "true"
+                    response.headers["X-Current-Tier"] = user_tier
+                    response.headers["X-Recommended-Tier"] = next_tier
+                    response.headers["X-Upgrade-URL"] = f"{settings.FRONTEND_URL}/pricing?from={user_tier}&to={next_tier}"
+                    response.headers["X-Accounts-Used"] = str(len(accounts))
+                    response.headers["X-Accounts-Limit"] = str(max_accounts)
+                    response.headers["X-Next-Tier-Limit"] = "5" if next_tier == "pro" else "Unlimited"
+
+        # IMPORTANT: Always return the account_list directly, not wrapped in an object
         return account_list
 
     except Exception as e:
@@ -285,6 +372,7 @@ async def list_broker_accounts(
         )
 
 @router.post("/accounts/close-all", name="close_all_positions")
+@check_subscription
 async def close_all_positions(
     request: CloseAllPositionsRequest,
     current_user: User = Depends(get_current_user),
@@ -369,6 +457,7 @@ async def validate_account_token(account: BrokerAccount, db: Session):
 
 
 @router.post("/accounts/{account_id}/orders")
+@check_subscription
 async def place_order(
     account_id: str,
     order_data: Dict[str, Any],
@@ -403,6 +492,7 @@ async def place_order(
         )
 
 @router.get("/{broker_id}/accounts")
+@check_subscription
 async def get_broker_accounts(
     broker_id: str,
     current_user: User = Depends(get_current_user),
@@ -439,6 +529,7 @@ async def get_broker_accounts(
         )
 
 @router.delete("/accounts/{account_id}/orders/{order_id}")
+@check_subscription
 async def cancel_order(
     account_id: str,
     order_id: str,
@@ -499,11 +590,13 @@ async def cleanup_deleted_accounts(
 
     
 @router.post("/accounts/{account_id}/discretionary/orders")
+@check_subscription
 async def place_discretionary_order(
     account_id: str,
     order_data: Dict[str, Any],
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    response: Response = None  # Added Response parameter
 ):
     """Place a discretionary trading order"""
     try:
@@ -574,6 +667,7 @@ async def place_discretionary_order(
         )
     
 @router.patch("/accounts/{account_id}")
+@check_subscription
 async def update_account(
     account_id: str,
     update_data: AccountUpdateRequest,

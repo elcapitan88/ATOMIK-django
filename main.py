@@ -1,14 +1,17 @@
-# main.py
-from fastapi import FastAPI, Request, Depends, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse, JSONResponse
+#main.py
 from sqlalchemy.orm import Session
-from typing import Optional, Callable, Set, Dict, Any
-from contextlib import asynccontextmanager
+from app.core.security import get_user_from_token
+from app.models.subscription import Subscription
+from app.models.user import User
+from fastapi import Request, HTTPException, FastAPI, Depends, WebSocket,WebSocketDisconnect
+from datetime import datetime
 
 # Standard library imports
 import logging
 import asyncio
 from datetime import datetime
+from typing import Any, Optional, Callable, Set, Dict
+from contextlib import asynccontextmanager
 
 # FastAPI imports
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +27,7 @@ from app.db.base import init_db, get_db
 from app.db.session import engine, get_db
 from app.core.db_health import check_database_health
 from app.api.v1.endpoints import websocket
+from fastapi.responses import RedirectResponse, JSONResponse
 
 # Import new WebSocket components
 from app.websockets.handlers.endpoint_handlers import TradovateEndpointHandler
@@ -301,6 +305,133 @@ async def startup_event():
         await cleanup_on_failed_startup()  # Simplified call with no arguments
         raise
 
+@app.middleware("http")
+async def ensure_subscription_middleware(request: Request, call_next):
+    """Middleware to ensure all authenticated users have a subscription record"""
+    # Only process if this is an API route (not for static files, etc.)
+    if request.url.path.startswith("/api/"):
+        # Check for authenticated request
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.replace("Bearer ", "")
+            
+            # Get user from token without throwing error (returns None if invalid)
+            try:
+                # Use an independent database session for the middleware
+                from app.db.session import SessionLocal
+                db = SessionLocal()
+                
+                try:
+                    # Extract user from token
+                    user_email = get_user_from_token(token)
+                    if user_email:
+                        # Find user
+                        user = db.query(User).filter(User.email == user_email).first()
+                        
+                        if user:
+                            # Check if user has a subscription
+                            subscription = db.query(Subscription).filter(
+                                Subscription.user_id == user.id
+                            ).first()
+                            
+                            if not subscription:
+                                # Create a starter subscription
+                                logger.warning(f"User {user.email} had no subscription. Creating starter subscription.")
+                                subscription = Subscription(
+                                    user_id=user.id,
+                                    tier="starter",
+                                    status="active",
+                                    is_lifetime=False,
+                                    created_at=datetime.utcnow(),
+                                    updated_at=datetime.utcnow()
+                                )
+                                db.add(subscription)
+                                db.commit()
+                                logger.info(f"Created starter subscription for user {user.email}")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"Error in subscription middleware: {str(e)}")
+                # Continue with the request even if middleware fails
+                pass
+    
+    # Continue processing the request
+    response = await call_next(request)
+    return response
+
+@app.on_event("startup")
+async def start_server_monitor():
+    """Start background task to monitor IBEam servers"""
+    asyncio.create_task(monitor_ibearmy_servers())
+
+async def monitor_ibearmy_servers():
+    """Background task to monitor IBEam servers and auto-shutdown inactive ones"""
+    while True:
+        try:
+            # Sleep first to ensure app is fully started
+            await asyncio.sleep(300)  # 5 minutes
+            
+            # Get a database session
+            async with get_db_context() as db:
+                # Get all active IB accounts
+                accounts = db.query(BrokerAccount).filter(
+                    BrokerAccount.broker_id == "interactivebrokers",
+                    BrokerAccount.is_active == True
+                ).all()
+                
+                now = datetime.utcnow()
+                
+                for account in accounts:
+                    if not account.credentials or not account.credentials.custom_data:
+                        continue
+                        
+                    try:
+                        service_data = json.loads(account.credentials.custom_data)
+                        service_id = service_data.get("railway_service_id")
+                        
+                        if not service_id:
+                            continue
+                            
+                        # Get last activity time - first from account itself
+                        last_activity = account.last_connected
+                        
+                        # Calculate inactivity period in hours
+                        hours_inactive = 0
+                        if last_activity:
+                            hours_inactive = (now - last_activity).total_seconds() / 3600
+                            
+                        # If inactive for more than 12 hours, stop the server
+                        if hours_inactive > 12:
+                            logger.info(f"Auto-stopping inactive IBEam server for account {account.account_id}")
+                            await railway_server_manager.stop_server(service_id)
+                            
+                            # Update service status in custom_data
+                            service_data["status"] = "stopped"
+                            account.credentials.custom_data = json.dumps(service_data)
+                            db.commit()
+                    except Exception as e:
+                        logger.error(f"Error checking server {account.account_id}: {str(e)}")
+                        
+        except Exception as e:
+            logger.error(f"Error in server monitor: {str(e)}")
+            
+async def start_background_tasks():
+    """Start background tasks"""
+    from app.core.tasks import sync_resource_counts_task
+    
+    # Schedule resource count sync to run every hour
+    async def run_periodic_sync():
+        while True:
+            try:
+                await sync_resource_counts_task()
+            except Exception as e:
+                logger.error(f"Error in periodic sync task: {str(e)}")
+            await asyncio.sleep(3600)  # 1 hour
+    
+    # Add task to the set of background tasks
+    task = asyncio.create_task(run_periodic_sync())
+    background_tasks.add(task)
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Shutdown event handler"""
@@ -329,6 +460,39 @@ async def shutdown_event():
         raise
     finally:
         logger.info("Shutdown process completed")
+
+@app.on_event("startup")
+async def refresh_db_metadata():
+    import logging
+    from sqlalchemy import inspect, MetaData
+    from app.db.session import engine
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Explicitly refreshing SQLAlchemy metadata...")
+    
+    try:
+        # Create a fresh metadata object and reflect the database
+        metadata = MetaData()
+        metadata.reflect(bind=engine)
+        
+        # Log some info to confirm it worked
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        logger.info(f"Metadata refreshed successfully. Found {len(tables)} tables.")
+        
+        # Specifically check broker_accounts and subscriptions tables
+        broker_cols = [col['name'] for col in inspector.get_columns('broker_accounts')]
+        sub_cols = [col['name'] for col in inspector.get_columns('subscriptions')]
+        
+        logger.info(f"broker_accounts columns: {', '.join(broker_cols)}")
+        logger.info(f"subscriptions columns: {', '.join(sub_cols)}")
+        
+        # Additional debug info
+        has_nickname = 'nickname' in broker_cols
+        logger.info(f"nickname column present in broker_accounts: {has_nickname}")
+        
+    except Exception as e:
+        logger.error(f"Error refreshing metadata: {str(e)}")
 
 @app.get("/api/routes-check")
 async def check_routes():

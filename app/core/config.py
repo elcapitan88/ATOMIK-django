@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Trading API"
     DEBUG: bool = True
-    ENVIRONMENT: str = "production"
+    ENVIRONMENT: str = "development"
 
     # Server Settings
     SERVER_HOST: str = ""
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
         
     # Database Settings
     DATABASE_URL: str
-    DEV_DATABASE_URL: str = ""  # Add default empty values
+    DEV_DATABASE_URL: str = ""  
     PROD_DATABASE_URL: str = ""
     SQL_ECHO: bool = False 
     
@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
+    
+
+    #Email Settings
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_FROM_EMAIL: Optional[str] = None
+    SMTP_SERVER: str = "smtp.office365.com"
+    SMTP_PORT: int = 587
+    SMTP_USE_TLS: bool = True
+
+
     
     # Worker settings
     WORKERS: int = 4
@@ -96,6 +107,11 @@ class Settings(BaseSettings):
     # Redis Settings
     REDIS_URL: Optional[str] = "redis://localhost:6379"
 
+    #Railway
+    RAILWAY_API_KEY: Optional[str] = None
+    RAILWAY_PROJECT_ID: Optional[str] = None
+    RAILWAY_IB_BASE_SERVICE_ID: Optional[str] = None
+
     # Tradovate Settings
     TRADOVATE_CLIENT_ID: Optional[str] = None
     TRADOVATE_CLIENT_SECRET: Optional[str] = None
@@ -125,6 +141,23 @@ class Settings(BaseSettings):
 
     STRIPE_SUCCESS_URL: str = "https://atomiktrading.io/payment/success"
     STRIPE_CANCEL_URL: str = "https://atomiktrading.io/pricing"
+
+    STRIPE_PRICE_PRO_MONTHLY: str = ""
+    STRIPE_PRICE_PRO_YEARLY: str = ""
+    STRIPE_PRICE_PRO_LIFETIME: str = ""
+    STRIPE_PRICE_ELITE_MONTHLY: str = ""
+    STRIPE_PRICE_ELITE_YEARLY: str = ""
+    STRIPE_PRICE_ELITE_LIFETIME: str = ""
+
+    def get_stripe_price_id(self, tier: str, interval: str) -> str:
+        """Get the Stripe Price ID for a specific tier and interval with validation"""
+        if tier not in ['pro', 'elite']:
+            return None
+        if interval not in ['monthly', 'yearly', 'lifetime']:
+            return None
+            
+        var_name = f"STRIPE_PRICE_{tier.upper()}_{interval.upper()}"
+        return getattr(self, var_name, "")
 
     @property
     def active_stripe_success_url(self) -> str:

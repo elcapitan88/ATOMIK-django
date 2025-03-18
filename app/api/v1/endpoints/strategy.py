@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Union, Optional, Dict, Any
@@ -13,7 +13,9 @@ from app.services.strategy_service import StrategyProcessor
 from app.db.session import get_db
 from app.models.strategy import ActivatedStrategy, strategy_follower_quantities 
 from app.models.webhook import Webhook, WebhookSubscription
+from app.models.subscription import Subscription
 from app.models.broker import BrokerAccount
+from app.core.upgrade_prompts import add_upgrade_headers, UpgradeReason
 from app.schemas.strategy import (
     SingleStrategyCreate,
     MultipleStrategyCreate,
@@ -23,11 +25,18 @@ from app.schemas.strategy import (
     StrategyType,
     StrategyStats
 )
+from app.core.permissions import (
+    check_subscription, 
+    check_resource_limit, 
+    check_feature_access, 
+    require_tier
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 @router.post("/{strategy_id}/execute")
+@check_subscription
 async def execute_strategy_manually(
     strategy_id: int,
     action_data: Dict[str, Any],
@@ -64,11 +73,14 @@ async def execute_strategy_manually(
         )
 
 @router.post("/activate", response_model=StrategyResponse)
+@check_subscription
+@check_resource_limit("active_strategies")
 async def activate_strategy(
     *,
     db: Session = Depends(get_db),
     strategy: Union[SingleStrategyCreate, MultipleStrategyCreate],
     current_user = Depends(get_current_user),
+    response: Response = None,  # Added Response parameter
     idempotency_key: Optional[str] = Header(None)
 ):
     try:
@@ -170,6 +182,28 @@ async def activate_strategy(
 
             else:  # MultipleStrategyCreate
                 logger.info("Processing multiple account strategy")
+
+                # Check if user has access to group strategies
+                subscription_service = SubscriptionService(db)
+                has_access, message = subscription_service.is_feature_available(
+                    current_user.id, 
+                    "group_strategies_allowed"
+                )
+                
+                if not has_access and not settings.SKIP_SUBSCRIPTION_CHECK:
+                    # Get user's tier
+                    user_tier = subscription_service.get_user_tier(current_user.id)
+                    
+                    # Add upgrade headers
+                    if response:
+                        add_upgrade_headers(response, user_tier, UpgradeReason.GROUP_STRATEGY)
+                    
+                    # Raise exception with detailed upgrade info
+                    raise upgrade_exception(
+                        reason=UpgradeReason.GROUP_STRATEGY,
+                        current_tier=user_tier,
+                        detail="Group strategies require Pro tier or higher"
+                    )
                 
                 # Validate leader account
                 leader_account = db.query(BrokerAccount).filter(
@@ -273,6 +307,14 @@ async def activate_strategy(
                     },
                     "stats": stats.to_summary_dict()
                 }
+                
+            # Update subscription counter
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == current_user.id
+            ).first()
+
+            if subscription:
+                subscription.active_strategies_count = (subscription.active_strategies_count or 0) + 1
 
             db.commit()
             logger.info(f"Successfully created strategy with ID: {db_strategy.id}")
@@ -308,9 +350,11 @@ async def activate_strategy(
         )
     
 @router.get("/list", response_model=List[StrategyResponse])
+@check_subscription
 async def list_strategies(
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_user),
+    response: Response = None  # Added Response parameter
 ):
     try:
         logger.info(f"Fetching strategies for user {current_user.id}")
@@ -325,6 +369,26 @@ async def list_strategies(
             )
             .all()
         )
+
+        # Add upgrade suggestion if approaching strategy limits
+        if not settings.SKIP_SUBSCRIPTION_CHECK:
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == current_user.id
+            ).first()
+            
+            if subscription:
+                user_tier = subscription.tier
+                max_strategies = float('inf')
+                
+                if user_tier == "starter":
+                    max_strategies = 1
+                elif user_tier == "pro":
+                    max_strategies = 5
+                    
+                # Add upgrade headers if approaching limit
+                if len(strategies) >= max_strategies - 1 and user_tier != "elite":
+                    # Add standardized upgrade headers
+                    add_upgrade_headers(response, user_tier, UpgradeReason.STRATEGY_LIMIT)
 
         response_strategies = []
         for strategy in strategies:
@@ -346,8 +410,8 @@ async def list_strategies(
                 if strategy.strategy_type == "single":
                     # Add single strategy specific fields
                     strategy_data.update({
-                        "account_id": strategy.account_id,  # Add this line
-                        "quantity": strategy.quantity,      # Add this line
+                        "account_id": strategy.account_id,
+                        "quantity": strategy.quantity,
                         "broker_account": {
                             "account_id": strategy.broker_account.account_id,
                             "name": strategy.broker_account.name,
@@ -402,6 +466,7 @@ async def list_strategies(
         )
 
 @router.post("/{strategy_id}/toggle")
+@check_subscription
 async def toggle_strategy(
     strategy_id: int,
     db: Session = Depends(get_db),
@@ -433,6 +498,7 @@ async def toggle_strategy(
         )
 
 @router.delete("/{strategy_id}")
+@check_subscription
 async def delete_strategy(
     strategy_id: int,
     db: Session = Depends(get_db),
@@ -453,8 +519,18 @@ async def delete_strategy(
         if not strategy:
             raise HTTPException(status_code=404, detail="Strategy not found")
         
-        # Only delete this specific strategy
+        # Get subscription before deleting
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        # Delete strategy
         db.delete(strategy)
+        
+        # Update counter
+        if subscription and subscription.active_strategies_count > 0:
+            subscription.active_strategies_count -= 1
+            
         db.commit()
         
         return {"status": "success", "message": "Strategy deleted successfully"}

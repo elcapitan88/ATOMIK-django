@@ -26,13 +26,14 @@ class RailwayServerManager:
     def __init__(self):
         self.api_key = os.environ.get("RAILWAY_API_KEY")
         self.api_url = "https://backboard.railway.app/graphql"
-        self.template_id = os.environ.get("RAILWAY_IBEARMY_TEMPLATE_ID")
+        # Use the corrected environment variable name
+        self.base_service_id = os.environ.get("RAILWAY_IB_BASE_SERVICE_ID", "b63ea1d4-a2f5-4507-9a90-f65cbddee7c2")
         self.project_id = os.environ.get("RAILWAY_PROJECT_ID")
         
         if not self.api_key:
             logger.warning("RAILWAY_API_KEY environment variable not set")
-        if not self.template_id:
-            logger.warning("RAILWAY_IBEARMY_TEMPLATE_ID environment variable not set")
+        if not self.base_service_id:
+            logger.warning("RAILWAY_IB_BASE_SERVICE_ID environment variable not set")
         if not self.project_id:
             logger.warning("RAILWAY_PROJECT_ID environment variable not set")
     
@@ -63,7 +64,9 @@ class RailwayServerManager:
                 return data["data"]
     
     async def provision_server(self, db: Session, user: User, ib_username: str, ib_password: str) -> Dict[str, Any]:
-        """Provision a new IBEam server instance by cloning an existing service"""
+        """
+        Provision a new IBEam server instance by cloning an existing service
+        """
         # Generate a unique API key for this server
         api_key = str(uuid.uuid4())
         
@@ -76,6 +79,7 @@ class RailwayServerManager:
             serviceClone(input: $input) {
                 id
                 name
+                url
                 projectId
                 createdAt
             }
@@ -85,8 +89,7 @@ class RailwayServerManager:
         variables = {
             "input": {
                 "name": service_name,
-                # Use your base service ID here - the one that is already deployed
-                "serviceId": "b63ea1d4-a2f5-4507-9a90-f65cbddee7c2",
+                "serviceId": self.base_service_id,  # Using our base service ID
                 "variables": [
                     {"name": "USER_ID", "value": str(user.id)},
                     {"name": "IB_USERNAME", "value": ib_username},
@@ -98,7 +101,7 @@ class RailwayServerManager:
         }
         
         try:
-            # Call Railway API to create service using the clone mutation
+            # Call Railway API to create service using clone mutation
             result = await self._make_api_request(clone_query, variables)
             service = result.get("serviceClone", {})
             
@@ -106,10 +109,6 @@ class RailwayServerManager:
                 raise HTTPException(status_code=500, detail="Failed to provision IBEam server")
             
             # Add server information to database
-            # In a real implementation, you would add a model for IBEam servers
-            # and track the Railway service ID, API key, and status
-            
-            # For now, add it to broker account
             broker_account = BrokerAccount(
                 user_id=user.id,
                 broker_id="interactivebrokers",
@@ -127,6 +126,11 @@ class RailwayServerManager:
             db.add(broker_account)
             db.flush()
             
+            # Store service URL for making API calls
+            service_url = service.get("url", "")
+            if not service_url:
+                logger.warning(f"No URL returned for cloned service {service.get('id')}")
+                
             # Store credentials
             broker_credentials = BrokerCredentials(
                 broker_id="interactivebrokers",
@@ -138,6 +142,7 @@ class RailwayServerManager:
                 custom_data=json.dumps({
                     "railway_service_id": service.get("id"),
                     "railway_service_name": service_name,
+                    "service_url": service_url,  # Store the URL for making API calls
                     "api_key": api_key,
                     "status": "provisioning"
                 }),
@@ -156,7 +161,8 @@ class RailwayServerManager:
                 "account_id": broker_account.account_id,
                 "message": "IBEam server is being provisioned",
                 "service_id": service.get("id"),
-                "service_name": service_name
+                "service_name": service_name,
+                "service_url": service_url  # Return the URL for frontend reference
             }
             
         except Exception as e:

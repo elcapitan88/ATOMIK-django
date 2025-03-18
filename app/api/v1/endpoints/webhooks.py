@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Body
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Body, Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional
@@ -14,6 +14,7 @@ from ....core.security import get_current_user
 from ....db.session import get_db
 from ....models.user import User
 from ....models.webhook import Webhook, WebhookLog
+from ....models.subscription import Subscription
 from ....schemas.webhook import (
     WebhookCreate,
     WebhookUpdate,
@@ -23,6 +24,9 @@ from ....schemas.webhook import (
 )
 from ....services.webhook_service import WebhookProcessor
 from ....core.config import settings
+from ....core.upgrade_prompts import build_upgrade_response, UpgradeReason, add_upgrade_headers
+from ....core.permissions import check_subscription, check_resource_limit, check_feature_access, require_tier
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -40,15 +44,53 @@ def generate_webhook_url(webhook: Webhook) -> str:
     return f"{base_url}/api/v1/webhooks/{webhook.token}"
 
 @router.post("/generate", response_model=WebhookOut)
+@check_subscription
+@check_resource_limit("active_webhooks")
 async def generate_webhook(
     webhook_in: WebhookCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    response: Response = None  # Added Response parameter
 ):
     try:
         logger.info(f"Received webhook creation request")
         logger.info(f"Webhook data: {webhook_in.dict()}")
         logger.info(f"Current user: {current_user.id}")
+        
+        # Check webhook limits with detailed upgrade information
+        if not settings.SKIP_SUBSCRIPTION_CHECK:
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == current_user.id
+            ).first()
+            
+            if subscription:
+                user_tier = subscription.tier
+                webhook_count = db.query(Webhook).filter(
+                    Webhook.user_id == current_user.id,
+                    Webhook.is_active == True
+                ).count()
+                
+                max_webhooks = float('inf')
+                if user_tier == "starter":
+                    max_webhooks = 1
+                elif user_tier == "pro":
+                    max_webhooks = 5
+                
+                if webhook_count >= max_webhooks:
+                    # Provide detailed upgrade information
+                    upgrade_info = build_upgrade_response(
+                        reason=UpgradeReason.WEBHOOK_LIMIT,
+                        current_tier=user_tier,
+                        status_code=403
+                    )
+                    
+                    if response:
+                        add_upgrade_headers(response, user_tier, UpgradeReason.WEBHOOK_LIMIT)
+                    
+                    raise HTTPException(
+                        status_code=403,
+                        detail=upgrade_info
+                    )
 
         # Create webhook
         webhook = Webhook(
@@ -67,6 +109,15 @@ async def generate_webhook(
         )
 
         db.add(webhook)
+        
+        # Update webhook counter
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if subscription:
+            subscription.active_webhooks_count = (subscription.active_webhooks_count or 0) + 1
+        
         db.commit()
         db.refresh(webhook)
 
@@ -92,6 +143,8 @@ async def generate_webhook(
             webhook_url=webhook_url
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating webhook: {str(e)}")
         import traceback
@@ -171,14 +224,38 @@ async def webhook_endpoint(
         )
 
 @router.get("/list", response_model=List[WebhookOut])
+@check_subscription
 async def list_webhooks(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    response: Response = None  # Added Response parameter
 ):
     """List all webhooks for the current user"""
     webhooks = db.query(Webhook).filter(
         Webhook.user_id == current_user.id
     ).all()
+    
+    # Add upgrade suggestion if approaching limits
+    if not settings.SKIP_SUBSCRIPTION_CHECK:
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if subscription:
+            user_tier = subscription.tier
+            max_webhooks = float('inf')
+            
+            if user_tier == "starter":
+                max_webhooks = 1
+            elif user_tier == "pro":
+                max_webhooks = 5
+                
+            # Add upgrade headers if approaching limit
+            if len(webhooks) >= max_webhooks - 1 and user_tier != "elite":
+                next_tier = "pro" if user_tier == "starter" else "elite"
+                
+                if response:
+                    add_upgrade_headers(response, user_tier, UpgradeReason.WEBHOOK_LIMIT)
 
     return [
         WebhookOut(
@@ -200,6 +277,117 @@ async def list_webhooks(
             webhook_url=generate_webhook_url(webhook)
         ) for webhook in webhooks
     ]
+
+@router.post("/generate", response_model=WebhookOut)
+@check_subscription
+@check_resource_limit("active_webhooks")
+async def generate_webhook(
+    webhook_in: WebhookCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    response: Response = None  # Added Response parameter
+):
+    try:
+        logger.info(f"Received webhook creation request")
+        logger.info(f"Webhook data: {webhook_in.dict()}")
+        logger.info(f"Current user: {current_user.id}")
+        
+        # Check webhook limits with detailed upgrade information
+        if not settings.SKIP_SUBSCRIPTION_CHECK:
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == current_user.id
+            ).first()
+            
+            if subscription:
+                user_tier = subscription.tier
+                webhook_count = db.query(Webhook).filter(
+                    Webhook.user_id == current_user.id,
+                    Webhook.is_active == True
+                ).count()
+                
+                max_webhooks = float('inf')
+                if user_tier == "starter":
+                    max_webhooks = 1
+                elif user_tier == "pro":
+                    max_webhooks = 5
+                
+                if webhook_count >= max_webhooks:
+                    # Provide detailed upgrade information
+                    upgrade_info = build_upgrade_response(
+                        reason=UpgradeReason.WEBHOOK_LIMIT,
+                        current_tier=user_tier,
+                        status_code=403
+                    )
+                    
+                    if response:
+                        add_upgrade_headers(response, user_tier, UpgradeReason.WEBHOOK_LIMIT)
+                    
+                    raise HTTPException(
+                        status_code=403,
+                        detail=upgrade_info
+                    )
+
+        # Create webhook
+        webhook = Webhook(
+            user_id=current_user.id,
+            token=secrets.token_urlsafe(32),
+            secret_key=secrets.token_hex(32),
+            name=webhook_in.name if webhook_in.name else "New Webhook",
+            source_type=webhook_in.source_type,
+            details=webhook_in.details,
+            allowed_ips=webhook_in.allowed_ips,
+            max_triggers_per_minute=webhook_in.max_triggers_per_minute or 60,
+            require_signature=webhook_in.require_signature if webhook_in.require_signature is not None else True,
+            max_retries=webhook_in.max_retries or 3,
+            is_active=True,
+            created_at=datetime.utcnow()
+        )
+
+        db.add(webhook)
+        
+        # Update webhook counter
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if subscription:
+            subscription.active_webhooks_count = (subscription.active_webhooks_count or 0) + 1
+        
+        db.commit()
+        db.refresh(webhook)
+
+        # Create the webhook URL
+        webhook_url = generate_webhook_url(webhook)
+
+        # Return response
+        return WebhookOut(
+            id=webhook.id,
+            token=webhook.token,
+            user_id=webhook.user_id,
+            name=webhook.name,
+            source_type=webhook.source_type,
+            details=webhook.details,
+            secret_key=webhook.secret_key,
+            allowed_ips=webhook.allowed_ips,
+            max_triggers_per_minute=webhook.max_triggers_per_minute,
+            require_signature=webhook.require_signature,
+            max_retries=webhook.max_retries,
+            is_active=webhook.is_active,
+            created_at=webhook.created_at,
+            last_triggered=webhook.last_triggered,
+            webhook_url=webhook_url
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating webhook: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @router.post("/generate", response_model=WebhookOut)
 async def generate_webhook(
@@ -304,13 +492,32 @@ async def delete_webhook(
     if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")
 
-    db.delete(webhook)
-    db.commit()
+    try:
+        # Get subscription before deleting webhook
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        # Delete webhook
+        db.delete(webhook)
+        
+        # Update counter
+        if subscription and subscription.active_webhooks_count > 0:
+            subscription.active_webhooks_count -= 1
+            
+        db.commit()
 
-    return {
-        "status": "success",
-        "message": "Webhook deleted successfully"
-    }
+        return {
+            "status": "success",
+            "message": "Webhook deleted successfully"
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting webhook: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting webhook: {str(e)}"
+        )
 
 @router.get("/{token}/logs", response_model=List[WebhookLogOut])
 async def get_webhook_logs(
@@ -384,12 +591,16 @@ async def test_webhook(
             status_code=500,
             detail=f"Webhook test failed: {str(e)}"
         )
+    
 @router.post("/{token}/share", response_model=WebhookOut)
+@check_subscription
+@check_feature_access("can_share_webhooks")
 async def toggle_share_webhook(
     token: str,
     data: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    response: Response = None  # Added Response parameter
 ):
     try:
         webhook = db.query(Webhook).filter(
@@ -399,6 +610,28 @@ async def toggle_share_webhook(
 
         if not webhook:
             raise HTTPException(status_code=404, detail="Webhook not found")
+            
+        # Check sharing feature access with detailed upgrade information
+        if not settings.SKIP_SUBSCRIPTION_CHECK:
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == current_user.id
+            ).first()
+            
+            if subscription and subscription.tier == "starter" and data.get("isActive", False):
+                # Provide detailed upgrade information for webhook sharing
+                upgrade_info = build_upgrade_response(
+                    reason=UpgradeReason.WEBHOOK_SHARING,
+                    current_tier="starter",
+                    status_code=403
+                )
+                
+                if response:
+                    add_upgrade_headers(response, "starter", UpgradeReason.WEBHOOK_SHARING)
+                
+                raise HTTPException(
+                    status_code=403,
+                    detail=upgrade_info
+                )
 
         try:
             new_shared_state = data.get("isActive", False)
@@ -462,6 +695,7 @@ async def toggle_share_webhook(
         )
 
 @router.get("/shared", response_model=List[WebhookOut])
+@check_subscription
 async def list_shared_strategies(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -538,6 +772,7 @@ async def get_subscribed_strategies(
         )
 
 @router.post("/{token}/subscribe")
+@check_subscription
 async def subscribe_to_strategy(
     token: str,
     db: Session = Depends(get_db),

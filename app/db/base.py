@@ -34,6 +34,7 @@ from app.models.strategy import ActivatedStrategy  # noqa
 from app.models.broker import BrokerAccount, BrokerCredentials  # noqa
 from app.models.subscription import Subscription
 from app.models.order import Order
+from app.models.promo_code import PromoCode
 
 # Create a dependency for FastAPI endpoints
 def get_db():

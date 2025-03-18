@@ -234,6 +234,36 @@ class SecurityService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid refresh token"
             )
+        
+def get_user_from_token(token: str) -> Optional[str]:
+    """
+    Extract user email from token without raising exceptions
+    Returns None if token is invalid
+    """
+    try:
+        # Decode JWT token
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
+        )
+        
+        # Extract and validate claims
+        email: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        
+        if email is None or token_type != "access":
+            logger.warning("Invalid token claims")
+            return None
+            
+        return email
+        
+    except JWTError as e:
+        logger.error(f"JWT validation error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Error in get_user_from_token: {str(e)}")
+        return None
 
 # Create singleton instance
 security_service = SecurityService()
