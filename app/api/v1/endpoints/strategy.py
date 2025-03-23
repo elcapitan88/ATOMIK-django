@@ -13,6 +13,7 @@ from app.services.strategy_service import StrategyProcessor
 from app.db.session import get_db
 from app.models.strategy import ActivatedStrategy, strategy_follower_quantities 
 from app.models.webhook import Webhook, WebhookSubscription
+from app.services.subscription_service import SubscriptionService
 from app.models.subscription import Subscription
 from app.models.broker import BrokerAccount
 from app.core.upgrade_prompts import add_upgrade_headers, UpgradeReason
