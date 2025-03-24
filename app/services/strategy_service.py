@@ -14,6 +14,8 @@ from ..models.strategy import ActivatedStrategy
 from ..models.broker import BrokerAccount, BrokerCredentials
 from ..core.brokers.base import BaseBroker
 from fastapi import HTTPException
+# Import the ticker utilities
+from ..utils.ticker_utils import validate_ticker, get_contract_ticker, get_display_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,21 @@ class StrategyProcessor:
                 logger.warning(f"Strategy {strategy.id} is not active")
                 return {"status": "skipped", "reason": "Strategy is not active"}
 
+            # Validate the ticker in the strategy
+            valid, contract_ticker = validate_ticker(strategy.ticker)
+            if not valid:
+                error_msg = f"Invalid ticker format: {strategy.ticker}"
+                logger.error(error_msg)
+                strategy.failed_trades += 1
+                self.db.commit()
+                return {"status": "error", "reason": error_msg}
+            
+            # Update signal_data with the validated contract ticker
+            signal_data = signal_data.copy()  # Create a copy to avoid modifying the original
+            
+            # Log the ticker transformation
+            logger.info(f"Transforming ticker from {strategy.ticker} to {contract_ticker}")
+            
             if strategy.strategy_type == 'single':
                 return await self._execute_single_account_strategy(strategy, signal_data)
             else:
@@ -203,15 +220,26 @@ class StrategyProcessor:
             # Get broker instance
             broker = BaseBroker.get_broker_instance(account.broker_id, self.db)
 
-            # Prepare and execute order
+            # Ensure we have a valid contract ticker
+            valid, contract_ticker = validate_ticker(strategy.ticker)
+            if not valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid ticker format: {strategy.ticker}"
+                )
+
+            # Prepare and execute order with the validated contract ticker
             order_data = {
                 "account_id": account.account_id,
-                "symbol": strategy.ticker,
+                "symbol": contract_ticker,  # Use the full contract ticker
                 "quantity": strategy.quantity,
                 "side": signal_data["action"],
                 "type": signal_data.get("order_type", "MARKET"),
                 "time_in_force": signal_data.get("time_in_force", "GTC"),
             }
+
+            # Log the order details
+            logger.info(f"Executing order: {order_data}")
 
             # Execute order
             order_result = await broker.place_order(account, order_data)
@@ -263,6 +291,17 @@ class StrategyProcessor:
                     detail=f"Leader account {strategy.leader_account_id} not found or inactive"
                 )
 
+            # Validate the ticker
+            valid, contract_ticker = validate_ticker(strategy.ticker)
+            if not valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid ticker format: {strategy.ticker}"
+                )
+                
+            # Update signal data with correct ticker format
+            signal_data_copy = signal_data.copy()
+
             # 2. Execute leader order
             try:
                 logger.info(f"Executing leader order for strategy {strategy.id}")
@@ -272,7 +311,7 @@ class StrategyProcessor:
                     'user_id': strategy.user_id,
                     'strategy_type': 'single',
                     'webhook_id': strategy.webhook_id,
-                    'ticker': strategy.ticker,
+                    'ticker': contract_ticker,  # Use validated contract ticker
                     'account_id': strategy.leader_account_id,
                     'quantity': strategy.leader_quantity,
                     'is_active': strategy.is_active
@@ -281,7 +320,7 @@ class StrategyProcessor:
                 leader_strategy = ActivatedStrategy(**leader_strategy_dict)
                 leader_result = await self._execute_single_account_strategy(
                     leader_strategy,
-                    signal_data
+                    signal_data_copy
                 )
                 
                 results.append({
@@ -323,7 +362,7 @@ class StrategyProcessor:
                         'user_id': strategy.user_id,
                         'strategy_type': 'single',
                         'webhook_id': strategy.webhook_id,
-                        'ticker': strategy.ticker,
+                        'ticker': contract_ticker,  # Use validated contract ticker
                         'account_id': follower['account'].account_id,
                         'quantity': follower['quantity'],
                         'is_active': strategy.is_active
@@ -333,7 +372,7 @@ class StrategyProcessor:
                     follower_strategy = ActivatedStrategy(**follower_dict)
                     follower_result = await self._execute_single_account_strategy(
                         follower_strategy,
-                        signal_data
+                        signal_data_copy
                     )
 
                     results.append({
@@ -412,9 +451,14 @@ class StrategyProcessor:
         signal_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Prepare order data for execution"""
+        # Validate and get the proper contract ticker
+        valid, contract_ticker = validate_ticker(strategy.ticker)
+        if not valid:
+            raise ValueError(f"Invalid ticker format: {strategy.ticker}")
+            
         return {
             "account_id": strategy.account_id,
-            "symbol": strategy.ticker,
+            "symbol": contract_ticker,  # Use the validated contract ticker
             "quantity": strategy.quantity,
             "side": signal_data["action"],
             "type": signal_data.get("order_type", "MARKET"),
@@ -465,7 +509,7 @@ class StrategyProcessor:
                 current_position = sum(
                     abs(float(p["quantity"]))
                     for p in positions
-                    if p["symbol"] == strategy.ticker
+                    if p["symbol"] == order_data["symbol"]  # Use the already validated symbol from order_data
                 )
                 if current_position + order_data["quantity"] > strategy.max_position_size:
                     raise HTTPException(
