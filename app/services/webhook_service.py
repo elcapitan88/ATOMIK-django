@@ -29,19 +29,21 @@ class WebhookProcessor:
         
         return hmac.compare_digest(computed_signature, signature)
 
-    def normalize_payload(
-        self,
-        source_type: str,
-        payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def normalize_payload(self, source_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize webhook payload to standard format"""
         try:
-            # Only validate the action field
+            # Handle Enum string representation
+            if 'action' in payload:
+                action_str = str(payload['action']).strip()
+                if '.' in action_str and 'WEBHOOKACTION' in action_str:
+                    action_str = action_str.split('.')[-1]
+                payload['action'] = action_str.upper()
+
+            # Rest of validation logic
             if 'action' not in payload:
                 raise ValueError("Missing required field: action")
 
-            # Normalize action
-            action = payload['action'].upper()
+            action = payload['action']
             if action not in {'BUY', 'SELL'}:
                 raise ValueError(f"Invalid action: {action}. Must be BUY or SELL.")
 

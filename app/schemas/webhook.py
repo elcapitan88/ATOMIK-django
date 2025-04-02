@@ -23,6 +23,14 @@ class StrategyType(str, Enum):
 class WebhookPayload(BaseModel):
     action: WebhookAction
 
+    @validator('action', pre=True)
+    def normalize_action(cls, v):
+        if isinstance(v, WebhookAction):  # If it's already an enum
+            return v.value  # Return just the value part
+        elif isinstance(v, str):
+            return v.upper()
+        return v
+
 class WebhookBase(BaseModel):
     name: Optional[str] = None
     source_type: WebhookSourceType = WebhookSourceType.CUSTOM

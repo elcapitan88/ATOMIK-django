@@ -200,10 +200,24 @@ async def webhook_endpoint(
 
         # Process webhook in background
         webhook_processor = WebhookProcessor(db)
+        
+        # Convert the Pydantic model to a plain dictionary and ensure action is properly formatted
+        processed_payload = payload.dict()
+        
+        # Ensure action is a simple string value
+        if 'action' in processed_payload:
+            # Handle case where it's still the Enum string representation
+            if isinstance(processed_payload['action'], str):
+                if '.' in processed_payload['action'] and 'WEBHOOKACTION' in processed_payload['action']:
+                    processed_payload['action'] = processed_payload['action'].split('.')[-1]
+            # Always ensure it's uppercase
+            processed_payload['action'] = str(processed_payload['action']).upper()
+
+        # Pass the processed payload to the background task with the correct parameter name 'payload'
         background_tasks.add_task(
             webhook_processor.process_webhook,
             webhook=webhook,
-            payload=payload.dict(),
+            payload=processed_payload,  # Use the correct parameter name
             client_ip=client_ip
         )
 
