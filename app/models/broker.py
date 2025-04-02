@@ -1,8 +1,7 @@
 from typing import Optional, Dict, Any
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from sqlalchemy import UniqueConstraint
 from ..db.base_class import Base
 
 class BrokerAccount(Base):
@@ -104,8 +103,17 @@ class BrokerCredentials(Base):
     refresh_fail_count = Column(Integer, default=0)
     last_refresh_attempt = Column(DateTime, nullable=True)
     last_refresh_error = Column(String, nullable=True)
-    # Add custom_data field for additional broker-specific data (like Railway service info)
+    
+    # Keep existing custom_data field
     custom_data = Column(Text, nullable=True)
+    
+    # Add new fields for Digital Ocean servers
+    do_droplet_id = Column(Integer, nullable=True)
+    do_droplet_name = Column(String, nullable=True)
+    do_server_status = Column(String, nullable=True)
+    do_ip_address = Column(String, nullable=True)
+    do_region = Column(String, nullable=True)
+    do_last_status_check = Column(DateTime, nullable=True)
 
     # Relationship to broker account
     account = relationship("BrokerAccount", back_populates="credentials")
