@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     PROD_SERVER_HOST: str = "https://api.atomiktrading.io"
     PROD_FRONTEND_URL: str = "https://www.atomiktrading.io"
     PROD_TRADOVATE_REDIRECT_URI: str = "https://api.atomiktrading.io/api/tradovate/callback"
+
         
     # Database Settings
     DATABASE_URL: str
@@ -106,6 +107,11 @@ class Settings(BaseSettings):
 
     # Redis Settings
     REDIS_URL: Optional[str] = "redis://localhost:6379"
+
+    DIGITAL_OCEAN_API_KEY: Optional[str] = None
+    DIGITAL_OCEAN_REGION: str = "nyc1"
+    DIGITAL_OCEAN_SIZE: str = "s-1vcpu-1gb" 
+    DIGITAL_OCEAN_IMAGE_ID: str = "182556282" 
 
     #Railway
     RAILWAY_API_KEY: Optional[str] = None
