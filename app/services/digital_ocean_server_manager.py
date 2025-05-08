@@ -525,25 +525,25 @@ class DigitalOceanServerManager:
                 db_session.rollback()
     
     async def _check_ibearmy_running(self, ip_address: str) -> bool:
-        """
-        Check if the IBEam service is running on the droplet.
-        
-        Args:
-            ip_address: The IP address of the droplet
-            
-        Returns:
-            bool: True if the service is running, False otherwise
-        """
+        """Check if the IBEam service is running on the droplet."""
         try:
-            # Try to connect to the IBEam health check endpoint
-            url = f"http://{ip_address}:8080/health"
-            response = await self.client.get(url, timeout=5.0)
-            
-            if response.status_code == 200:
-                return True
-            
-            return False
-        except Exception:
+            # Create a custom httpx client that doesn't verify SSL certificates
+            # This is safe because we're only connecting to our own internal services
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                url = f"https://{ip_address}:5000/v1/api/tickle"
+                response = await client.get(url)
+                
+                if response.status_code == 200:
+                    response_data = response.json()
+                    # Look for authentication status in the response
+                    if response_data.get("iserver", {}).get("authStatus", {}).get("authenticated") is True:
+                        logger.info(f"IBEam service running at {ip_address}: authenticated=true")
+                        return True
+                    
+                logger.warning(f"IBEam service at {ip_address} responded but not authenticated")
+                return False
+        except Exception as e:
+            logger.debug(f"IBEam service check failed at {ip_address}: {str(e)}")
             return False
     
     def _generate_user_data(
