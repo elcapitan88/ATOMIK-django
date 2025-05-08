@@ -1,3 +1,4 @@
+# app/core/brokers/implementations/interactivebrokers.py
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import logging
@@ -8,14 +9,14 @@ from ....models.broker import BrokerAccount, BrokerCredentials
 from ....models.user import User
 from ..base import BaseBroker, AuthenticationError, ConnectionError, OrderError
 from ..config import BrokerEnvironment
-from ....services.railway_server_manager import railway_server_manager
+from ....services.digital_ocean_server_manager import digital_ocean_server_manager  # Updated import
 
 logger = logging.getLogger(__name__)
 
 class InteractiveBrokersBroker(BaseBroker):
     """
     Implementation of Interactive Brokers broker interface.
-    This implementation uses the Railway service manager to provision and
+    This implementation uses the Digital Ocean service manager to provision and
     manage dedicated IBEam servers for each user.
     """
 
@@ -42,7 +43,7 @@ class InteractiveBrokersBroker(BaseBroker):
     ) -> BrokerAccount:
         """
         Connect to an Interactive Brokers trading account.
-        This calls the Railway service manager to provision a new IBEam server.
+        This calls the Digital Ocean service manager to provision a new IBEam server.
         """
         try:
             # For IB, we need to check if this account already exists
@@ -59,12 +60,12 @@ class InteractiveBrokersBroker(BaseBroker):
                 if existing_account.credentials and existing_account.credentials.custom_data:
                     try:
                         service_data = json.loads(existing_account.credentials.custom_data)
-                        service_id = service_data.get("railway_service_id")
+                        droplet_id = service_data.get("droplet_id")
                         service_status = service_data.get("status")
                         
-                        if service_id and service_status in ["stopped", "error"]:
+                        if droplet_id and service_status in ["stopped", "off", "error"]:
                             # Start the server
-                            await railway_server_manager.start_server(service_id)
+                            await digital_ocean_server_manager.start_server(droplet_id)
                             
                             # Update status
                             service_data["status"] = "starting"
@@ -74,7 +75,7 @@ class InteractiveBrokersBroker(BaseBroker):
                             
                             self.db.commit()
                     except Exception as e:
-                        logger.error(f"Error restarting IBEam server: {str(e)}")
+                        logger.error(f"Error restarting IBEam server on Digital Ocean: {str(e)}")
                 
                 return existing_account
             
@@ -95,21 +96,21 @@ class InteractiveBrokersBroker(BaseBroker):
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            # Get Railway service ID if available
-            service_id = None
+            # Get Digital Ocean droplet ID if available
+            droplet_id = None
             if account.credentials and account.credentials.custom_data:
                 try:
                     service_data = json.loads(account.credentials.custom_data)
-                    service_id = service_data.get("railway_service_id")
+                    droplet_id = service_data.get("droplet_id")
                 except:
                     pass
             
-            # Delete Railway service if we have an ID
-            if service_id:
+            # Delete Digital Ocean droplet if we have an ID
+            if droplet_id:
                 try:
-                    await railway_server_manager.delete_server(service_id)
+                    await digital_ocean_server_manager.delete_server(droplet_id)
                 except Exception as e:
-                    logger.error(f"Error deleting Railway service {service_id}: {str(e)}")
+                    logger.error(f"Error deleting Digital Ocean droplet {droplet_id}: {str(e)}")
             
             # Update account status
             account.is_active = False
@@ -153,26 +154,26 @@ class InteractiveBrokersBroker(BaseBroker):
             for account in accounts:
                 account_data = account.to_dict()
                 
-                # Add Railway status if available
+                # Add Digital Ocean status if available
                 if account.credentials and account.credentials.custom_data:
                     try:
                         service_data = json.loads(account.credentials.custom_data)
-                        account_data["railway_status"] = service_data.get("status", "unknown")
+                        account_data["digital_ocean_status"] = service_data.get("status", "unknown")
                         
-                        # Fetch current Railway status if possible
-                        service_id = service_data.get("railway_service_id")
-                        if service_id:
+                        # Fetch current Digital Ocean status if possible
+                        droplet_id = service_data.get("droplet_id")
+                        if droplet_id:
                             try:
-                                railway_status = await railway_server_manager.get_server_status(service_id)
+                                do_status = await digital_ocean_server_manager.get_server_status(droplet_id)
                                 
                                 # Update if status has changed
-                                if railway_status.get("status") != service_data.get("status"):
-                                    service_data["status"] = railway_status.get("status")
+                                if do_status.get("status") != service_data.get("status"):
+                                    service_data["status"] = do_status.get("status")
                                     account.credentials.custom_data = json.dumps(service_data)
                                     account.credentials.updated_at = datetime.utcnow()
                                     self.db.commit()
                                     
-                                account_data["railway_status"] = railway_status.get("status", "unknown")
+                                account_data["digital_ocean_status"] = do_status.get("status", "unknown")
                             except:
                                 # Use existing status if fetch fails
                                 pass
@@ -203,27 +204,27 @@ class InteractiveBrokersBroker(BaseBroker):
                 "is_active": account.is_active
             }
             
-            # Add Railway status if available
+            # Add Digital Ocean status if available
             if account.credentials and account.credentials.custom_data:
                 try:
                     service_data = json.loads(account.credentials.custom_data)
-                    result["railway_status"] = service_data.get("status", "unknown")
+                    result["digital_ocean_status"] = service_data.get("status", "unknown")
                     
-                    # Fetch current Railway status if possible
-                    service_id = service_data.get("railway_service_id")
-                    if service_id:
+                    # Fetch current Digital Ocean status if possible
+                    droplet_id = service_data.get("droplet_id")
+                    if droplet_id:
                         try:
-                            railway_status = await railway_server_manager.get_server_status(service_id)
+                            do_status = await digital_ocean_server_manager.get_server_status(droplet_id)
                             
                             # Update if status has changed
-                            if railway_status.get("status") != service_data.get("status"):
-                                service_data["status"] = railway_status.get("status")
+                            if do_status.get("status") != service_data.get("status"):
+                                service_data["status"] = do_status.get("status")
                                 account.credentials.custom_data = json.dumps(service_data)
                                 account.credentials.updated_at = datetime.utcnow()
                                 self.db.commit()
                                 
-                            result["railway_status"] = railway_status.get("status", "unknown")
-                            result["railway_details"] = railway_status
+                            result["digital_ocean_status"] = do_status.get("status", "unknown")
+                            result["digital_ocean_details"] = do_status
                         except:
                             # Use existing status if fetch fails
                             pass
