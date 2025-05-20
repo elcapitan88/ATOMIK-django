@@ -421,6 +421,21 @@ class TradovateBroker(BaseBroker):
                     BrokerAccount.environment == environment
                 ).first()
 
+                # Create new credentials for EACH account
+                credentials = BrokerCredentials(
+                    broker_id=self.broker_id,
+                    credential_type='oauth',
+                    access_token=access_token,
+                    expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
+                    is_valid=True,
+                    last_refresh_attempt=datetime.utcnow(),
+                    refresh_fail_count=0,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                
+                self.db.add(credentials)
+
                 if existing_account:
                     logger.info(f"Updating existing account: {existing_account.account_id}")
                     # Update existing account
@@ -843,6 +858,15 @@ class TradovateBroker(BaseBroker):
 
             logger.info(f"Normalized response: {json.dumps(normalized_response, indent=2)}")
 
+            if raw_response.get('orderId'):
+                order_id = str(raw_response.get('orderId'))
+                from app.services.trading_service import order_monitoring_service
+                await order_monitoring_service.add_order(
+                    order_id=order_id,
+                    account=account,
+                    user_id=account.user_id
+                )
+
             return normalized_response
 
         except Exception as e:
@@ -871,6 +895,71 @@ class TradovateBroker(BaseBroker):
         except Exception as e:
             logger.error(f"Error cancelling order: {str(e)}")
             raise
+
+    async def get_order_status(self, account: BrokerAccount, order_id: str) -> Dict[str, Any]:
+        """Get the current status of an order"""
+        try:
+            # Validate credentials
+            if not account.credentials or not account.credentials.is_valid:
+                raise AuthenticationError("Invalid or expired credentials")
+            
+            api_url = self.api_urls[account.environment]
+            headers = self._get_auth_headers(account.credentials)
+            
+            # Make request to get order details
+            response = await self._make_request(
+                'GET',
+                f"{api_url}/order/get",
+                params={"orderId": int(order_id)},
+                headers=headers
+            )
+            
+            if not response:
+                raise ConnectionError(f"Empty response when fetching order {order_id}")
+            
+            # Check for error response
+            if "failureReason" in response or "failureText" in response:
+                logger.warning(f"Error response for order {order_id}: {response}")
+                return {
+                    "order_id": str(order_id),
+                    "status": "error",
+                    "error_message": response.get("failureText", "Unknown error"),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "raw_response": response
+                }
+            
+            # Map Tradovate order status to our standardized format
+            status_mapping = {
+                "Pending": "pending",
+                "Working": "working", 
+                "Completed": "filled",
+                "Canceled": "cancelled",
+                "Rejected": "rejected",
+                "Expired": "expired"
+            }
+            
+            # Normalize the response with complete information
+            normalized_response = {
+                "order_id": str(order_id),
+                "status": status_mapping.get(response.get("orderStatus", ""), "unknown"),
+                "filled_quantity": response.get("filledQuantity", 0),
+                "remaining_quantity": response.get("remainingQuantity", 0),
+                "average_price": response.get("avgFillPrice"),
+                "timestamp": datetime.utcnow().isoformat(),
+                "raw_response": response
+            }
+            
+            return normalized_response
+            
+        except Exception as e:
+            logger.error(f"Error getting order status for {order_id}: {str(e)}")
+            # Return an error response rather than raising, to help monitoring service continue
+            return {
+                "order_id": str(order_id),
+                "status": "error",
+                "error_message": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }
 
     async def disconnect_account(self, account: BrokerAccount) -> bool:
         """Disconnect a trading account"""
