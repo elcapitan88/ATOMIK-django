@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import jinja2
 import secrets
+import uuid
+from ....models.pending_registration import PendingRegistration
 
 from ....core.security import (
     verify_password, 
@@ -26,6 +28,7 @@ from ....db.base import get_db
 from ....core.config import settings
 from ....services.email.email_password_reset import send_email
 from app.services.promo_code_service import PromoCodeService
+from ....services.email.email_notification import send_welcome_email, send_admin_signup_notification
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,6 +43,7 @@ class ResetPasswordRequest(BaseModel):
 @router.post("/register", response_model=Token)
 async def register_user(
     user_data: dict,
+    background_tasks: BackgroundTasks,  # Add BackgroundTasks parameter
     db: Session = Depends(get_db)
 ):
     """Register a new user with any subscription tier"""
@@ -80,9 +84,12 @@ async def register_user(
         db.add(user)
         db.flush()  # Get ID without committing yet
         
+        # Default to starter tier
+        tier = "starter"
+        
         # If plan data is provided, use it for subscription
         if plan_data:
-            tier = plan_data.get("tier")
+            tier = plan_data.get("tier", "starter")
             if not tier:
                 logger.error(f"Registration attempt missing plan tier: {email}")
                 raise HTTPException(status_code=400, detail="Plan tier is required")
@@ -127,6 +134,21 @@ async def register_user(
         access_token = create_access_token(subject=user.email)
         
         logger.info(f"User registered successfully: {email}")
+        
+        # Send welcome email to user
+        await send_welcome_email(
+            background_tasks=background_tasks,
+            username=username or email.split('@')[0],
+            email=email
+        )
+        
+        # Send notification to admin
+        await send_admin_signup_notification(
+            background_tasks=background_tasks,
+            username=username or email.split('@')[0],
+            email=email,
+            tier=tier
+        )
         
         return {
             "access_token": access_token,
@@ -314,6 +336,7 @@ async def verify_token(current_user: User = Depends(get_current_user)):
 @router.post("/register-starter", response_model=Token)
 async def register_with_starter_plan(
     registration_data: dict,
+    background_tasks: BackgroundTasks,  # Add BackgroundTasks parameter
     db: Session = Depends(get_db)
 ):
     """
@@ -414,6 +437,21 @@ async def register_with_starter_plan(
             db.commit()
             
             logger.info(f"User registered with starter plan: {user.email}")
+            
+            # Send welcome email to user
+            await send_welcome_email(
+                background_tasks=background_tasks,
+                username=username,
+                email=email
+            )
+            
+            # Send notification to admin
+            await send_admin_signup_notification(
+                background_tasks=background_tasks,
+                username=username,
+                email=email,
+                tier="starter"
+            )
             
             return {
                 "access_token": access_token,
@@ -647,6 +685,97 @@ async def register_with_promo_code(
         db.rollback()
         logger.error(f"Registration error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+    
+@router.post("/prepare-registration", response_model=Dict[str, str])
+async def prepare_registration(
+    registration_data: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Prepare registration by storing data server-side before Stripe redirect
+    """
+    try:
+        # Extract registration data
+        email = registration_data.get("email")
+        username = registration_data.get("username")
+        password = registration_data.get("password")
+        plan_tier = registration_data.get("plan")
+        plan_interval = registration_data.get("interval")
+        
+        # Validate required fields
+        if not all([email, username, password, plan_tier, plan_interval]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required registration fields"
+            )
+        
+        # Check if user already exists
+        existing_user = db.query(User).filter(
+            or_(User.email == email, User.username == username)
+        ).first()
+        
+        if existing_user:
+            raise HTTPException(
+                status_code=400,
+                detail="User with this email or username already exists"
+            )
+        
+        # Generate unique session token
+        session_token = str(uuid.uuid4())
+        
+        # Hash the password
+        password_hash = get_password_hash(password)
+        
+        # Store in pending registrations
+        pending_reg = PendingRegistration(
+            session_token=session_token,
+            email=email,
+            username=username,
+            password_hash=password_hash,
+            plan_tier=plan_tier,
+            plan_interval=plan_interval
+        )
+        
+        db.add(pending_reg)
+        db.commit()
+        
+        logger.info(f"Created pending registration for {email} with session token {session_token}")
+        
+        # Create Stripe checkout session with session token in metadata
+        stripe_service = StripeService()
+        checkout_url = await stripe_service.create_checkout_session_with_trial(
+            customer_email=email,
+            tier=plan_tier,
+            interval=plan_interval,
+            success_url=f"{settings.active_stripe_success_url}?session_id={{CHECKOUT_SESSION_ID}}&session_token={session_token}",
+            cancel_url=settings.active_stripe_cancel_url,
+            metadata={
+                'session_token': session_token,
+                'tier': plan_tier,
+                'interval': plan_interval,
+                'username': username,
+                'email': email,
+                'has_trial': 'True'
+            }
+        )
+        
+        # Update pending registration with Stripe session ID if available
+        # (Note: We might need to extract this from the checkout URL or response)
+        
+        return {
+            "session_token": session_token,
+            "checkout_url": checkout_url
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error preparing registration: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to prepare registration: {str(e)}"
+        )
     
 
 @router.post("/apply-promo-code", response_model=Dict[str, Any])

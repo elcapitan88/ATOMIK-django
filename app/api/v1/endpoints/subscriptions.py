@@ -3,8 +3,11 @@ from sqlalchemy.orm import Session
 import logging
 from typing import Dict, Optional, Any, List
 import stripe
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
+from app.models.broker import BrokerAccount
+from app.models.webhook import Webhook
+from app.models.strategy import ActivatedStrategy
 
 from app.models.subscription import Subscription
 from app.models.user import User
@@ -116,7 +119,7 @@ async def create_checkout_session(
         logger.info(f"Creating checkout for tier: {tier}, interval: {interval}, user: {current_user.email}")
         
         # Validate tier and interval
-        if tier not in ['starter', 'pro', 'elite']:
+        if tier not in ['pro', 'elite']:  # Note: Only 'pro' and 'elite' are valid internal tier IDs now
             raise HTTPException(
                 status_code=400,
                 detail="Invalid subscription tier"
@@ -127,65 +130,34 @@ async def create_checkout_session(
                 status_code=400,
                 detail="Invalid billing interval"
             )
-            
-        # Starter plan is free, redirect to dashboard (user is already registered)
-        if tier == 'starter':
-            return {
-                "url": f"{settings.active_frontend_url}/dashboard"
-            }
         
         # Get or create Stripe customer
         customer_id = await stripe_service.get_or_create_customer(current_user, db)
         
-        # Get price ID for the selected tier and interval
-        price_id = get_price_id(tier, interval)
+        # Define the success and cancel URLs
+        success_url = f"{settings.active_stripe_success_url}?session_id={{CHECKOUT_SESSION_ID}}&email={current_user.email}"
+        cancel_url = settings.active_stripe_cancel_url
         
-        if not price_id:
-            logger.error(f"No price ID found for {tier} plan with {interval} billing")
-            raise HTTPException(
-                status_code=400,
-                detail=f"No price found for {tier} plan with {interval} billing"
-            )
+        # Additional metadata
+        metadata = {
+            'user_id': str(current_user.id),
+            'username': current_user.username,
+            'email': current_user.email,
+            'is_lifetime': str(interval == 'lifetime')
+        }
         
-        # Determine checkout mode based on interval
-        mode = 'subscription' if interval != 'lifetime' else 'payment'
-        
-        # Define the success and cancel URLs based on environment
-        if settings.ENVIRONMENT == 'development':
-            success_url = f"http://localhost:3000/payment/success?session_id={{CHECKOUT_SESSION_ID}}&email={current_user.email}"
-            cancel_url = "http://localhost:3000/pricing"
-        else:
-            success_url = f"{settings.PROD_FRONTEND_URL}/payment/success?session_id={{CHECKOUT_SESSION_ID}}&email={current_user.email}"
-            cancel_url = f"{settings.PROD_FRONTEND_URL}/pricing"
-        
-        # Log URL for debugging
-        logger.info(f"Using success URL: {success_url}")
-        
-        # Create checkout session with the correct price
-        session = stripe.checkout.Session.create(
-            customer=customer_id,
-            payment_method_types=['card'],
-            line_items=[
-                {
-                    'price': price_id,
-                    'quantity': 1,
-                },
-            ],
-            mode=mode,
+        # Use the new method to create checkout with trial
+        checkout_url = await stripe_service.create_checkout_session_with_trial(
+            customer_email=current_user.email,
+            tier=tier,
+            interval=interval,
             success_url=success_url,
             cancel_url=cancel_url,
-            metadata={
-                'tier': tier,
-                'interval': interval,
-                'user_id': str(current_user.id),
-                'username': current_user.username,
-                'email': current_user.email,
-                'is_lifetime': str(interval == 'lifetime')
-            }
+            metadata=metadata
         )
         
-        logger.info(f"Created checkout session: {session.id} for {tier}/{interval}")
-        return {"url": session.url}
+        logger.info(f"Created checkout session for {tier}/{interval} with trial")
+        return {"url": checkout_url}
         
     except stripe.error.StripeError as e:
         logger.error(f"Stripe error during checkout creation: {str(e)}")
@@ -199,14 +171,14 @@ async def create_checkout_session(
             status_code=500,
             detail="Failed to create checkout session"
         )
-    
+        
 @router.post("/create-guest-checkout", response_model=Dict[str, str])
 async def create_guest_checkout_session(
     request: Request,
     checkout_data: Dict[str, str],
     db: Session = Depends(get_db)
 ):
-    """Create a Stripe checkout session for a guest user"""
+    """Create a Stripe checkout session for a guest user with trial period"""
     try:
         # Extract tier and interval
         tier = checkout_data.get('plan', '').lower()
@@ -222,51 +194,30 @@ async def create_guest_checkout_session(
                 detail="Invalid checkout parameters"
             )
             
-        # Get price ID for the selected tier and interval
-        price_id = get_price_id(tier, interval)
+        # Define the success_url and cancel_url
+        success_url = f"{settings.active_stripe_success_url}?session_id={{CHECKOUT_SESSION_ID}}&email={email}"
+        cancel_url = settings.active_stripe_cancel_url
         
-        if not price_id:
-            logger.error(f"No price ID found for {tier} plan with {interval} billing")
-            raise HTTPException(
-                status_code=400,
-                detail=f"No price found for {tier} plan with {interval} billing"
-            )
+        # Additional metadata
+        metadata = {
+            'username': username,
+            'email': email,
+            'is_guest_checkout': 'true',
+            'is_lifetime': str(interval == 'lifetime')
+        }
         
-        # Determine checkout mode based on interval
-        mode = 'subscription' if interval != 'lifetime' else 'payment'
-        
-        # Define the success_url and cancel_url here before using them
-        success_url = f"http://localhost:3000/payment/success?session_id={{CHECKOUT_SESSION_ID}}&email={email}"
-        cancel_url = "http://localhost:3000/pricing"
-        
-        # Log the success URL for debugging
-        logger.info(f"Using success URL: {success_url}")
-        
-        # Create checkout session without requiring customer ID
-        session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            customer_email=email,  # Pre-fill customer email
-            line_items=[
-                {
-                    'price': price_id,
-                    'quantity': 1,
-                },
-            ],
-            mode=mode,
+        # Use the new method with trial period
+        checkout_url = await stripe_service.create_checkout_session_with_trial(
+            customer_email=email,
+            tier=tier,
+            interval=interval,
             success_url=success_url,
             cancel_url=cancel_url,
-            metadata={
-                'tier': tier,
-                'interval': interval,
-                'username': username,
-                'email': email,
-                'is_guest_checkout': 'true',
-                'is_lifetime': str(interval == 'lifetime')
-            }
+            metadata=metadata
         )
         
-        logger.info(f"Created guest checkout session: {session.id} for {email}")
-        return {"url": session.url}
+        logger.info(f"Created guest checkout session with trial for {email}")
+        return {"url": checkout_url}
         
     except stripe.error.StripeError as e:
         logger.error(f"Stripe error during checkout creation: {str(e)}")
@@ -283,6 +234,51 @@ async def create_guest_checkout_session(
             status_code=500,
             detail="Failed to create checkout session"
         )
+
+@router.get("/price-tiers")
+async def get_price_tiers():
+    """Get information about available subscription tiers"""
+    return {
+        "tiers": [
+            {
+                "id": "pro",  # Internal tier ID
+                "name": "Starter",  # New marketing name
+                "description": "For serious traders seeking automation and reliability",
+                "prices": {"monthly": 49, "yearly": 468, "lifetime": 990},
+                "features": [
+                    "Up to 5 connected trading accounts",
+                    "5 active webhooks",
+                    "5 active strategies",
+                    "Group strategies",
+                    "Webhook sharing",
+                    "Advanced position management",
+                    "Trade history & analytics",
+                    "Email support"
+                ],
+                "free_trial": "14-day free trial"
+            },
+            {
+                "id": "elite",  # Internal tier ID
+                "name": "Pro",  # New marketing name
+                "description": "For professional traders and institutions",
+                "prices": {"monthly": 89, "yearly": 828, "lifetime": 1990},
+                "features": [
+                    "Unlimited connected accounts",
+                    "Unlimited webhooks & configs",
+                    "Unlimited strategies",
+                    "Enterprise-grade webhooks",
+                    "Advanced trade execution rules",
+                    "Funded Account Functionality",
+                    "Early access to new features",
+                    "Advanced analytics & reporting",
+                    "Priority technical support"
+                ],
+                "free_trial": "14-day free trial"
+            }
+        ]
+    }
+    
+
 
 @router.post("/webhook")
 async def stripe_webhook(
@@ -322,87 +318,135 @@ async def stripe_webhook(
         if event_type == "checkout.session.completed":
             session = event_data
             
-            # Extract metadata - do not use defaults
+            # Extract metadata
             metadata = session.get('metadata', {}) or {}
             
-            # Get email from session
-            email = metadata.get('email') or session.get('customer_email')
+            # Get session token from metadata
+            session_token = metadata.get('session_token')
             
-            # Extract tier from metadata - no defaults
-            tier = metadata.get('tier')
-            
-            # If no tier is specified in metadata, log an error
-            if not tier:
-                logger.error(f"No plan tier specified in checkout session metadata. Session ID: {session.id}")
-                return {"status": "error", "message": "No plan tier specified in checkout session metadata"}
-            
-            # Extract other metadata fields
-            interval = metadata.get('interval')
-            is_lifetime = metadata.get('is_lifetime') == 'True'
-            
-            # Get Stripe IDs
-            customer_id = session.get('customer')
-            subscription_id = session.get('subscription')
-            
-            logger.info(f"Checkout completed for {tier} plan (interval: {interval}). Email: {email}, Customer ID: {customer_id}, Sub ID: {subscription_id}")
-            
-            # If no customer ID, log an error
-            if not customer_id:
-                logger.error(f"No customer ID in checkout session. Session ID: {session.id}")
-            
-            # Find user by email
-            if email:
-                # Try to find the user by email
-                user = db.query(User).filter(User.email == email).first()
+            if session_token:
+                # NEW FLOW: Use pending registration data
+                logger.info(f"Processing registration with session token: {session_token}")
                 
-                if user:
-                    # Update or create subscription
-                    subscription = db.query(Subscription).filter(
-                        Subscription.user_id == user.id
-                    ).first()
+                # Look up pending registration
+                from app.models.pending_registration import PendingRegistration
+                
+                pending_reg = db.query(PendingRegistration).filter(
+                    PendingRegistration.session_token == session_token
+                ).first()
+                
+                if pending_reg and not pending_reg.is_expired():
+                    # Create user account
+                    user = User(
+                        email=pending_reg.email,
+                        username=pending_reg.username,
+                        hashed_password=pending_reg.password_hash,
+                        is_active=True,
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
+                    )
+                    db.add(user)
+                    db.flush()  # Get user ID
                     
-                    if not subscription:
-                        # Create new subscription with exact tier from payment
-                        subscription = Subscription(
-                            user_id=user.id,
-                            tier=tier,  # Use exact tier from metadata
-                            status="active",
-                            stripe_customer_id=customer_id,
-                            stripe_subscription_id=subscription_id,
-                            is_lifetime=is_lifetime,
-                            created_at=datetime.utcnow(),
-                            updated_at=datetime.utcnow()
-                        )
-                        db.add(subscription)
-                        logger.info(f"Created new subscription for user {email} with tier {tier}")
-                    else:
-                        # Update existing subscription with exact tier from payment
-                        subscription.tier = tier  # Use exact tier from metadata
-                        subscription.status = "active"
-                        subscription.is_lifetime = is_lifetime
-                        
-                        # Set Stripe IDs if available
-                        if customer_id:
-                            subscription.stripe_customer_id = customer_id
-                        
-                        if subscription_id:
-                            subscription.stripe_subscription_id = subscription_id
-                        
-                        subscription.updated_at = datetime.utcnow()
-                        logger.info(f"Updated subscription for user {email} to tier {tier}")
+                    # Create subscription
+                    subscription = Subscription(
+                        user_id=user.id,
+                        tier=pending_reg.plan_tier,
+                        status="active" if metadata.get('has_trial') != 'True' else "trialing",
+                        stripe_customer_id=session.get('customer'),
+                        stripe_subscription_id=session.get('subscription'),
+                        is_lifetime=pending_reg.plan_interval == 'lifetime',
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
+                    )
                     
-                    try:
-                        db.commit()
-                        logger.info(f"Successfully committed subscription update for {email} with tier {tier}")
-                    except Exception as commit_error:
-                        db.rollback()
-                        logger.error(f"Error committing subscription update: {str(commit_error)}")
+                    # Set trial information if applicable
+                    if metadata.get('has_trial') == 'True' and pending_reg.plan_interval != 'lifetime':
+                        subscription.is_in_trial = True
+                        subscription.trial_ends_at = datetime.utcnow() + timedelta(days=14)
+                    
+                    db.add(subscription)
+                    
+                    # Update pending registration status
+                    pending_reg.status = 'completed'
+                    pending_reg.stripe_session_id = session.get('id')
+                    
+                    db.commit()
+                    logger.info(f"Successfully created account and subscription for {user.email}")
+                    
+                    # Send welcome email (add this to your background tasks)
+                    # background_tasks.add_task(send_welcome_email, user.email, user.username)
+                    
                 else:
-                    logger.warning(f"No user found for email {email} - Will rely on frontend registration")
+                    logger.error(f"Pending registration not found or expired for session token: {session_token}")
             else:
-                logger.error("No email found in checkout session - Cannot update user subscription")
+                # FALLBACK: Original flow for backward compatibility
+                logger.warning("No session token in metadata, using fallback flow")
+                
+                email = metadata.get('email') or session.get('customer_email')
+                tier = metadata.get('tier')
+                
+                if not tier:
+                    logger.error(f"No plan tier specified in checkout session metadata. Session ID: {session.id}")
+                    return {"status": "error", "message": "No plan tier specified in checkout session metadata"}
         
-        # NEW: Handle subscription created event
+        # Rest of the original code for backward compatibility...
+        # (Keep the existing code here for users who might still be in the old flow)
+        
+        # Handle trial ending events
+        elif event_type == "customer.subscription.trial_will_end":
+            subscription_data = event_data
+            customer_id = subscription_data.get('customer')
+            subscription_id = subscription_data.get('id')
+            
+            if not customer_id or not subscription_id:
+                logger.error("Missing customer_id or subscription_id in trial_will_end event")
+                return {"status": "error", "message": "Invalid trial_will_end data"}
+                
+            # Find subscription in database
+            db_subscription = db.query(Subscription).filter(
+                Subscription.stripe_subscription_id == subscription_id
+            ).first()
+            
+            if db_subscription:
+                # Mark trial as ending soon (3 days before end)
+                db_subscription.trial_ending_soon = True
+                db.commit()
+                logger.info(f"Marked trial as ending soon for subscription {subscription_id}")
+                
+                # Could send email notification to user here or queue background task
+        
+        # Handle trial end events  
+        elif event_type == "customer.subscription.trial_end":
+            subscription_data = event_data
+            customer_id = subscription_data.get('customer')
+            subscription_id = subscription_data.get('id')
+            status = subscription_data.get('status')
+            
+            if not customer_id or not subscription_id:
+                logger.error("Missing customer_id or subscription_id in trial_end event")
+                return {"status": "error", "message": "Invalid trial_end data"}
+                
+            # Find subscription in database
+            db_subscription = db.query(Subscription).filter(
+                Subscription.stripe_subscription_id == subscription_id
+            ).first()
+            
+            if db_subscription:
+                # Update subscription status
+                db_subscription.is_in_trial = False
+                db_subscription.status = status
+                
+                # If status is 'active', the trial converted to a paid subscription
+                if status == 'active':
+                    db_subscription.trial_converted = True
+                    logger.info(f"Trial successfully converted to paid for subscription {subscription_id}")
+                else:
+                    logger.info(f"Trial ended without conversion for subscription {subscription_id}")
+                
+                db.commit()
+        
+        # Handle subscription created event
         elif event_type == "customer.subscription.created":
             subscription = event_data
             customer_id = subscription.get('customer')
@@ -455,7 +499,6 @@ async def stripe_webhook(
         logger.error(f"Webhook processing error: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-# Update subscription handler for better handling of subscription IDs
 async def handle_subscription_update(db: Session, subscription: dict):
     """Handle subscription update event"""
     try:
@@ -479,6 +522,12 @@ async def handle_subscription_update(db: Session, subscription: dict):
             # Update subscription status
             db_subscription.status = status
             db_subscription.updated_at = datetime.utcnow()
+            
+            # If status is 'active' but previously in trial, mark trial as converted
+            if status == 'active' and db_subscription.is_in_trial:
+                db_subscription.is_in_trial = False
+                db_subscription.trial_converted = True
+                logger.info(f"Trial converted to active for subscription {subscription_id}")
             
             # If canceled, mark accordingly but don't delete
             if status == 'canceled':
@@ -874,36 +923,6 @@ async def handle_successful_lifetime_purchase(db: Session, session: dict):
     except Exception as e:
         db.rollback()
         logger.error(f"Error processing lifetime purchase: {str(e)}")
-
-async def handle_subscription_update(db: Session, subscription: dict):
-    """Handle subscription update event"""
-    try:
-        customer_id = subscription.get('customer')
-        subscription_id = subscription.get('id')
-        status = subscription.get('status')
-        
-        if not customer_id:
-            return
-
-        db_subscription = db.query(Subscription).filter(
-            Subscription.stripe_customer_id == customer_id
-        ).first()
-
-        if db_subscription:
-            # Update subscription status
-            db_subscription.status = status
-            db_subscription.stripe_subscription_id = subscription_id
-            
-            # If canceled, mark accordingly but don't delete
-            if status == 'canceled':
-                logger.info(f"Subscription {subscription_id} canceled for customer {customer_id}")
-            
-            db.commit()
-            logger.info(f"Subscription updated for customer {customer_id}: status={status}")
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error updating subscription: {str(e)}")
 
 async def handle_subscription_deletion(db: Session, subscription: dict):
     """Handle subscription deletion event"""

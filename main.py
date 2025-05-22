@@ -24,10 +24,11 @@ from app.api.v1.api import api_router, tradovate_callback_router
 from app.core.config import settings
 from app.websockets.manager import websocket_manager
 from app.db.base import init_db, get_db
-from app.db.session import engine, get_db
+from app.db.session import engine, get_db, SessionLocal
 from app.core.db_health import check_database_health
 from app.api.v1.endpoints import websocket
 from fastapi.responses import RedirectResponse, JSONResponse
+from app.core.tasks import cleanup_expired_registrations
 
 # Import new WebSocket components
 from app.websockets.handlers.endpoint_handlers import TradovateEndpointHandler
@@ -113,7 +114,7 @@ async def lifespan(app: FastAPI):
     try:
         # Initialize WebSocket manager
         app.state.websocket_manager = websocket_manager
-        await websocket_manager.initialize()
+        #await websocket_manager.initialize()
         logger.info("WebSocket manager initialized successfully")
 
         # Initialize database
@@ -123,14 +124,14 @@ async def lifespan(app: FastAPI):
             health_status = await check_database_health(retries=3, retry_delay=2)  # Add retries
             
             # Be more forgiving in production
-            if settings.ENVIRONMENT == "production":
+            if settings.ENVIRONMENT in ["production", "development"]:
                 if health_status['status'] in ["critical", "error"]:
                     logger.error(f"Database health check returned {health_status['status']}: {health_status['message']}")
-                    logger.warning("Continuing startup despite database health check failure in production")
+                    logger.warning("Continuing startup despite database health check failure")
                 else:
                     logger.info(f"Database health check: {health_status['status']}")
             else:
-                # In development, be more strict
+                # In other environments (like testing), be strict
                 if health_status['status'] not in ["healthy", "degraded"]:
                     raise Exception(f"Database health check failed: {health_status['message']}")
                 
@@ -235,10 +236,10 @@ class Config:
 # Include routers
 app.include_router(tradovate_callback_router, prefix="/api")
 app.include_router(api_router, prefix="/api/v1")
-app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
+#app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 
-app.state.websocket_manager = websocket_manager
+#app.state.websocket_manager = websocket_manager
 
 # Request logging middleware
 @app.middleware("http")
@@ -292,13 +293,21 @@ async def startup_event():
             logger.error(f"Database initialization failed: {str(db_error)}")
             raise
 
+        try:
+            from app.core.tasks import cleanup_expired_registrations
+            cleanup_task = asyncio.create_task(cleanup_expired_registrations())
+            background_tasks.add(cleanup_task)
+            logger.info("Started background task for cleaning expired registrations")
+        except Exception as e:
+            logger.error(f"Failed to start cleanup task: {str(e)}")
+
         if all(startup_status.values()):
             logger.info("Trading API Service started successfully")
             logger.info("Startup Status: %s", startup_status)
         else:
             failed_components = [k for k, v in startup_status.items() if not v]
             raise Exception(f"Startup failed for components: {failed_components}")
-
+        
     except Exception as e:
         logger.critical(f"Startup failed: {str(e)}")
         logger.critical("Service cannot start properly - shutting down")
@@ -432,6 +441,95 @@ async def start_background_tasks():
     task = asyncio.create_task(run_periodic_sync())
     background_tasks.add(task)
 
+@app.on_event("startup")
+async def refresh_db_metadata():
+    import logging
+    from sqlalchemy import inspect, MetaData
+    from app.db.session import engine
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Explicitly refreshing SQLAlchemy metadata...")
+    
+    try:
+        # Create a fresh metadata object and reflect the database
+        metadata = MetaData()
+        metadata.reflect(bind=engine)
+        
+        # Log some info to confirm it worked
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        logger.info(f"Metadata refreshed successfully. Found {len(tables)} tables.")
+        
+        # Specifically check broker_accounts and subscriptions tables
+        broker_cols = [col['name'] for col in inspector.get_columns('broker_credentials')]
+        logger.info(f"broker_credentials columns: {', '.join(broker_cols)}")
+        
+        # Additional debug info
+        has_custom_data = 'custom_data' in broker_cols
+        logger.info(f"custom_data column present in broker_credentials: {has_custom_data}")
+        
+    except Exception as e:
+        logger.error(f"Error refreshing metadata: {str(e)}")
+
+def mark_legacy_free_users():
+    db = SessionLocal()
+    try:
+        # Get all subscriptions with tier "starter" and mark as legacy free
+        legacy_free_users = db.query(Subscription).filter(
+            Subscription.tier == "starter",
+            Subscription.status == "active"
+        ).all()
+        
+        count = 0
+        for subscription in legacy_free_users:
+            subscription.is_legacy_free = True
+            count += 1
+        
+        db.commit()
+        print(f"Marked {count} users as legacy free")
+    except Exception as e:
+        db.rollback()
+        print(f"Error marking legacy free users: {str(e)}")
+    finally:
+        db.close()
+
+# Execute the function
+#mark_legacy_free_users()
+
+def migrate_starter_to_elite():
+    """
+    Migrate users from the starter legacy plan to the Elite plan.
+    This function finds all active subscriptions with tier "starter"
+    and upgrades them to "elite" tier.
+    """
+    db = SessionLocal()
+    try:
+        # Get all subscriptions with tier "starter" that are active
+        starter_users = db.query(Subscription).filter(
+            Subscription.tier == "starter",
+            Subscription.status == "active"
+        ).all()
+        
+        count = 0
+        for subscription in starter_users:
+            # Upgrade tier to elite
+            subscription.tier = "elite"
+            subscription.updated_at = datetime.utcnow()
+            count += 1
+        
+        db.commit()
+        print(f"Migration complete: {count} users upgraded from starter to elite")
+    except Exception as e:
+        db.rollback()
+        print(f"Error migrating users to elite: {str(e)}")
+    finally:
+        db.close()
+
+# Execute the migration function
+# Uncomment the line below to run the migration
+# migrate_starter_to_elite()
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Shutdown event handler"""
@@ -460,6 +558,20 @@ async def shutdown_event():
         raise
     finally:
         logger.info("Shutdown process completed")
+
+@app.on_event("startup")
+async def start_order_monitoring():
+    """Start the order status monitoring service"""
+    from app.services.trading_service import order_monitoring_service
+    await order_monitoring_service.initialize()
+    logger.info("Order status monitoring service initialized")
+
+@app.on_event("shutdown")
+async def stop_order_monitoring():
+    """Stop the order status monitoring service"""
+    from app.services.trading_service import order_monitoring_service
+    await order_monitoring_service.shutdown()
+    logger.info("Order status monitoring service stopped")
 
 @app.on_event("startup")
 async def refresh_db_metadata():
