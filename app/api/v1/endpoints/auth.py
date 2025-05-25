@@ -156,7 +156,10 @@ async def register_user(
             "user": {
                 "id": user.id,
                 "email": user.email,
-                "username": user.username
+                "username": user.username,
+                "full_name": user.full_name,
+                "phone": user.phone,
+                "profile_picture": user.profile_picture
             }
         }
     except HTTPException:
@@ -199,7 +202,10 @@ async def login(
                 "user": {
                     "id": user.id,
                     "email": user.email,
-                    "username": user.username
+                    "username": user.username,
+                    "full_name": user.full_name,
+                    "phone": user.phone,
+                    "profile_picture": user.profile_picture
                 }
             }
 
@@ -238,7 +244,10 @@ async def login(
             "user": {
                 "id": user.id,
                 "email": user.email,
-                "username": user.username
+                "username": user.username,
+                "full_name": user.full_name,
+                "phone": user.phone,
+                "profile_picture": user.profile_picture
             }
         }
 
@@ -405,7 +414,10 @@ async def register_with_starter_plan(
                     "user": {
                         "id": existing_user.id,
                         "email": existing_user.email,
-                        "username": existing_user.username
+                        "username": existing_user.username,
+                        "full_name": existing_user.full_name,
+                        "phone": existing_user.phone,
+                        "profile_picture": existing_user.profile_picture
                     }
                 }
 
@@ -463,7 +475,10 @@ async def register_with_starter_plan(
                 "user": {
                     "id": user.id,
                     "email": user.email,
-                    "username": username
+                    "username": username,
+                    "full_name": user.full_name,
+                    "phone": user.phone,
+                    "profile_picture": user.profile_picture
                 }
             }
         except SQLAlchemyError as e:
