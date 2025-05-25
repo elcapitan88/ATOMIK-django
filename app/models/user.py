@@ -17,6 +17,10 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
     
+    # Profile fields
+    profile_picture = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    
     # Add promo_code_id column
     promo_code_id = Column(Integer, ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True)
 

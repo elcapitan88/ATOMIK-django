@@ -260,7 +260,7 @@ async def update_profile(
     """Update user profile information"""
     try:
         # Update allowed fields only
-        allowed_fields = ["full_name", "phone", "username", "email"]
+        allowed_fields = ["full_name", "phone", "username", "email", "profile_picture"]
         update_data = {}
         
         for field in allowed_fields:
@@ -297,6 +297,8 @@ async def update_profile(
                 "username": current_user.username, 
                 "email": current_user.email,
                 "full_name": current_user.full_name,
+                "phone": current_user.phone,
+                "profile_picture": current_user.profile_picture,
                 "is_active": current_user.is_active,
                 "message": "Profile updated successfully"
             }
@@ -323,7 +325,9 @@ async def verify_token(current_user: User = Depends(get_current_user)):
                 "id": current_user.id,
                 "email": current_user.email,
                 "username": current_user.username,
-                "full_name": current_user.full_name
+                "full_name": current_user.full_name,
+                "phone": current_user.phone,
+                "profile_picture": current_user.profile_picture
             }
         }
     except Exception as e:
