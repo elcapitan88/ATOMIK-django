@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_user_from_token
 from app.models.subscription import Subscription
 from app.models.user import User
-from fastapi import Request, HTTPException, FastAPI, Depends, WebSocket,WebSocketDisconnect
+from fastapi import Request, HTTPException, FastAPI, Depends
 from datetime import datetime
 
 # Standard library imports
@@ -22,23 +22,12 @@ from sqlalchemy.exc import SQLAlchemyError
 # Local imports
 from app.api.v1.api import api_router, tradovate_callback_router
 from app.core.config import settings
-from app.websockets.manager import websocket_manager
 from app.db.base import init_db, get_db
 from app.db.session import engine, get_db, SessionLocal
 from app.core.db_health import check_database_health
-from app.api.v1.endpoints import websocket
 from fastapi.responses import RedirectResponse, JSONResponse
 from app.core.tasks import cleanup_expired_registrations
 
-# Import new WebSocket components
-from app.websockets.handlers.endpoint_handlers import TradovateEndpointHandler
-from app.websockets.handlers.event_handlers import TradovateEventHandler
-from app.websockets.handlers.webhook_handlers import TradovateWebhookHandler
-from app.websockets.handlers.order_executor import TradovateOrderExecutor
-from app.websockets.monitoring.monitor import MonitoringService
-from app.websockets.scaling.resource_manager import ResourceManager
-from app.websockets.errors import WebSocketError, handle_websocket_error
-from app.websockets.websocket_config import WebSocketConfig
 
 # Configure logging
 log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
@@ -96,9 +85,6 @@ async def cleanup_on_failed_startup():
                 except asyncio.CancelledError:
                     pass
         
-        # Cleanup WebSocket manager if initialized
-        global websocket_manager
-        await websocket_manager.cleanup()
             
         # Close database connections
         if engine is not None:
@@ -112,10 +98,6 @@ async def cleanup_on_failed_startup():
 async def lifespan(app: FastAPI):
     """Application lifespan manager for handling startup and shutdown events"""
     try:
-        # Initialize WebSocket manager
-        app.state.websocket_manager = websocket_manager
-        #await websocket_manager.initialize()
-        logger.info("WebSocket manager initialized successfully")
 
         # Initialize database
         try:
@@ -168,9 +150,6 @@ async def lifespan(app: FastAPI):
                     except asyncio.CancelledError:
                         pass
             
-            # Cleanup WebSocket manager
-            if hasattr(app.state, 'websocket_manager'):
-                await websocket_manager.cleanup()
             
             # Close database connections - synchronous version
             from app.db.session import engine
@@ -236,10 +215,8 @@ class Config:
 # Include routers
 app.include_router(tradovate_callback_router, prefix="/api")
 app.include_router(api_router, prefix="/api/v1")
-#app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 
-#app.state.websocket_manager = websocket_manager
 
 # Request logging middleware
 @app.middleware("http")
@@ -263,22 +240,9 @@ async def startup_event():
     logger.info("Starting Trading API Service")
     startup_status = {
         "database": False,
-        "websocket_manager": False  # Add WebSocket manager status
     }
 
     try:
-        # Step 1: Initialize WebSocket manager
-        try:
-            logger.info("Initializing WebSocket manager...")
-            app.state.websocket_manager = websocket_manager
-            initialized = await websocket_manager.initialize()
-            if not initialized:
-                raise Exception("WebSocket manager initialization failed")
-            startup_status["websocket_manager"] = True
-            logger.info("WebSocket manager initialized successfully")
-        except Exception as ws_error:
-            logger.error(f"WebSocket manager initialization failed: {str(ws_error)}")
-            raise
 
         # Step 2: Initialize database (existing functionality)
         try:
@@ -629,14 +593,12 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Check API and database health"""
-    websocket_manager = app.state.websocket_manager
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version": "1.0.0",
         "components": {
             "database": await check_database_health(),  # Make sure to await this
-            "websocket": websocket_manager.get_status(),
             "background_tasks": {
                 "total": len(background_tasks),
                 "active": len([t for t in background_tasks if not t.done()]),

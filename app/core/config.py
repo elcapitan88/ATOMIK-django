@@ -92,15 +92,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 90
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
     
-    # WebSocket Settings
+    # Webhook Settings
     WEBHOOK_SECRET_KEY: str = secrets.token_urlsafe(32)
-    WEBSOCKET_MAX_CONNECTIONS: int = 1000
-    WEBSOCKET_RATE_LIMIT: int = 100
-    WEBSOCKET_PING_INTERVAL: int = 30
-    WEBSOCKET_PING_TIMEOUT: int = 10
-    WEBSOCKET_HEARTBEAT_INTERVAL: int = 30
-    WEBSOCKET_RECONNECT_ATTEMPTS: int = 3
-    WEBSOCKET_RECONNECT_DELAY: int = 5
 
     # CORS Settings
     CORS_ORIGINS: str = "http://localhost:3000"

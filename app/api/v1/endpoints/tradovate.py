@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 
 # FastAPI imports
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse, JSONResponse
 
 # SQLAlchemy imports
@@ -26,8 +26,6 @@ from ....models.broker import BrokerAccount, BrokerCredentials
 from ....core.brokers.base import BaseBroker
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from ....core.config import settings
-# Update WebSocket related imports
-from app.websockets.manager import websocket_manager
 
 
 __all__ = ['router', 'tradovate_callback'] 
@@ -119,9 +117,9 @@ async def tradovate_callback(
         if not state:
             logger.error("Missing state parameter")
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/dashboard?connection_status=error&message=Missing state parameter",
-                status_code=302
-            )
+            url=f"{settings.active_frontend_url}/dashboard?connection_status=error&message={str(e)}",
+            status_code=302
+        )
 
         # Decode and validate state token
         try:
@@ -137,9 +135,9 @@ async def tradovate_callback(
         except Exception as e:
             logger.error(f"State validation failed: {str(e)}")
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/dashboard?connection_status=error&message=Invalid state parameter",
-                status_code=302
-            )
+            url=f"{settings.active_frontend_url}/dashboard?connection_status=error&message={str(e)}",
+            status_code=302
+        )
 
         # Get broker instance
         broker = BaseBroker.get_broker_instance("tradovate", db)
@@ -150,69 +148,18 @@ async def tradovate_callback(
         logger.info(f"OAuth callback successful: Connected {len(result['accounts'])} accounts")
 
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/dashboard?connection_status=success&accounts={len(result['accounts'])}",
-            status_code=302
-        )
-
+        url=f"{settings.active_frontend_url}/dashboard?connection_status=error&message={str(e)}",
+        status_code=302
+    )
     except Exception as e:
         logger.error(f"OAuth callback processing failed: {str(e)}")
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/dashboard?connection_status=error&message={str(e)}",
-            status_code=302
-        )
+        url=f"{settings.active_frontend_url}/dashboard?connection_status=error&message={str(e)}",
+        status_code=302
+    )
     finally:
         logger.info("=== OAuth Callback Processing Completed ===")
 
-@router.websocket("/ws/{account_id}")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    account_id: str,
-    token: str = Query(...),
-    db: Session = Depends(get_db)
-):
-    """WebSocket endpoint for real-time trading data"""
-    logger.info(f"WebSocket connection attempt for account: {account_id}")
-    
-    try:
-        # Authenticate user
-        user = await get_current_user(db=db, token=token)
-        if not user:
-            logger.warning("WebSocket authentication failed")
-            await websocket.close(code=4001)
-            return
-
-        # Verify account ownership
-        account = db.query(BrokerAccount).filter(
-            BrokerAccount.account_id == account_id,
-            BrokerAccount.user_id == user.id,
-            BrokerAccount.is_active == True
-        ).first()
-
-        if not account:
-            logger.warning(f"Account verification failed: {account_id}")
-            await websocket.close(code=4003)
-            return
-
-        logger.info(f"WebSocket connection accepted for account {account_id}")
-        await websocket.accept()
-
-        try:
-            while True:
-                data = await websocket.receive_json()
-                # Process websocket data here
-                await websocket.send_json({"status": "received", "data": data})
-        except WebSocketDisconnect:
-            logger.info(f"WebSocket disconnected for account {account_id}")
-        except Exception as e:
-            logger.error(f"WebSocket error: {str(e)}")
-            await websocket.close(code=4000)
-
-    except Exception as e:
-        logger.error(f"WebSocket initialization error: {str(e)}")
-        try:
-            await websocket.close(code=4000)
-        except:
-            pass
 
 # In endpoints/tradovate.py
 @router.get("/routes-debug")

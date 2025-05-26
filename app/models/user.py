@@ -28,7 +28,6 @@ class User(Base):
     webhooks = relationship("Webhook", back_populates="user", cascade="all, delete-orphan")
     broker_accounts = relationship("BrokerAccount", back_populates="user", cascade="all, delete-orphan")
     strategies = relationship("ActivatedStrategy", back_populates="user", cascade="all, delete-orphan")
-    websocket_connections = relationship("WebSocketConnection", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("Subscription", back_populates="user", uselist=False)
     orders = relationship("Order", back_populates="user", cascade="all, delete-orphan")
     support_tickets = relationship("SupportTicketLog", back_populates="user")
