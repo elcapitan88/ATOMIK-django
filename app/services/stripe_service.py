@@ -1,4 +1,3 @@
-# app/services/stripe_service.py
 import stripe
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -119,6 +118,102 @@ class StripeService:
                 detail="Internal server error during customer management"
             )
 
+    async def create_checkout_session_with_trial(
+        self, 
+        customer_email: str, 
+        tier: str, 
+        interval: str, 
+        success_url: str, 
+        cancel_url: str,
+        metadata: dict = None
+    ) -> str:
+        """
+        Create a Stripe checkout session with a 14-day trial period
+        
+        Args:
+            customer_email: Customer's email
+            tier: Subscription tier (internal id - 'pro' or 'elite')
+            interval: Billing interval (monthly, yearly, lifetime)
+            success_url: URL to redirect on success
+            cancel_url: URL to redirect on cancel
+            metadata: Additional metadata for the session
+            
+        Returns:
+            str: Checkout session URL
+        """
+        try:
+            # Get price ID based on tier and interval
+            price_id = self._get_price_id(tier, interval)
+            if not price_id:
+                raise ValueError(f"No price found for tier {tier} with interval {interval}")
+            
+            # Determine if we should use a trial period
+            # Note: Lifetime plans should not have trials
+            use_trial = interval != 'lifetime'
+            
+            # Build base metadata
+            base_metadata = {
+                'tier': tier,
+                'interval': interval,
+                'has_trial': str(use_trial)
+            }
+            
+            # Merge with custom metadata
+            if metadata:
+                base_metadata.update(metadata)
+            
+            # Create checkout session parameters
+            session_params = {
+                'payment_method_types': ['card'],
+                'line_items': [
+                    {
+                        'price': price_id,
+                        'quantity': 1,
+                    },
+                ],
+                'mode': 'subscription' if interval != 'lifetime' else 'payment',
+                'success_url': success_url,
+                'cancel_url': cancel_url,
+                'metadata': base_metadata,
+                'customer_email': customer_email
+            }
+            
+            # Add trial period for subscription mode
+            if use_trial and interval != 'lifetime':
+                session_params['subscription_data'] = {
+                    'trial_period_days': 14
+                }
+            
+            # Create session
+            session = stripe.checkout.Session.create(**session_params)
+            
+            return session.url
+            
+        except stripe.error.StripeError as e:
+            self.logger.error(f"Stripe API error: {str(e)}")
+            raise
+    
+    def _get_price_id(self, tier: str, interval: str) -> str:
+        """
+        Get the Stripe Price ID for a specific tier and interval
+        
+        Note: Here the tier is the internal tier ID (pro, elite)
+              not the marketing name (Starter, Pro)
+        """
+        price_mapping = {
+            # Pro tier (now marketed as "Starter")
+            ('pro', 'monthly'): settings.STRIPE_PRICE_PRO_MONTHLY,
+            ('pro', 'yearly'): settings.STRIPE_PRICE_PRO_YEARLY,
+            ('pro', 'lifetime'): settings.STRIPE_PRICE_PRO_LIFETIME,
+            
+            # Elite tier (now marketed as "Pro")
+            ('elite', 'monthly'): settings.STRIPE_PRICE_ELITE_MONTHLY,
+            ('elite', 'yearly'): settings.STRIPE_PRICE_ELITE_YEARLY,
+            ('elite', 'lifetime'): settings.STRIPE_PRICE_ELITE_LIFETIME,
+        }
+        
+        return price_mapping.get((tier, interval))
+
     async def create_portal_session(self, customer_id: str) -> str:
         """
         Create a Stripe Customer Portal session.
@@ -211,6 +306,23 @@ class StripeService:
                             'email': subscription.user.email
                         }
                     )
+                    
+            # Add handling for trial-related events
+            elif event_type == "customer.subscription.trial_will_end":
+                # Handle trial ending soon notification
+                subscription_id = data.get('id')
+                customer_id = data.get('customer')
+                
+                if subscription_id and customer_id:
+                    db_subscription = db.query(Subscription).filter(
+                        Subscription.stripe_subscription_id == subscription_id
+                    ).first()
+                    
+                    if db_subscription:
+                        # Update the subscription to reflect trial ending soon
+                        db_subscription.trial_ending_soon = True
+                        db.commit()
+                        self.logger.info(f"Marked trial as ending soon for subscription {subscription_id}")
 
         except Exception as e:
             self.logger.error(f"Error handling webhook {event_type}: {str(e)}")
