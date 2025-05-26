@@ -1,12 +1,13 @@
 # app/core/subscription_tiers.py
 from enum import Enum
 from typing import Dict, Any, Optional
+from datetime import datetime, timedelta
 
 class SubscriptionTier(str, Enum):
     """Enumeration of available subscription tiers"""
-    STARTER = "starter"
-    PRO = "pro"  
-    ELITE = "elite"
+    STARTER = "starter"  # This will now be for grandfathered free users only
+    PRO = "pro"         # This becomes the new "Starter" tier (with old Pro features)
+    ELITE = "elite"     # This becomes the new "Pro" tier (with old Elite features)
 
 # Define resource limits for each tier
 TIER_LIMITS = {
@@ -17,20 +18,27 @@ TIER_LIMITS = {
         "group_strategies_allowed": False,
         "can_share_webhooks": False,
     },
-    SubscriptionTier.PRO: {
+    SubscriptionTier.PRO: {  # Now the new "Starter" tier with old Pro limits
         "connected_accounts": 5,
         "active_webhooks": 5, 
         "active_strategies": 5,
         "group_strategies_allowed": True,
         "can_share_webhooks": True,
     },
-    SubscriptionTier.ELITE: {
+    SubscriptionTier.ELITE: {  # Now the new "Pro" tier with old Elite limits
         "connected_accounts": float('inf'),  # Unlimited
         "active_webhooks": float('inf'),     # Unlimited
         "active_strategies": float('inf'),   # Unlimited
         "group_strategies_allowed": True,
         "can_share_webhooks": True,
     }
+}
+
+# Marketing name mapping for the new structure
+TIER_DISPLAY_NAMES = {
+    SubscriptionTier.STARTER: "Legacy Free",  # For grandfathered users
+    SubscriptionTier.PRO: "Starter",          # New display name
+    SubscriptionTier.ELITE: "Pro"             # New display name
 }
 
 def get_tier_limit(tier: str, resource: str) -> int:
@@ -94,3 +102,32 @@ def check_resource_limit(tier: str, resource: str, current_count: int) -> bool:
         return True
         
     return current_count < limit
+
+def is_in_trial_period(subscription_created_at: datetime) -> bool:
+    """
+    Check if a subscription is still in the trial period
+    
+    Args:
+        subscription_created_at: When the subscription was created
+        
+    Returns:
+        bool: True if in trial period, False otherwise
+    """
+    if not subscription_created_at:
+        return False
+        
+    trial_end_date = subscription_created_at + timedelta(days=14)
+    return datetime.utcnow() <= trial_end_date
+
+def get_tier_display_name(tier: str) -> str:
+    """
+    Get the marketing display name for a tier
+    
+    Args:
+        tier: Internal tier name (starter, pro, elite)
+        
+    Returns:
+        str: Display name for the tier
+    """
+    tier_enum = SubscriptionTier(tier.lower()) if isinstance(tier, str) else tier
+    return TIER_DISPLAY_NAMES.get(tier_enum, tier)
