@@ -237,10 +237,10 @@ class FeatureFlagService:
             from app.models.user import User
             user = self.db.query(User).filter(User.id == user_id).first()
             
-            if user and user.app_role:
-                if "Admin" in target_roles and user.app_role == "admin":
+            if user:
+                if "Admin" in target_roles and user.is_admin():
                     return True
-                if "Beta Tester" in target_roles and user.app_role == "beta_tester":
+                if "Beta Tester" in target_roles and user.is_beta_tester():
                     return True
             
             # Also check chat roles for backwards compatibility
