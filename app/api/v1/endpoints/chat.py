@@ -60,12 +60,14 @@ from app.services.chat_role_service import (
     sync_existing_beta_testers
 )
 from app.services.chat_service import initialize_default_channels
+from app.services.feature_flag_service import require_member_chat
 
 router = APIRouter()
 
 
 # Channel Management
 @router.get("/channels", response_model=List[ChatChannelWithUnreadCount])
+@require_member_chat
 async def get_channels(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -172,6 +174,7 @@ async def update_channel(
 
 # Message Management
 @router.get("/channels/{channel_id}/messages", response_model=ChatMessageList)
+@require_member_chat
 async def get_channel_messages(
     channel_id: int,
     limit: int = Query(50, ge=1, le=100),
@@ -295,6 +298,7 @@ async def get_channel_messages(
 
 
 @router.post("/channels/{channel_id}/messages", response_model=ChatMessageSchema)
+@require_member_chat
 async def send_message(
     channel_id: int,
     message_data: ChatMessageCreate,

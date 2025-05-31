@@ -140,6 +140,14 @@ class FeatureFlagService:
                 rollout_percentage=5,
                 description="Preview of upcoming mobile application features",
                 metadata={"category": "App Features", "priority": "medium"}
+            ),
+            "member-chat": FeatureConfig(
+                name="member-chat",
+                status=FeatureStatus.BETA,
+                rollout_strategy=RolloutStrategy.ROLE_BASED,
+                target_roles=["Admin", "Beta Tester"],
+                description="Real-time member chat system for community interaction",
+                metadata={"category": "Communication", "priority": "high"}
             )
         }
     
@@ -437,3 +445,4 @@ require_new_dashboard = create_feature_flag_decorator("new-dashboard")
 require_experimental_trading = create_feature_flag_decorator("experimental-trading")
 require_ai_insights = create_feature_flag_decorator("ai-insights")
 require_broker_integration_v2 = create_feature_flag_decorator("broker-integration-v2")
+require_member_chat = create_feature_flag_decorator("member-chat")
