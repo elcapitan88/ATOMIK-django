@@ -159,7 +159,8 @@ async def register_user(
                 "username": user.username,
                 "full_name": user.full_name,
                 "phone": user.phone,
-                "profile_picture": user.profile_picture
+                "profile_picture": user.profile_picture,
+                "app_role": user.app_role
             }
         }
     except HTTPException:
@@ -205,7 +206,8 @@ async def login(
                     "username": user.username,
                     "full_name": user.full_name,
                     "phone": user.phone,
-                    "profile_picture": user.profile_picture
+                    "profile_picture": user.profile_picture,
+                    "app_role": user.app_role or "user"
                 }
             }
 
@@ -247,7 +249,8 @@ async def login(
                 "username": user.username,
                 "full_name": user.full_name,
                 "phone": user.phone,
-                "profile_picture": user.profile_picture
+                "profile_picture": user.profile_picture,
+                "app_role": user.app_role or "user"
             }
         }
 
@@ -308,6 +311,7 @@ async def update_profile(
                 "full_name": current_user.full_name,
                 "phone": current_user.phone,
                 "profile_picture": current_user.profile_picture,
+                "app_role": current_user.app_role,
                 "is_active": current_user.is_active,
                 "message": "Profile updated successfully"
             }
@@ -336,7 +340,8 @@ async def verify_token(current_user: User = Depends(get_current_user)):
                 "username": current_user.username,
                 "full_name": current_user.full_name,
                 "phone": current_user.phone,
-                "profile_picture": current_user.profile_picture
+                "profile_picture": current_user.profile_picture,
+                "app_role": current_user.app_role or "user"
             }
         }
     except Exception as e:
@@ -417,7 +422,8 @@ async def register_with_starter_plan(
                         "username": existing_user.username,
                         "full_name": existing_user.full_name,
                         "phone": existing_user.phone,
-                        "profile_picture": existing_user.profile_picture
+                        "profile_picture": existing_user.profile_picture,
+                        "app_role": existing_user.app_role
                     }
                 }
 
@@ -478,7 +484,8 @@ async def register_with_starter_plan(
                     "username": username,
                     "full_name": user.full_name,
                     "phone": user.phone,
-                    "profile_picture": user.profile_picture
+                    "profile_picture": user.profile_picture,
+                    "app_role": user.app_role
                 }
             }
         except SQLAlchemyError as e:
@@ -694,7 +701,11 @@ async def register_with_promo_code(
             "user": {
                 "id": user.id,
                 "email": user.email,
-                "username": user.username
+                "username": user.username,
+                "full_name": user.full_name,
+                "phone": user.phone,
+                "profile_picture": user.profile_picture,
+                "app_role": user.app_role
             },
             "promo_code_applied": promo_code_applied
         }

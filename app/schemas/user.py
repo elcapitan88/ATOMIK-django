@@ -21,6 +21,7 @@ class UserOut(UserBase):
     id: int
     is_active: bool
     profile_picture: Optional[str] = None
+    app_role: Optional[str] = None
 
     class Config:
         from_attributes = True
