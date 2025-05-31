@@ -148,6 +148,14 @@ class FeatureFlagService:
                 target_roles=["Admin", "Beta Tester"],
                 description="Real-time member chat system for community interaction",
                 metadata={"category": "Communication", "priority": "high"}
+            ),
+            "strategy-builder": FeatureConfig(
+                name="strategy-builder",
+                status=FeatureStatus.BETA,
+                rollout_strategy=RolloutStrategy.ROLE_BASED,
+                target_roles=["Admin"],
+                description="Advanced strategy builder with drag-drop interface and AI integration",
+                metadata={"category": "Trading Features", "priority": "high"}
             )
         }
     
@@ -471,3 +479,4 @@ require_experimental_trading = create_feature_flag_decorator("experimental-tradi
 require_ai_insights = create_feature_flag_decorator("ai-insights")
 require_broker_integration_v2 = create_feature_flag_decorator("broker-integration-v2")
 require_member_chat = create_feature_flag_decorator("member-chat")
+require_strategy_builder = create_feature_flag_decorator("strategy-builder")
