@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.core.subscription_tiers import SubscriptionTier
 from app.core.security import get_current_user
 from app.core.upgrade_prompts import upgrade_exception, UpgradeReason, add_upgrade_headers
+from app.services.chat_role_service import is_user_beta_tester as is_user_chat_beta_tester, is_user_admin as is_user_chat_admin, is_user_moderator as is_user_chat_moderator
 
 logger = logging.getLogger(__name__)
 
@@ -308,3 +309,128 @@ def check_rate_limit(limit_type: str):
                 
         return wrapper
     return decorator
+
+
+def check_beta_access(feature_name: Optional[str] = None):
+    """
+    Decorator to check if user has beta tester access
+    
+    Args:
+        feature_name: Optional specific beta feature name to check
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(*args, db=Depends(get_db), current_user=None, response: Response = None, **kwargs):
+            try:
+                if not current_user:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Authentication required"
+                    )
+                
+                # Check if user has beta access via app_role first, then chat roles as fallback
+                has_beta_access = (
+                    current_user.is_beta_tester() or  # Check app_role first
+                    await is_user_chat_admin(db, current_user.id) or  # Chat admin role
+                    await is_user_chat_moderator(db, current_user.id) or  # Chat moderator role
+                    await is_user_chat_beta_tester(db, current_user.id)  # Chat beta tester role
+                )
+                
+                if not has_beta_access:
+                    logger.warning(f"Beta access denied: user {current_user.id}, feature {feature_name}")
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Beta tester access required for this feature"
+                    )
+                
+                return await func(*args, current_user=current_user, db=db, response=response if response else None, **kwargs)
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Beta access check error: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Error checking beta access"
+                )
+                
+        return wrapper
+    return decorator
+
+
+async def check_beta_feature_access(db, user_id: int, feature_name: str, user=None) -> bool:
+    """
+    Check if a user has access to a specific beta feature
+    
+    Args:
+        db: Database session
+        user_id: User ID to check
+        feature_name: Beta feature name
+        user: Optional User object to avoid additional queries
+    
+    Returns:
+        bool: True if user has access, False otherwise
+    """
+    try:
+        # If user object provided, check app_role first
+        if user:
+            if user.is_beta_tester():  # This includes admin, moderator, beta_tester
+                return True
+        
+        # Fallback to chat roles for backwards compatibility
+        if await is_user_chat_admin(db, user_id) or await is_user_chat_moderator(db, user_id):
+            return True
+        
+        # Beta testers have access to beta features
+        if await is_user_chat_beta_tester(db, user_id):
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking beta feature access: {str(e)}")
+        return False
+
+
+async def get_user_beta_features(db, user_id: int, user=None) -> List[str]:
+    """
+    Get list of beta features available to a user
+    
+    Args:
+        db: Database session
+        user_id: User ID
+    
+    Returns:
+        List[str]: List of available beta feature names
+    """
+    try:
+        # Define available beta features
+        all_beta_features = [
+            "advanced-analytics",
+            "new-dashboard",
+            "experimental-trading",
+            "ai-insights",
+            "advanced-charts"
+        ]
+        
+        # Check if user has beta access
+        has_beta_access = await check_beta_feature_access(db, user_id, "", user)
+        
+        if has_beta_access:
+            return all_beta_features
+        else:
+            return []
+            
+    except Exception as e:
+        logger.error(f"Error getting user beta features: {str(e)}")
+        return []
+
+
+# Beta feature constants
+BETA_FEATURES = {
+    "ADVANCED_ANALYTICS": "advanced-analytics",
+    "NEW_DASHBOARD": "new-dashboard", 
+    "EXPERIMENTAL_TRADING": "experimental-trading",
+    "AI_INSIGHTS": "ai-insights",
+    "ADVANCED_CHARTS": "advanced-charts"
+}

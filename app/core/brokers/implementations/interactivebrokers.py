@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import logging
 import json
+import httpx
 from sqlalchemy.orm import Session
 
 from ....models.broker import BrokerAccount, BrokerCredentials
@@ -24,6 +25,77 @@ class InteractiveBrokersBroker(BaseBroker):
         super().__init__(broker_id, db)
         self.broker_id = broker_id
         self.db = db
+        # HTTP client for IBEam communication
+        self.http_client = httpx.AsyncClient(verify=False, timeout=30.0)
+
+    async def _get_ibeam_url(self, account: BrokerAccount) -> Optional[str]:
+        """Get the IBEam server URL from account credentials"""
+        if not account.credentials or not account.credentials.custom_data:
+            return None
+            
+        try:
+            service_data = json.loads(account.credentials.custom_data)
+            ip_address = service_data.get("ip_address")
+            
+            # If no IP address, try to get it from Digital Ocean
+            if not ip_address:
+                droplet_id = service_data.get("droplet_id")
+                if droplet_id:
+                    status = await digital_ocean_server_manager.get_server_status(droplet_id)
+                    ip_address = status.get("ip_address")
+                    
+                    # Update the stored IP address
+                    if ip_address:
+                        service_data["ip_address"] = ip_address
+                        account.credentials.custom_data = json.dumps(service_data)
+                        self.db.commit()
+            
+            if ip_address:
+                return f"https://{ip_address}:5000/v1/api"
+                
+        except Exception as e:
+            logger.error(f"Error getting IBEam URL: {str(e)}")
+            
+        return None
+
+    async def _check_ibeam_auth(self, base_url: str) -> bool:
+        """Check if IBEam server is authenticated"""
+        try:
+            response = await self.http_client.get(f"{base_url}/tickle")
+            data = response.json()
+            return data.get("iserver", {}).get("authStatus", {}).get("authenticated", False)
+        except Exception as e:
+            logger.error(f"Error checking IBEam auth: {str(e)}")
+            return False
+
+    async def _search_contract(self, base_url: str, symbol: str) -> Optional[int]:
+        """Search for contract ID by symbol"""
+        try:
+            # For futures, we need to parse the symbol
+            # Example: ESZ24 -> ES (root) + Z24 (month/year)
+            if len(symbol) >= 4:
+                root = symbol[:2]
+                
+                # Search for the contract
+                response = await self.http_client.get(
+                    f"{base_url}/iserver/secdef/search",
+                    params={"symbol": root, "secType": "FUT"}
+                )
+                
+                contracts = response.json()
+                if contracts and len(contracts) > 0:
+                    # Find the specific contract by matching the full symbol
+                    for contract in contracts:
+                        if contract.get("symbol") == symbol:
+                            return contract.get("conid")
+                    
+                    # If exact match not found, return first contract
+                    return contracts[0].get("conid")
+                    
+        except Exception as e:
+            logger.error(f"Error searching contract: {str(e)}")
+            
+        return None
 
     async def authenticate(self, credentials: Dict[str, Any]) -> BrokerCredentials:
         """
@@ -238,58 +310,162 @@ class InteractiveBrokersBroker(BaseBroker):
             raise ConnectionError(str(e))
 
     async def get_positions(self, account: BrokerAccount) -> List[Dict[str, Any]]:
-        """
-        Get current positions for an account.
-        This would call the IBEam server API.
-        """
+        """Get current positions from IBEam server"""
         try:
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            # This would call the IBEam server API to get positions
-            # For now, return empty list as a placeholder
+            base_url = await self._get_ibeam_url(account)
+            if not base_url:
+                return []
+            
+            # Get positions from IBEam
+            response = await self.http_client.get(
+                f"{base_url}/portfolio/{account.account_id}/positions/0"
+            )
+            
+            if response.status_code == 200:
+                positions = response.json()
+                
+                # Normalize positions
+                normalized = []
+                for pos in positions:
+                    normalized.append({
+                        "symbol": pos.get("contractDesc", ""),
+                        "quantity": pos.get("position", 0),
+                        "side": "long" if pos.get("position", 0) > 0 else "short",
+                        "entry_price": pos.get("avgCost", 0),
+                        "current_price": pos.get("mktPrice", 0),
+                        "unrealized_pnl": pos.get("unrealizedPnl", 0),
+                        "realized_pnl": pos.get("realizedPnl", 0)
+                    })
+                
+                return normalized
+                
             return []
             
         except Exception as e:
             logger.error(f"Error getting positions: {str(e)}")
-            raise ConnectionError(str(e))
+            return []
 
     async def get_orders(self, account: BrokerAccount) -> List[Dict[str, Any]]:
-        """
-        Get orders for an account.
-        This would call the IBEam server API.
-        """
+        """Get orders from IBEam server"""
         try:
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            # This would call the IBEam server API to get orders
-            # For now, return empty list as a placeholder
+            base_url = await self._get_ibeam_url(account)
+            if not base_url:
+                return []
+            
+            # Get live orders
+            response = await self.http_client.get(
+                f"{base_url}/iserver/account/orders"
+            )
+            
+            if response.status_code == 200:
+                orders = response.json()
+                
+                # Normalize orders
+                normalized = []
+                for order in orders.get("orders", []):
+                    normalized.append({
+                        "order_id": order.get("orderId"),
+                        "status": order.get("status", "").lower(),
+                        "symbol": order.get("ticker", ""),
+                        "side": order.get("side", "").lower(),
+                        "quantity": order.get("totalSize", 0),
+                        "filled_quantity": order.get("filledQuantity", 0),
+                        "order_type": order.get("orderType", ""),
+                        "price": order.get("price", 0)
+                    })
+                
+                return normalized
+                
             return []
             
         except Exception as e:
             logger.error(f"Error getting orders: {str(e)}")
-            raise ConnectionError(str(e))
+            return []
 
     async def place_order(
         self,
         account: BrokerAccount,
         order_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Place a trading order.
-        This would call the IBEam server API.
-        """
+        """Place a trading order through IBEam server"""
         try:
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            # This would call the IBEam server API to place an order
-            # For now, return empty dict as a placeholder
-            return {}
+            # Get IBEam server URL
+            base_url = await self._get_ibeam_url(account)
+            if not base_url:
+                raise OrderError("IBEam server not configured or not ready")
+            
+            # Check if authenticated
+            if not await self._check_ibeam_auth(base_url):
+                raise OrderError("IBEam server not authenticated")
+            
+            # Get contract ID for the symbol
+            contract_id = await self._search_contract(base_url, order_data["symbol"])
+            if not contract_id:
+                raise OrderError(f"Could not find contract for symbol: {order_data['symbol']}")
+            
+            # Prepare IB order format
+            ib_order = {
+                "acctId": account.account_id,
+                "conid": contract_id,
+                "orderType": order_data.get("type", "MKT").upper(),
+                "side": order_data["side"].upper(),  # BUY or SELL
+                "quantity": order_data["quantity"],
+                "tif": order_data.get("time_in_force", "GTC")
+            }
+            
+            # Add price for limit orders
+            if order_data.get("type") == "LIMIT" and order_data.get("price"):
+                ib_order["price"] = order_data["price"]
+            
+            # Place the order
+            response = await self.http_client.post(
+                f"{base_url}/iserver/account/{account.account_id}/orders",
+                json={"orders": [ib_order]}
+            )
+            
+            if response.status_code != 200:
+                error_data = response.json()
+                raise OrderError(f"Order failed: {error_data}")
+            
+            result = response.json()
+            
+            # Handle IB's reply confirmation if needed
+            if result and isinstance(result, list) and result[0].get("id"):
+                # Confirm the order
+                reply_id = result[0]["id"]
+                confirm_response = await self.http_client.post(
+                    f"{base_url}/iserver/reply/{reply_id}",
+                    json={"confirmed": True}
+                )
+                
+                if confirm_response.status_code == 200:
+                    final_result = confirm_response.json()
+                    
+                    # Return normalized response
+                    return {
+                        "order_id": final_result[0].get("order_id", "") if final_result else "",
+                        "status": "submitted",
+                        "symbol": order_data["symbol"],
+                        "side": order_data["side"],
+                        "quantity": order_data["quantity"],
+                        "order_type": order_data.get("type", "MARKET"),
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+            
+            # Return the result
+            return self.normalize_order_response(result[0] if result else {})
             
         except Exception as e:
-            logger.error(f"Error placing order: {str(e)}")
+            logger.error(f"Error placing IB order: {str(e)}")
             raise OrderError(str(e))
 
     async def cancel_order(
@@ -297,17 +473,35 @@ class InteractiveBrokersBroker(BaseBroker):
         account: BrokerAccount,
         order_id: str
     ) -> bool:
-        """
-        Cancel an order.
-        This would call the IBEam server API.
-        """
+        """Cancel an order through IBEam server"""
         try:
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            # This would call the IBEam server API to cancel an order
-            # For now, return True as a placeholder
-            return True
+            base_url = await self._get_ibeam_url(account)
+            if not base_url:
+                raise OrderError("IBEam server not configured or not ready")
+            
+            # Cancel the order
+            response = await self.http_client.delete(
+                f"{base_url}/iserver/account/{account.account_id}/order/{order_id}"
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                # IB may require confirmation for cancel
+                if result and isinstance(result, dict) and result.get("id"):
+                    # Confirm the cancellation
+                    reply_id = result["id"]
+                    confirm_response = await self.http_client.post(
+                        f"{base_url}/iserver/reply/{reply_id}",
+                        json={"confirmed": True}
+                    )
+                    return confirm_response.status_code == 200
+                
+                return True
+            
+            return False
             
         except Exception as e:
             logger.error(f"Error canceling order: {str(e)}")
@@ -335,3 +529,8 @@ class InteractiveBrokersBroker(BaseBroker):
         For IBEam servers, this is not used as we provision a dedicated server.
         """
         raise NotImplementedError("Interactive Brokers does not use API keys")
+
+    async def __del__(self):
+        """Cleanup HTTP client on deletion"""
+        if hasattr(self, 'http_client'):
+            await self.http_client.aclose()

@@ -184,6 +184,54 @@ async def start_ib_server(
         logger.error(f"Error starting IB server: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to start server: {str(e)}")
 
+@router.post("/accounts/{account_id}/restart")
+@check_subscription
+async def restart_ib_server(
+    account_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Restart an Interactive Brokers server"""
+    try:
+        # Get the account
+        account = db.query(BrokerAccount).filter(
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.account_id == account_id,
+            BrokerAccount.broker_id == "interactivebrokers",
+            BrokerAccount.is_active == True
+        ).first()
+        
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+            
+        # Get droplet_id from credentials
+        if not account.credentials or not account.credentials.custom_data:
+            raise HTTPException(status_code=400, detail="Account has no associated server")
+            
+        service_data = json.loads(account.credentials.custom_data)
+        droplet_id = service_data.get("droplet_id")
+        
+        if not droplet_id:
+            raise HTTPException(status_code=400, detail="No Digital Ocean droplet ID found")
+            
+        # Restart the server
+        result = await digital_ocean_server_manager.restart_server(droplet_id)
+        
+        # Update credentials with current status
+        if result:
+            service_data["status"] = "restarting"
+            account.credentials.custom_data = json.dumps(service_data)
+            account.credentials.updated_at = datetime.utcnow()
+            db.commit()
+            
+        return {"success": result, "status": "restarting" if result else "error"}
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error restarting IB server: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to restart server: {str(e)}")
+
 @router.delete("/accounts/{account_id}")
 @check_subscription
 async def delete_ib_account(

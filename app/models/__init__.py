@@ -5,6 +5,17 @@ from .strategy import ActivatedStrategy
 from .broker import BrokerAccount, BrokerCredentials
 from .subscription import Subscription
 from .order import Order
+from .support import SupportTicketLog
+from .promo_code import PromoCode
+from .password_reset import PasswordReset
+from .chat import (
+    ChatChannel,
+    ChatMessage,
+    ChatReaction,
+    UserChatRole,
+    UserChatSettings,
+    ChatChannelMember
+)
 
 # This ensures all models are registered
 __all__ = [
@@ -15,5 +26,14 @@ __all__ = [
     "BrokerAccount",
     "BrokerCredentials",
     "Subscription",
-    "Order"
+    "Order",
+    "SupportTicketLog",
+    "PromoCode",
+    "PasswordReset",
+    "ChatChannel",
+    "ChatMessage",
+    "ChatReaction",
+    "UserChatRole",
+    "UserChatSettings",
+    "ChatChannelMember"
 ]

@@ -670,6 +670,7 @@ class TradovateBroker(BaseBroker):
                     "account_id": account.account_id,
                     "name": account.name,
                     "balance": 0.0,
+                    
                     "available_margin": 0.0,
                     "day_pnl": 0.0,
                     "timestamp": datetime.utcnow().isoformat(),

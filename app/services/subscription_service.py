@@ -1,14 +1,15 @@
-# app/services/subscription_service.py
 from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 import logging
+from datetime import datetime, timedelta
 
 from app.core.subscription_tiers import (
     SubscriptionTier, 
     get_tier_limit, 
     check_resource_limit, 
-    is_feature_allowed
+    is_feature_allowed,
+    get_tier_display_name
 )
 from app.models.subscription import Subscription
 from app.models.broker import BrokerAccount
@@ -167,24 +168,15 @@ class SubscriptionService:
 
     def get_tier_comparison(self) -> Dict[str, Dict[str, Any]]:
         """
-        Get a comparison of all subscription tiers
+        Get a comparison of available subscription tiers
         
         Returns:
             Dict with tier information and features
         """
         return {
-            SubscriptionTier.STARTER: {
-                "name": "Starter",
-                "connected_accounts": get_tier_limit(SubscriptionTier.STARTER, "connected_accounts"),
-                "active_webhooks": get_tier_limit(SubscriptionTier.STARTER, "active_webhooks"),
-                "active_strategies": get_tier_limit(SubscriptionTier.STARTER, "active_strategies"),
-                "group_strategies": is_feature_allowed(SubscriptionTier.STARTER, "group_strategies_allowed"),
-                "can_share_webhooks": is_feature_allowed(SubscriptionTier.STARTER, "can_share_webhooks"),
-                "api_rate_limit": "100/min",
-                "webhook_rate_limit": "60/min"
-            },
-            SubscriptionTier.PRO: {
-                "name": "Pro",
+            # Using internal tier IDs but with updated display names, limits, and prices
+            "pro": {  # Internal tier ID (was Pro, now displayed as "Starter")
+                "name": "Starter",  # New display name
                 "connected_accounts": get_tier_limit(SubscriptionTier.PRO, "connected_accounts"),
                 "active_webhooks": get_tier_limit(SubscriptionTier.PRO, "active_webhooks"),
                 "active_strategies": get_tier_limit(SubscriptionTier.PRO, "active_strategies"),
@@ -193,10 +185,11 @@ class SubscriptionService:
                 "api_rate_limit": "500/min",
                 "webhook_rate_limit": "300/min",
                 "price_monthly": "$49/month",
-                "price_yearly": "$468/year ($39/month)"
+                "price_yearly": "$468/year ($39/month)",
+                "has_trial": "14-day free trial"
             },
-            SubscriptionTier.ELITE: {
-                "name": "Elite",
+            "elite": {  # Internal tier ID (was Elite, now displayed as "Pro")
+                "name": "Pro",  # New display name
                 "connected_accounts": "Unlimited",
                 "active_webhooks": "Unlimited",
                 "active_strategies": "Unlimited",
@@ -206,7 +199,8 @@ class SubscriptionService:
                 "webhook_rate_limit": "Unlimited",
                 "price_monthly": "$89/month",
                 "price_yearly": "$828/year ($69/month)",
-                "price_lifetime": "$1,990 (one-time payment)"
+                "price_lifetime": "$1,990 (one-time payment)",
+                "has_trial": "14-day free trial"
             }
         }
         
@@ -257,7 +251,79 @@ class SubscriptionService:
             logger.error(f"Error syncing resource counts for user {user_id}: {str(e)}")
             self.db.rollback()
             raise
+    
+    def create_trial_subscription(self, user_id: int, tier: str = "pro") -> Subscription:
+        """
+        Create a new subscription with a trial period
+        
+        Args:
+            user_id: User ID to create subscription for
+            tier: Tier to create ("pro" for new Starter, "elite" for new Pro)
             
+        Returns:
+            Subscription: The created subscription
+        """
+        # Check if user already has a subscription
+        existing = self.get_user_subscription(user_id)
+        if existing:
+            return existing
+            
+        # Create new subscription with trial period
+        subscription = Subscription(
+            user_id=user_id,
+            tier=tier,
+            status="trialing",
+            is_in_trial=True,
+            trial_ends_at=datetime.utcnow() + timedelta(days=14),
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        self.db.add(subscription)
+        self.db.commit()
+        logger.info(f"Created trial subscription for user ID {user_id}, tier: {tier}")
+        
+        return subscription
+    
+    def check_and_handle_trial_expiration(self, subscription: Subscription) -> None:
+        """
+        Check if a trial has expired and handle appropriately
+        
+        Args:
+            subscription: Subscription to check
+        """
+        if not subscription.is_in_trial:
+            return
+            
+        if not subscription.is_trial_active:
+            # Trial has expired
+            if subscription.stripe_subscription_id:
+                # They have a Stripe subscription, so they've converted - update status
+                subscription.is_in_trial = False
+                subscription.status = "active"
+                subscription.trial_converted = True
+            else:
+                # No Stripe subscription - mark as inactive
+                subscription.status = "inactive"
+                subscription.is_in_trial = False
+            
+            self.db.commit()
+            logger.info(f"Trial expired for subscription ID {subscription.id}, status: {subscription.status}")
+    
+    def mark_as_legacy_free(self, user_id: int) -> None:
+        """
+        Mark a user as a grandfathered free user
+        
+        Args:
+            user_id: User ID to mark
+        """
+        subscription = self.get_user_subscription(user_id)
+        if subscription and subscription.tier == "starter":
+            subscription.is_legacy_free = True
+            subscription.status = "active"
+            self.db.commit()
+            logger.info(f"Marked user ID {user_id} as legacy free user")
+    
     def get_upgrade_recommendations(self, user_id: int) -> Dict[str, Any]:
         """
         Get upgrade recommendations for a user based on their current usage
@@ -293,14 +359,16 @@ class SubscriptionService:
                     "limit": limit,
                     "percentage": round((count / limit) * 100, 1)
                 })
-                
-        # Check if user might need group strategies
-        needs_group_strategies = self.db.query(func.count(ActivatedStrategy.id)).filter(
-            ActivatedStrategy.user_id == user_id
-        ).scalar() > 2  # If user has more than 2 strategies, might need groups
         
-        # Get next tier
-        next_tier = SubscriptionTier.PRO if tier == SubscriptionTier.STARTER else SubscriptionTier.ELITE
+        # Determine next tier to recommend based on internal tier ID
+        next_tier = None
+        next_tier_display_name = None
+        if tier == SubscriptionTier.STARTER:
+            next_tier = SubscriptionTier.PRO
+            next_tier_display_name = "Starter"
+        elif tier == SubscriptionTier.PRO:
+            next_tier = SubscriptionTier.ELITE
+            next_tier_display_name = "Pro"
         
         # Generate recommendations
         recommendations = []
@@ -308,21 +376,16 @@ class SubscriptionService:
         if approaching_limits:
             recommendations.append({
                 "type": "resource_limits",
-                "message": f"You're approaching resource limits on your {tier} plan.",
+                "message": f"You're approaching resource limits on your current plan.",
                 "resources": approaching_limits,
-                "recommendation": f"Upgrade to {next_tier} for higher limits."
+                "recommendation": f"Upgrade to {next_tier_display_name} for higher limits."
             })
-            
-        if needs_group_strategies and tier == SubscriptionTier.STARTER:
-            recommendations.append({
-                "type": "group_strategies",
-                "message": "Your trading pattern suggests you could benefit from group strategies.",
-                "recommendation": "Upgrade to Pro tier to enable group strategies."
-            })
-            
+        
         return {
             "current_tier": tier,
+            "current_tier_display": get_tier_display_name(tier),
             "next_tier": next_tier,
+            "next_tier_display": next_tier_display_name,
             "recommendations": recommendations,
             "upgrade_url": f"/pricing?from={tier}&to={next_tier}"
         }

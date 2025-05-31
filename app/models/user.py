@@ -13,7 +13,7 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     is_active = Column(Boolean, default=True)
-    is_superuser = Column(Boolean, default=False)
+    app_role = Column(String, nullable=True)  # 'admin', 'moderator', 'beta_tester', None
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
     
@@ -37,3 +37,20 @@ class User(Base):
     
     def __str__(self):
         return f"User(email={self.email})"
+    
+    # App role helper methods
+    def is_admin(self) -> bool:
+        """Check if user has admin app role"""
+        return self.app_role == 'admin'
+    
+    def is_moderator(self) -> bool:
+        """Check if user has moderator or admin app role"""
+        return self.app_role in ['admin', 'moderator']
+    
+    def is_beta_tester(self) -> bool:
+        """Check if user has beta tester, moderator, or admin app role"""
+        return self.app_role in ['admin', 'moderator', 'beta_tester']
+    
+    def has_app_role(self, role: str) -> bool:
+        """Check if user has a specific app role"""
+        return self.app_role == role

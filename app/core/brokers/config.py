@@ -72,6 +72,36 @@ BROKER_CONFIGS = {
                 websocket="wss://live.tradovateapi.com/v1/websocket"
             )
         }
+    ),
+    "interactivebrokers": BrokerConfig(
+        id="interactivebrokers",
+        name="Interactive Brokers",
+        description="Interactive Brokers Trading Platform",
+        environments=[BrokerEnvironment.DEMO, BrokerEnvironment.LIVE, BrokerEnvironment.PAPER],
+        connection_method=ConnectionMethod.CREDENTIALS,
+        features=BrokerFeatures(
+            real_time_data=True,
+            supports_websocket=True,
+            supported_order_types=["MARKET", "LIMIT", "STOP", "STOP_LIMIT"],
+            supports_multiple_accounts=True,
+            supported_assets=["STOCKS", "OPTIONS", "FUTURES", "FOREX", "BONDS", "FUNDS"]
+        ),
+        api_endpoints={
+            "demo": ApiEndpointConfig(
+                base="https://localhost:5000/v1/api",
+                websocket="wss://localhost:5000/v1/api/ws"
+            ),
+            "live": ApiEndpointConfig(
+                base="https://localhost:5000/v1/api",
+                websocket="wss://localhost:5000/v1/api/ws"
+            ),
+            "paper": ApiEndpointConfig(
+                base="https://localhost:5000/v1/api",
+                websocket="wss://localhost:5000/v1/api/ws"
+            )
+        },
+        logo_url="/logos/ib.png",
+        docs_url="https://interactivebrokers.github.io/cpwebapi/"
     )
     # Add more brokers as needed
 }

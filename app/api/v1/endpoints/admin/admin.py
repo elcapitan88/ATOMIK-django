@@ -16,11 +16,12 @@ from app.models.promo_code import PromoCode
 from app.services.promo_code_service import PromoCodeService
 
 # Add new imports after existing imports
-from sqlalchemy import func, and_, distinct, text
+from sqlalchemy import func, and_, distinct, text, or_
 from app.models.webhook import Webhook, WebhookLog
 from app.models.strategy import ActivatedStrategy
 from app.models.broker import BrokerAccount, BrokerCredentials
 from app.models.subscription import Subscription
+from app.models.chat import UserChatRole
 from app.core.config import settings
 
 router = APIRouter()
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 async def get_admin_user(
     current_user: User = Depends(get_current_user)
 ) -> User:
-    if not current_user.is_superuser:
+    if not current_user.is_admin():
         logger.warning(f"Non-admin user {current_user.id} attempted admin action")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -700,4 +701,510 @@ def get_system_metrics() -> SystemMetrics:
             memory_usage=0.0,
             disk_usage=0.0,
             active_connections=0
+        )
+
+# New unified user management endpoints
+class UserCompleteResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: Optional[str]
+    phone: Optional[str]
+    is_active: bool
+    app_role: Optional[str]
+    profile_picture: Optional[str]
+    created_at: datetime
+    last_login: Optional[datetime] = None
+    subscription: Optional[Dict[str, Any]]
+    roles: List[str]
+    connected_accounts: int
+    
+    class Config:
+        from_attributes = True
+
+class UsersCompleteResponse(BaseModel):
+    users: List[UserCompleteResponse]
+    total: int
+    available_roles: List[str]
+
+class RoleAssignmentRequest(BaseModel):
+    role_name: str
+    role_color: str = "#4CAF50"
+    role_priority: int = 0
+
+class BetaToggleRequest(BaseModel):
+    is_beta: bool
+
+class UserUpdateRequest(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    is_active: Optional[bool] = None
+    app_role: Optional[str] = None
+
+@router.get("/users/complete", response_model=UsersCompleteResponse)
+async def get_users_complete(
+    search: str = "",
+    status_param: str = Query("all", alias="status"),
+    roles: List[str] = Query([]),
+    subscription: List[str] = Query([]),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """Get complete user data with roles, subscriptions, and account info"""
+    try:
+        # Start with a simple base query
+        query = db.query(User)
+        
+        # Apply search filter
+        if search:
+            search_filter = or_(
+                User.username.ilike(f"%{search}%"),
+                User.email.ilike(f"%{search}%"),
+                User.full_name.ilike(f"%{search}%")
+            )
+            query = query.filter(search_filter)
+        
+        # Apply status filter
+        if status_param != "all":
+            if status_param == "active":
+                query = query.filter(User.is_active == True)
+            elif status_param == "inactive":
+                query = query.filter(User.is_active == False)
+            elif status_param == "admin":
+                query = query.filter(User.app_role == 'admin')
+        
+        # Get total count
+        total = query.count()
+        
+        # Apply pagination
+        users = query.offset(offset).limit(limit).all()
+        
+        # Build complete user objects
+        user_responses = []
+        for user in users:
+            try:
+                # Get user roles safely
+                user_roles = []
+                try:
+                    roles_query = db.query(UserChatRole.role_name).filter(
+                        UserChatRole.user_id == user.id,
+                        UserChatRole.is_active == True
+                    ).all()
+                    user_roles = [role[0] for role in roles_query]
+                except Exception as role_error:
+                    logger.warning(f"Could not fetch roles for user {user.id}: {role_error}")
+                    user_roles = []
+                
+                # Add admin role if app_role is admin
+                if user.is_admin() and "Admin" not in user_roles:
+                    user_roles.append("Admin")
+                
+                # Ensure at least "User" role
+                if not user_roles:
+                    user_roles = ["User"]
+                
+                # Get connected accounts count safely
+                connected_accounts = 0
+                try:
+                    connected_accounts = db.query(func.count(BrokerAccount.id)).filter(
+                        BrokerAccount.user_id == user.id
+                    ).scalar() or 0
+                except Exception as broker_error:
+                    logger.warning(f"Could not fetch broker accounts for user {user.id}: {broker_error}")
+                    connected_accounts = 0
+                
+                # Get subscription data safely
+                subscription_data = None
+                try:
+                    user_subscription = db.query(Subscription).filter(Subscription.user_id == user.id).first()
+                    if user_subscription:
+                        subscription_data = {
+                            "tier": user_subscription.tier,
+                            "status": user_subscription.status,
+                            "billing_interval": getattr(user_subscription, 'billing_interval', None)
+                        }
+                except Exception as sub_error:
+                    logger.warning(f"Could not fetch subscription for user {user.id}: {sub_error}")
+                    subscription_data = None
+                
+                user_response = UserCompleteResponse(
+                    id=user.id,
+                    username=user.username or "",
+                    email=user.email or "",
+                    full_name=user.full_name,
+                    phone=user.phone,
+                    is_active=user.is_active,
+                    app_role=user.app_role,
+                    profile_picture=user.profile_picture,
+                    created_at=user.created_at,
+                    last_login=None,
+                    subscription=subscription_data,
+                    roles=user_roles,
+                    connected_accounts=connected_accounts
+                )
+                user_responses.append(user_response)
+                
+            except Exception as user_error:
+                logger.error(f"Error processing user {user.id}: {user_error}")
+                continue
+        
+        # Get available roles
+        available_roles = ["Admin", "Manager", "Support", "Beta Tester", "User"]
+        
+        return UsersCompleteResponse(
+            users=user_responses,
+            total=total,
+            available_roles=available_roles
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting complete users data: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get users data: {str(e)}"
+        )
+
+@router.post("/users/{user_id}/role", response_model=ResponseMessage)
+async def assign_user_role(
+    user_id: int,
+    role_data: RoleAssignmentRequest,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """Assign a role to a user"""
+    try:
+        # Check if user exists
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Check if role already exists for this user
+        existing_role = db.query(UserChatRole).filter(
+            UserChatRole.user_id == user_id,
+            UserChatRole.role_name == role_data.role_name,
+            UserChatRole.is_active == True
+        ).first()
+        
+        if existing_role:
+            return ResponseMessage(
+                success=True,
+                message=f"User already has the {role_data.role_name} role"
+            )
+        
+        # Use the appropriate role service function based on role type
+        from app.services.chat_role_service import assign_admin_role, assign_moderator_role, assign_beta_tester_role
+        
+        if role_data.role_name == "Admin":
+            await assign_admin_role(db, user_id, admin_user.id)
+        elif role_data.role_name == "Moderator":
+            await assign_moderator_role(db, user_id, admin_user.id)
+        elif role_data.role_name == "Beta Tester":
+            await assign_beta_tester_role(db, user_id, admin_user.id)
+        else:
+            # For other roles, create manually (no app_role sync needed)
+            new_role = UserChatRole(
+                user_id=user_id,
+                role_name=role_data.role_name,
+                role_color=role_data.role_color,
+                role_priority=role_data.role_priority,
+                assigned_by=admin_user.id
+            )
+            db.add(new_role)
+            db.commit()
+        
+        logger.info(f"Admin {admin_user.email} assigned role {role_data.role_name} to user {user.email}")
+        
+        return ResponseMessage(
+            success=True,
+            message=f"Role {role_data.role_name} assigned successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assigning role: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to assign role: {str(e)}"
+        )
+
+@router.delete("/users/{user_id}/role/{role_name}", response_model=ResponseMessage)
+async def remove_user_role(
+    user_id: int,
+    role_name: str,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """Remove a role from a user"""
+    try:
+        # Find the role assignment
+        role_assignment = db.query(UserChatRole).filter(
+            UserChatRole.user_id == user_id,
+            UserChatRole.role_name == role_name,
+            UserChatRole.is_active == True
+        ).first()
+        
+        if not role_assignment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Role assignment not found"
+            )
+        
+        # Use the appropriate role service function based on role type
+        from app.services.chat_role_service import remove_admin_role, remove_moderator_role, remove_beta_tester_role
+        
+        if role_name == "Admin":
+            await remove_admin_role(db, user_id)
+        elif role_name == "Moderator":
+            await remove_moderator_role(db, user_id)
+        elif role_name == "Beta Tester":
+            await remove_beta_tester_role(db, user_id)
+        else:
+            # For other roles, deactivate manually (no app_role sync needed)
+            role_assignment.is_active = False
+            db.commit()
+        
+        logger.info(f"Admin {admin_user.email} removed role {role_name} from user {user_id}")
+        
+        return ResponseMessage(
+            success=True,
+            message=f"Role {role_name} removed successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing role: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to remove role: {str(e)}"
+        )
+
+@router.post("/users/{user_id}/beta", response_model=ResponseMessage)
+async def toggle_beta_access(
+    user_id: int,
+    beta_data: BetaToggleRequest,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """Toggle beta tester access for a user"""
+    try:
+        # Check if user exists
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        beta_role_name = "Beta Tester"
+        
+        # Check current beta status
+        existing_beta_role = db.query(UserChatRole).filter(
+            UserChatRole.user_id == user_id,
+            UserChatRole.role_name == beta_role_name,
+            UserChatRole.is_active == True
+        ).first()
+        
+        if beta_data.is_beta and not existing_beta_role:
+            # Add beta tester role (this will also update app_role)
+            from app.services.chat_role_service import assign_beta_tester_role
+            await assign_beta_tester_role(db, user_id, admin_user.id)
+            action = "added"
+            
+        elif not beta_data.is_beta and existing_beta_role:
+            # Remove beta tester role (this will also update app_role)
+            from app.services.chat_role_service import remove_beta_tester_role
+            await remove_beta_tester_role(db, user_id)
+            action = "removed"
+            
+        else:
+            # No change needed
+            status_text = "already has" if beta_data.is_beta else "doesn't have"
+            return ResponseMessage(
+                success=True,
+                message=f"User {status_text} beta access"
+            )
+        
+        db.commit()
+        
+        logger.info(f"Admin {admin_user.email} {action} beta access for user {user.email}")
+        
+        return ResponseMessage(
+            success=True,
+            message=f"Beta access {action} successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling beta access: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to toggle beta access: {str(e)}"
+        )
+
+@router.post("/users/bulk", response_model=ResponseMessage)
+async def bulk_user_operations(
+    user_ids: List[int],
+    operation: str,
+    operation_data: Optional[Dict[str, Any]] = None,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """Perform bulk operations on multiple users"""
+    try:
+        if operation not in ["activate", "deactivate", "assign_role", "remove_role", "toggle_beta"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid bulk operation"
+            )
+        
+        affected_users = 0
+        
+        for user_id in user_ids:
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                continue
+                
+            if operation == "activate":
+                user.is_active = True
+                affected_users += 1
+                
+            elif operation == "deactivate":
+                user.is_active = False
+                affected_users += 1
+                
+            elif operation == "assign_role" and operation_data:
+                role_name = operation_data.get("role_name")
+                if role_name:
+                    existing_role = db.query(UserChatRole).filter(
+                        UserChatRole.user_id == user_id,
+                        UserChatRole.role_name == role_name,
+                        UserChatRole.is_active == True
+                    ).first()
+                    
+                    if not existing_role:
+                        new_role = UserChatRole(
+                            user_id=user_id,
+                            role_name=role_name,
+                            role_color=operation_data.get("role_color", "#4CAF50"),
+                            role_priority=operation_data.get("role_priority", 0),
+                            assigned_by=admin_user.id
+                        )
+                        db.add(new_role)
+                        affected_users += 1
+        
+        db.commit()
+        
+        logger.info(f"Admin {admin_user.email} performed bulk {operation} on {affected_users} users")
+        
+        return ResponseMessage(
+            success=True,
+            message=f"Bulk operation completed. {affected_users} users affected."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error performing bulk operation: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to perform bulk operation: {str(e)}"
+        )
+
+
+@router.put("/users/{user_id}", response_model=ResponseMessage)
+async def update_user(
+    user_id: int,
+    user_data: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """Update a user's information (admin only)"""
+    try:
+        # Find the user to update
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Track what fields are being updated
+        updated_fields = []
+        
+        # Update fields if provided
+        if user_data.username is not None:
+            # Check if username is already taken by another user
+            existing_user = db.query(User).filter(
+                User.username == user_data.username,
+                User.id != user_id
+            ).first()
+            if existing_user:
+                raise HTTPException(status_code=400, detail="Username already taken")
+            user.username = user_data.username
+            updated_fields.append("username")
+        
+        if user_data.email is not None:
+            # Check if email is already taken by another user
+            existing_user = db.query(User).filter(
+                User.email == user_data.email,
+                User.id != user_id
+            ).first()
+            if existing_user:
+                raise HTTPException(status_code=400, detail="Email already taken")
+            user.email = user_data.email
+            updated_fields.append("email")
+        
+        if user_data.full_name is not None:
+            user.full_name = user_data.full_name
+            updated_fields.append("full_name")
+        
+        if user_data.phone is not None:
+            user.phone = user_data.phone
+            updated_fields.append("phone")
+        
+        if user_data.is_active is not None:
+            user.is_active = user_data.is_active
+            updated_fields.append("is_active")
+        
+        if user_data.app_role is not None:
+            # Validate app_role values
+            valid_roles = ['admin', 'moderator', 'beta_tester', None]
+            if user_data.app_role not in valid_roles and user_data.app_role != "":
+                raise HTTPException(status_code=400, detail=f"Invalid app_role. Must be one of: {valid_roles}")
+            
+            # Convert empty string to None
+            user.app_role = user_data.app_role if user_data.app_role != "" else None
+            updated_fields.append("app_role")
+        
+        # Update the updated_at timestamp
+        user.updated_at = datetime.utcnow()
+        
+        # Commit changes
+        db.commit()
+        
+        logger.info(f"Admin {admin_user.id} updated user {user_id}. Fields: {', '.join(updated_fields)}")
+        
+        return ResponseMessage(
+            message=f"User {user.username} updated successfully. Updated fields: {', '.join(updated_fields) if updated_fields else 'none'}"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating user {user_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update user: {str(e)}"
         )

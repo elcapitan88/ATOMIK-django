@@ -36,7 +36,7 @@ def create_first_superuser(db: Session) -> None:
                     "email": settings.FIRST_SUPERUSER_EMAIL,
                     "username": "admin",
                     "password": settings.FIRST_SUPERUSER_PASSWORD,
-                    "is_superuser": True,
+                    "app_role": "admin",
                 }
                 user = User(**user_in)
                 db.add(user)

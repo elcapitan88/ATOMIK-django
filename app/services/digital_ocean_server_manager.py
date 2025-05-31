@@ -368,6 +368,39 @@ class DigitalOceanServerManager:
             logger.error(f"Error stopping droplet {droplet_id}: {str(e)}")
             return False
     
+    async def restart_server(self, droplet_id: int) -> bool:
+        """
+        Restart a Digital Ocean droplet.
+        
+        Args:
+            droplet_id: The ID of the Digital Ocean droplet
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            logger.info(f"Restarting Digital Ocean droplet: {droplet_id}")
+            
+            # Use the reboot action
+            response = await self.client.post(
+                f"{self.api_url}/droplets/{droplet_id}/actions",
+                headers=self.headers,
+                json={"type": "reboot"}
+            )
+            
+            response.raise_for_status()
+            
+            # Update status in cache
+            if droplet_id in self.provisioning_status_cache:
+                self.provisioning_status_cache[droplet_id]["status"] = "restarting"
+                self.provisioning_status_cache[droplet_id]["last_check"] = datetime.utcnow()
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error restarting droplet {droplet_id}: {str(e)}")
+            return False
+    
     async def delete_server(self, droplet_id: int) -> bool:
         """
         Delete a Digital Ocean droplet.
