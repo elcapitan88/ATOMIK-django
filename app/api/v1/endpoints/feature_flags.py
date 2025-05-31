@@ -77,6 +77,11 @@ async def get_my_features(
         feature_service = FeatureFlagService(db)
         user_features = await feature_service.get_user_features(current_user.id)
         
+        # Debug logging for member-chat feature
+        member_chat_enabled = await feature_service.is_feature_enabled("member-chat", current_user.id)
+        logger.info(f"User {current_user.id} (app_role: {current_user.app_role}) - member-chat enabled: {member_chat_enabled}")
+        logger.info(f"User features returned: {user_features}")
+        
         # Check if user is beta tester
         from app.services.chat_role_service import is_user_beta_tester
         is_beta = await is_user_beta_tester(db, current_user.id)

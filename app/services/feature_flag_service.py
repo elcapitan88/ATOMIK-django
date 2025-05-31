@@ -237,19 +237,33 @@ class FeatureFlagService:
             from app.models.user import User
             user = self.db.query(User).filter(User.id == user_id).first()
             
+            logger.info(f"Checking role access for user {user_id}, target_roles: {target_roles}")
+            
             if user:
+                logger.info(f"User {user_id} app_role: {user.app_role}, is_admin(): {user.is_admin()}, is_beta_tester(): {user.is_beta_tester()}")
+                
                 if "Admin" in target_roles and user.is_admin():
+                    logger.info(f"User {user_id} granted access via Admin app_role")
                     return True
                 if "Beta Tester" in target_roles and user.is_beta_tester():
+                    logger.info(f"User {user_id} granted access via Beta Tester app_role")
                     return True
             
             # Also check chat roles for backwards compatibility
-            if "Admin" in target_roles and await is_user_admin(self.db, user_id):
+            admin_chat_role = await is_user_admin(self.db, user_id)
+            beta_chat_role = await is_user_beta_tester(self.db, user_id)
+            logger.info(f"User {user_id} chat roles - admin: {admin_chat_role}, beta_tester: {beta_chat_role}")
+            
+            if "Admin" in target_roles and admin_chat_role:
+                logger.info(f"User {user_id} granted access via Admin chat role")
                 return True
             if "Moderator" in target_roles and await is_user_moderator(self.db, user_id):
                 return True
-            if "Beta Tester" in target_roles and await is_user_beta_tester(self.db, user_id):
+            if "Beta Tester" in target_roles and beta_chat_role:
+                logger.info(f"User {user_id} granted access via Beta Tester chat role")
                 return True
+            
+            logger.info(f"User {user_id} denied access - no matching roles")
             return False
         except Exception as e:
             logger.error(f"Error checking role access: {str(e)}")
