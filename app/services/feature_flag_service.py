@@ -233,6 +233,17 @@ class FeatureFlagService:
     async def _check_role_access(self, target_roles: List[str], user_id: int) -> bool:
         """Check if user has any of the target roles"""
         try:
+            # Check app_role field first (User.app_role)
+            from app.models.user import User
+            user = self.db.query(User).filter(User.id == user_id).first()
+            
+            if user and user.app_role:
+                if "Admin" in target_roles and user.app_role == "admin":
+                    return True
+                if "Beta Tester" in target_roles and user.app_role == "beta_tester":
+                    return True
+            
+            # Also check chat roles for backwards compatibility
             if "Admin" in target_roles and await is_user_admin(self.db, user_id):
                 return True
             if "Moderator" in target_roles and await is_user_moderator(self.db, user_id):
