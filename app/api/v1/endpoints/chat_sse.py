@@ -189,12 +189,24 @@ class ChatEventManager:
             print(f"🔍 SSE: Attempting to broadcast to user {user_id} with {len(queues)} connections")
             
             for queue in list(queues):  # Create list copy
+                queue_id = id(queue)
+                
+                # Check if this connection is too old (zombie detection)
+                if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
+                    connected_at = self.connection_metadata[user_id][queue_id].get('connected_at', datetime.utcnow())
+                    connection_age = datetime.utcnow() - connected_at
+                    
+                    if connection_age.total_seconds() > 70:  # Connections older than 70s are likely zombies
+                        print(f"🧟 SSE: Removing zombie connection for user {user_id} (age: {connection_age.total_seconds():.1f}s)")
+                        failed_connections.append((user_id, queue))
+                        queues.discard(queue)
+                        continue
+                
                 try:
-                    # Add timeout to prevent hanging
-                    await asyncio.wait_for(queue.put(event), timeout=5.0)
+                    # Shorter timeout for faster zombie detection
+                    await asyncio.wait_for(queue.put(event), timeout=2.0)
                     
                     # Update metadata
-                    queue_id = id(queue)
                     if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
                         self.connection_metadata[user_id][queue_id]["message_count"] += 1
                     
@@ -205,7 +217,7 @@ class ChatEventManager:
                     broadcast_count += 1
                     user_broadcast_count += 1
                 except asyncio.TimeoutError:
-                    print(f"⏰ SSE: Timeout broadcasting to user {user_id} - connection may be stale")
+                    print(f"⏰ SSE: Timeout broadcasting to user {user_id} - removing stale connection")
                     failed_connections.append((user_id, queue))
                     queues.discard(queue)
                 except Exception as e:
@@ -425,11 +437,27 @@ async def chat_events_stream(
                     chat_event_manager.last_heartbeat[current_user.id] = datetime.utcnow()
                     
                 except asyncio.TimeoutError:
-                    # More frequent keepalives with connection info for production debugging
+                    # Check connection age - force refresh after 60 seconds to prevent zombie connections
+                    connection_age = datetime.utcnow() - chat_event_manager.connection_metadata.get(current_user.id, {}).get(id(queue), {}).get('connected_at', datetime.utcnow())
+                    
+                    if connection_age.total_seconds() > 60:  # Force reconnect after 1 minute
+                        print(f"🔄 SSE: Forcing reconnection for user {current_user.id} after {connection_age.total_seconds():.1f}s")
+                        # Send close event to force client reconnection
+                        close_event = {
+                            'type': 'connection_refresh',
+                            'message': 'Connection refresh required',
+                            'timestamp': datetime.utcnow().isoformat(),
+                            'reason': 'prevent_zombie_connection'
+                        }
+                        yield f"data: {json.dumps(close_event)}\n\n"
+                        break  # Exit the loop to close this connection
+                    
+                    # Regular keepalive with connection health info
                     ping_event = {
                         'type': 'ping', 
                         'timestamp': datetime.utcnow().isoformat(),
                         'user_id': current_user.id,
+                        'connection_age_seconds': connection_age.total_seconds(),
                         'connection_count': len(chat_event_manager.connections.get(current_user.id, []))
                     }
                     
@@ -438,7 +466,7 @@ async def chat_events_stream(
                     yield data
                     
                     chat_event_manager.last_heartbeat[current_user.id] = datetime.utcnow()
-                    print(f"🔍 SSE: Sent keepalive ping to user {current_user.id} (every 15s for production stability)")
+                    print(f"🔍 SSE: Sent keepalive ping to user {current_user.id} (age: {connection_age.total_seconds():.1f}s)")
                 
         except asyncio.CancelledError:
             print(f"🔍 SSE: Connection cancelled for user {current_user.id}")
