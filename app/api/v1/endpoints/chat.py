@@ -223,9 +223,10 @@ async def get_channel_messages(
         if role.user_id not in role_map or role.role_priority > role_map[role.user_id].role_priority:
             role_map[role.user_id] = role
     
-    # Get usernames
+    # Get user details (username and profile picture)
     users = db.query(User).filter(User.id.in_(user_ids)).all()
     username_map = {user.id: user.username for user in users}
+    profile_pic_map = {user.id: user.profile_picture for user in users}
     
     # Build response with reactions
     result_messages = []
@@ -259,6 +260,7 @@ async def get_channel_messages(
             user_id=message.user_id,
             user_name=username_map.get(message.user_id, 'Unknown'),
             user_role_color=role_color,
+            user_profile_picture=profile_pic_map.get(message.user_id),
             content=message.content,
             reply_to_id=message.reply_to_id,
             is_edited=message.is_edited,
@@ -365,7 +367,13 @@ async def send_message(
         db.commit()
     
     # Broadcast the new message to all connected users
-    await broadcast_new_message(new_message, current_user.username, role_color, db)
+    await broadcast_new_message(
+        message=new_message, 
+        user_name=current_user.username, 
+        user_role_color=role_color, 
+        user_profile_picture=current_user.profile_picture, 
+        db=db
+    )
     
     return ChatMessageSchema(
         id=new_message.id,
@@ -373,6 +381,7 @@ async def send_message(
         user_id=new_message.user_id,
         user_name=current_user.username,
         user_role_color=role_color,
+        user_profile_picture=current_user.profile_picture,
         content=new_message.content,
         reply_to_id=new_message.reply_to_id,
         is_edited=new_message.is_edited,
@@ -429,7 +438,7 @@ async def edit_message(
     role_color = user_role.role_color if user_role else '#FFFFFF'
     
     # Broadcast the message update
-    await broadcast_message_updated(message, current_user.username, role_color, db)
+    await broadcast_message_updated(message, current_user.username, role_color, current_user.profile_picture, db)
     
     return ChatMessageSchema(
         id=message.id,
@@ -437,6 +446,7 @@ async def edit_message(
         user_id=message.user_id,
         user_name=current_user.username,
         user_role_color=role_color,
+        user_profile_picture=current_user.profile_picture,
         content=message.content,
         reply_to_id=message.reply_to_id,
         is_edited=message.is_edited,
