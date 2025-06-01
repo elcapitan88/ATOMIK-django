@@ -1,11 +1,11 @@
 # app/api/v1/endpoints/chat_sse.py
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc
 import asyncio
 import json
-from typing import Dict, Set
+from typing import Dict, Set, Any
 from datetime import datetime
 
 from app.db.session import get_db
@@ -24,23 +24,54 @@ active_connections: Dict[int, Set[asyncio.Queue]] = {}
 class ChatEventManager:
     def __init__(self):
         self.connections: Dict[int, Set[asyncio.Queue]] = {}
+        self.connection_metadata: Dict[int, Dict[str, Any]] = {}  # Track connection info
+        self.last_heartbeat: Dict[int, datetime] = {}  # Track last activity
     
-    async def connect(self, user_id: int) -> asyncio.Queue:
+    async def connect(self, user_id: int, client_info: str = "unknown") -> asyncio.Queue:
         """Add a new SSE connection for a user"""
         queue = asyncio.Queue()
+        connection_time = datetime.utcnow()
         
         if user_id not in self.connections:
             self.connections[user_id] = set()
+            self.connection_metadata[user_id] = {}
+            print(f"🔍 SSE: First connection for user {user_id}")
         
         self.connections[user_id].add(queue)
+        self.connection_metadata[user_id][id(queue)] = {
+            "connected_at": connection_time,
+            "client_info": client_info,
+            "message_count": 0
+        }
+        self.last_heartbeat[user_id] = connection_time
+        
+        print(f"🔍 SSE: New connection added for user {user_id}. Total connections: {len(self.connections[user_id])}")
+        print(f"🔍 SSE: Global connection count: {sum(len(queues) for queues in self.connections.values())}")
         return queue
     
     async def disconnect(self, user_id: int, queue: asyncio.Queue):
         """Remove an SSE connection for a user"""
         if user_id in self.connections:
             self.connections[user_id].discard(queue)
+            
+            # Clean up metadata
+            if user_id in self.connection_metadata:
+                queue_id = id(queue)
+                if queue_id in self.connection_metadata[user_id]:
+                    connection_info = self.connection_metadata[user_id][queue_id]
+                    duration = datetime.utcnow() - connection_info["connected_at"]
+                    print(f"🔍 SSE: Connection for user {user_id} lasted {duration.total_seconds():.1f}s, sent {connection_info['message_count']} messages")
+                    del self.connection_metadata[user_id][queue_id]
+            
             if not self.connections[user_id]:
+                print(f"🔍 SSE: All connections removed for user {user_id}")
                 del self.connections[user_id]
+                if user_id in self.connection_metadata:
+                    del self.connection_metadata[user_id]
+                if user_id in self.last_heartbeat:
+                    del self.last_heartbeat[user_id]
+            else:
+                print(f"🔍 SSE: Connection removed for user {user_id}. Remaining connections: {len(self.connections[user_id])}")
     
     async def broadcast_to_channel(self, channel_id: int, event_type: str, data: dict, db: Session):
         """Broadcast an event to all users who have access to a channel"""
@@ -55,21 +86,83 @@ class ChatEventManager:
         
         print(f"🔍 SSE: Broadcasting {event_type} to channel {channel_id}")
         print(f"🔍 SSE: Connected users: {list(self.connections.keys())}")
+        print(f"🔍 SSE: Total connections: {sum(len(queues) for queues in self.connections.values())}")
         print(f"🔍 SSE: Message sender: {data.get('user_id', 'unknown')}")
         
-        broadcast_count = 0
+        # Log detailed connection info
         for user_id, queues in self.connections.items():
-            for queue in queues.copy():  # Copy to avoid modification during iteration
+            last_hb = self.last_heartbeat.get(user_id, datetime.utcnow())
+            time_since_hb = datetime.utcnow() - last_hb
+            print(f"🔍 SSE: User {user_id}: {len(queues)} connections, last heartbeat {time_since_hb.total_seconds():.1f}s ago")
+        
+        # If no users are connected, log this as a critical issue
+        if not self.connections:
+            print(f"❌ SSE: CRITICAL - No users connected when trying to broadcast {event_type}")
+            print(f"❌ SSE: This message will be lost: {data.get('content', 'unknown content')}")
+            return
+        
+        # Proactively clean up stale connections before broadcasting
+        cleaned_count = await self.cleanup_stale_connections(max_age_seconds=180)  # 3 minutes
+        if cleaned_count > 0:
+            print(f"🧹 SSE: Auto-cleaned {cleaned_count} stale connections before broadcast")
+        
+        broadcast_count = 0
+        failed_connections = []
+        
+        for user_id, queues in list(self.connections.items()):  # Create list to avoid modification during iteration
+            user_broadcast_count = 0
+            print(f"🔍 SSE: Attempting to broadcast to user {user_id} with {len(queues)} connections")
+            
+            for queue in list(queues):  # Create list copy
                 try:
-                    await queue.put(event)
-                    print(f"🔍 SSE: Broadcasting event to user {user_id}: {event_type}")
+                    # Add timeout to prevent hanging
+                    await asyncio.wait_for(queue.put(event), timeout=5.0)
+                    
+                    # Update metadata
+                    queue_id = id(queue)
+                    if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
+                        self.connection_metadata[user_id][queue_id]["message_count"] += 1
+                    
+                    # Update heartbeat
+                    self.last_heartbeat[user_id] = datetime.utcnow()
+                    
+                    print(f"✅ SSE: Successfully sent {event_type} to user {user_id}")
                     broadcast_count += 1
+                    user_broadcast_count += 1
+                except asyncio.TimeoutError:
+                    print(f"⏰ SSE: Timeout broadcasting to user {user_id} - connection may be stale")
+                    failed_connections.append((user_id, queue))
+                    queues.discard(queue)
                 except Exception as e:
                     print(f"❌ SSE: Failed to broadcast to user {user_id}: {str(e)}")
-                    # Remove broken connections
+                    failed_connections.append((user_id, queue))
                     queues.discard(queue)
+            
+            print(f"🔍 SSE: Broadcast to user {user_id} complete: {user_broadcast_count} successful")
+            
+            # If user has no working connections, remove them entirely
+            if not queues:
+                print(f"❌ SSE: Removing user {user_id} - no working connections")
+                del self.connections[user_id]
+                if user_id in self.connection_metadata:
+                    del self.connection_metadata[user_id]
+                if user_id in self.last_heartbeat:
+                    del self.last_heartbeat[user_id]
         
-        print(f"🔍 SSE: Broadcast complete - sent to {broadcast_count} connections")
+        # Clean up failed connections
+        for user_id, queue in failed_connections:
+            if user_id in self.connections:
+                self.connections[user_id].discard(queue)
+                # Clean up metadata for failed connection
+                queue_id = id(queue)
+                if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
+                    del self.connection_metadata[user_id][queue_id]
+        
+        print(f"🔍 SSE: Broadcast summary - sent to {broadcast_count} connections, {len(failed_connections)} failed")
+        
+        # Alert if broadcast failed completely
+        if broadcast_count == 0:
+            print(f"🚨 SSE: ALERT - Message broadcast failed completely! No recipients received: {data.get('content', 'unknown')}")
     
     async def broadcast_to_user(self, user_id: int, event_type: str, data: dict):
         """Send an event to a specific user"""
@@ -80,12 +173,101 @@ class ChatEventManager:
                 "timestamp": datetime.utcnow().isoformat()
             }
             
+            successful_sends = 0
             for queue in self.connections[user_id].copy():
                 try:
-                    await queue.put(event)
+                    await asyncio.wait_for(queue.put(event), timeout=5.0)
+                    successful_sends += 1
+                    
+                    # Update metadata
+                    queue_id = id(queue)
+                    if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
+                        self.connection_metadata[user_id][queue_id]["message_count"] += 1
+                    
+                    self.last_heartbeat[user_id] = datetime.utcnow()
                 except Exception as e:
-                    # Remove broken connections
+                    print(f"❌ SSE: Failed to send to user {user_id}: {str(e)}")
                     self.connections[user_id].discard(queue)
+                    
+                    # Clean up metadata
+                    queue_id = id(queue)
+                    if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
+                        del self.connection_metadata[user_id][queue_id]
+            
+            print(f"🔍 SSE: Direct broadcast to user {user_id}: {successful_sends} successful sends")
+            
+            # Clean up user if no connections remain
+            if not self.connections[user_id]:
+                del self.connections[user_id]
+                if user_id in self.connection_metadata:
+                    del self.connection_metadata[user_id]
+                if user_id in self.last_heartbeat:
+                    del self.last_heartbeat[user_id]
+    
+    async def cleanup_stale_connections(self, max_age_seconds: int = 300):
+        """Remove connections that haven't been active for too long"""
+        now = datetime.utcnow()
+        stale_users = []
+        
+        for user_id, last_heartbeat in list(self.last_heartbeat.items()):
+            time_since_heartbeat = now - last_heartbeat
+            if time_since_heartbeat.total_seconds() > max_age_seconds:
+                print(f"🧹 SSE: Cleaning up stale connection for user {user_id} (inactive for {time_since_heartbeat.total_seconds():.1f}s)")
+                stale_users.append(user_id)
+        
+        for user_id in stale_users:
+            if user_id in self.connections:
+                del self.connections[user_id]
+            if user_id in self.connection_metadata:
+                del self.connection_metadata[user_id]
+            if user_id in self.last_heartbeat:
+                del self.last_heartbeat[user_id]
+        
+        if stale_users:
+            print(f"🧹 SSE: Cleaned up {len(stale_users)} stale connections")
+        
+        return len(stale_users)
+    
+    def get_connection_stats(self) -> Dict[str, Any]:
+        """Get detailed connection statistics"""
+        total_connections = sum(len(queues) for queues in self.connections.values())
+        now = datetime.utcnow()
+        
+        stats = {
+            "total_users": len(self.connections),
+            "total_connections": total_connections,
+            "users": {},
+            "health_summary": {
+                "healthy": 0,
+                "stale_warning": 0,
+                "stale_critical": 0
+            }
+        }
+        
+        for user_id, queues in self.connections.items():
+            last_hb = self.last_heartbeat.get(user_id, now)
+            time_since_hb = now - last_hb
+            seconds_since_hb = time_since_hb.total_seconds()
+            
+            # Determine health status
+            if seconds_since_hb < 60:  # < 1 min
+                health = "healthy"
+                stats["health_summary"]["healthy"] += 1
+            elif seconds_since_hb < 180:  # < 3 min
+                health = "stale_warning"
+                stats["health_summary"]["stale_warning"] += 1
+            else:  # >= 3 min
+                health = "stale_critical"
+                stats["health_summary"]["stale_critical"] += 1
+            
+            stats["users"][user_id] = {
+                "connections": len(queues),
+                "last_heartbeat_seconds_ago": seconds_since_hb,
+                "health": health,
+                "metadata": self.connection_metadata.get(user_id, {})
+            }
+        
+        return stats
 
 
 # Global event manager instance
@@ -107,16 +289,19 @@ async def chat_events_stream(
     This endpoint requires authentication via query parameter because browsers
     don't support custom headers for EventSource connections.
     """
+    client_info = f"{request.client.host if request.client else 'unknown'}:{request.client.port if request.client else 'unknown'}"
+    user_agent = request.headers.get('user-agent', 'unknown')
     print(f"🔍 SSE: Connection request received from user {current_user.id} ({current_user.email})")
+    print(f"🔍 SSE: Client info: {client_info}, User-Agent: {user_agent}")
     print(f"🔍 SSE: Request headers: {dict(request.headers)}")
-    print(f"🔍 SSE: Client info: {request.client}")
     
     async def event_generator():
         print(f"🔍 SSE: Starting event generator for user {current_user.id}")
         
         # Connect user to the event manager
-        queue = await chat_event_manager.connect(current_user.id)
+        queue = await chat_event_manager.connect(current_user.id, client_info)
         print(f"🔍 SSE: User {current_user.id} connected to event manager")
+        print(f"🔍 SSE: Current global connections: {sum(len(queues) for queues in chat_event_manager.connections.values())}")
         
         # Send initial connection confirmation
         initial_event = {
@@ -143,9 +328,10 @@ async def chat_events_stream(
                     yield f"data: {json.dumps(event)}\n\n"
                     
                 except asyncio.TimeoutError:
-                    # Send keepalive ping
+                    # Send keepalive ping and update heartbeat
                     ping_event = {'type': 'ping', 'timestamp': datetime.utcnow().isoformat()}
                     yield f"data: {json.dumps(ping_event)}\n\n"
+                    chat_event_manager.last_heartbeat[current_user.id] = datetime.utcnow()
                     print(f"🔍 SSE: Sent keepalive ping to user {current_user.id}")
                 
         except asyncio.CancelledError:
@@ -309,6 +495,63 @@ async def test_broadcast(
         "message": "Test broadcast sent",
         "connected_users": len(chat_event_manager.connections),
         "total_connections": sum(len(queues) for queues in chat_event_manager.connections.values())
+    }
+
+
+# Connection health and diagnostic endpoints
+@router.get("/connection-stats")
+async def get_connection_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get detailed connection statistics for debugging"""
+    if not current_user.is_admin():
+        # Allow beta testers and moderators to see basic stats
+        from app.services.chat_role_service import is_user_admin, is_user_moderator, is_user_beta_tester
+        if not (await is_user_admin(db, current_user.id) or 
+                await is_user_moderator(db, current_user.id) or 
+                await is_user_beta_tester(db, current_user.id)):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    stats = chat_event_manager.get_connection_stats()
+    return {
+        "connection_stats": stats,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@router.post("/cleanup-stale-connections")
+async def cleanup_stale_connections(
+    max_age_seconds: int = 300,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Manually trigger cleanup of stale connections"""
+    if not current_user.is_admin():
+        from app.services.chat_role_service import is_user_admin, is_user_moderator
+        if not (await is_user_admin(db, current_user.id) or await is_user_moderator(db, current_user.id)):
+            raise HTTPException(status_code=403, detail="Only admins and moderators can trigger cleanup")
+    
+    cleaned_count = await chat_event_manager.cleanup_stale_connections(max_age_seconds)
+    return {
+        "message": f"Cleaned up {cleaned_count} stale connections",
+        "cleaned_connections": cleaned_count,
+        "max_age_seconds": max_age_seconds,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@router.get("/health")
+async def sse_health_check():
+    """Quick health check for SSE system"""
+    stats = chat_event_manager.get_connection_stats()
+    
+    return {
+        "status": "healthy",
+        "total_users": stats["total_users"],
+        "total_connections": stats["total_connections"],
+        "health_summary": stats["health_summary"],
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 
