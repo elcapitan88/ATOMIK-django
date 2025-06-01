@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc
 import asyncio
 import json
-from typing import Dict, Set, Any
+from typing import Dict, Set, Any, List
 from datetime import datetime
 
 from app.db.session import get_db
@@ -26,6 +26,8 @@ class ChatEventManager:
         self.connections: Dict[int, Set[asyncio.Queue]] = {}
         self.connection_metadata: Dict[int, Dict[str, Any]] = {}  # Track connection info
         self.last_heartbeat: Dict[int, datetime] = {}  # Track last activity
+        self.message_queue: Dict[int, List[Dict[str, Any]]] = {}  # Queue messages for offline users
+        self.max_queue_size = 50  # Maximum messages to queue per user
     
     async def connect(self, user_id: int, client_info: str = "unknown") -> asyncio.Queue:
         """Add a new SSE connection for a user"""
@@ -47,6 +49,10 @@ class ChatEventManager:
         
         print(f"🔍 SSE: New connection added for user {user_id}. Total connections: {len(self.connections[user_id])}")
         print(f"🔍 SSE: Global connection count: {sum(len(queues) for queues in self.connections.values())}")
+        
+        # Send any queued messages to the newly connected user
+        await self._send_queued_messages(user_id, queue)
+        
         return queue
     
     async def disconnect(self, user_id: int, queue: asyncio.Queue):
@@ -73,6 +79,57 @@ class ChatEventManager:
             else:
                 print(f"🔍 SSE: Connection removed for user {user_id}. Remaining connections: {len(self.connections[user_id])}")
     
+    async def _send_queued_messages(self, user_id: int, queue: asyncio.Queue):
+        """Send any queued messages to a newly connected user"""
+        if user_id in self.message_queue and self.message_queue[user_id]:
+            queued_messages = self.message_queue[user_id].copy()
+            print(f"🔍 SSE: Sending {len(queued_messages)} queued messages to user {user_id}")
+            
+            for message in queued_messages:
+                try:
+                    await asyncio.wait_for(queue.put(message), timeout=2.0)
+                    print(f"✅ SSE: Sent queued message to user {user_id}: {message.get('type', 'unknown')}")
+                except Exception as e:
+                    print(f"❌ SSE: Failed to send queued message to user {user_id}: {str(e)}")
+                    break
+            
+            # Clear the queue after successful delivery
+            self.message_queue[user_id] = []
+            print(f"🔍 SSE: Cleared message queue for user {user_id}")
+    
+    async def _queue_message_for_user(self, user_id: int, event: dict):
+        """Queue a message for a user who is currently offline"""
+        if user_id not in self.message_queue:
+            self.message_queue[user_id] = []
+        
+        # Add to queue with size limit
+        self.message_queue[user_id].append(event)
+        if len(self.message_queue[user_id]) > self.max_queue_size:
+            # Remove oldest message
+            removed = self.message_queue[user_id].pop(0)
+            print(f"🔄 SSE: Queue full for user {user_id}, removed oldest message: {removed.get('type', 'unknown')}")
+        
+        print(f"📬 SSE: Queued message for offline user {user_id}. Queue size: {len(self.message_queue[user_id])}")
+    
+    async def _get_channel_members(self, channel_id: int, db: Session) -> List[int]:
+        """Get list of user IDs who should receive messages from this channel"""
+        # For now, return all users with admin or beta_tester roles
+        # TODO: Implement proper channel membership when that feature is added
+        from app.models.user import User
+        
+        try:
+            # Get all users with admin or beta_tester app_role
+            users = db.query(User).filter(
+                User.app_role.in_(['admin', 'beta_tester'])
+            ).all()
+            
+            user_ids = [user.id for user in users]
+            print(f"🔍 SSE: Found {len(user_ids)} potential channel members: {user_ids}")
+            return user_ids
+        except Exception as e:
+            print(f"❌ SSE: Error getting channel members: {str(e)}")
+            return []
+    
     async def broadcast_to_channel(self, channel_id: int, event_type: str, data: dict, db: Session):
         """Broadcast an event to all users who have access to a channel"""
         # For now, broadcast to all connected users
@@ -95,10 +152,27 @@ class ChatEventManager:
             time_since_hb = datetime.utcnow() - last_hb
             print(f"🔍 SSE: User {user_id}: {len(queues)} connections, last heartbeat {time_since_hb.total_seconds():.1f}s ago")
         
-        # If no users are connected, log this as a critical issue
+        # Get potential recipients first, even if no one is currently connected
+        potential_recipients = await self._get_channel_members(channel_id, db)
+        print(f"🔍 SSE: Potential recipients for channel {channel_id}: {potential_recipients}")
+        
+        # If no users are connected, we can still queue messages for offline users
         if not self.connections:
-            print(f"❌ SSE: CRITICAL - No users connected when trying to broadcast {event_type}")
-            print(f"❌ SSE: This message will be lost: {data.get('content', 'unknown content')}")
+            print(f"⚠️ SSE: No users currently connected for {event_type}")
+            print(f"📬 SSE: Will queue message for offline users: {data.get('content', 'unknown content')}")
+            
+            # Queue for all potential recipients
+            queued_count = 0
+            for user_id in potential_recipients:
+                await self._queue_message_for_user(user_id, {
+                    "type": event_type,
+                    "channel_id": channel_id,
+                    "data": data,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                queued_count += 1
+            
+            print(f"📬 SSE: Queued message for {queued_count} offline users")
             return
         
         # Proactively clean up stale connections before broadcasting
@@ -108,6 +182,7 @@ class ChatEventManager:
         
         broadcast_count = 0
         failed_connections = []
+        queued_count = 0
         
         for user_id, queues in list(self.connections.items()):  # Create list to avoid modification during iteration
             user_broadcast_count = 0
@@ -158,11 +233,19 @@ class ChatEventManager:
                 if user_id in self.connection_metadata and queue_id in self.connection_metadata[user_id]:
                     del self.connection_metadata[user_id][queue_id]
         
-        print(f"🔍 SSE: Broadcast summary - sent to {broadcast_count} connections, {len(failed_connections)} failed")
+        # Queue messages for offline users who should receive them
+        for user_id in potential_recipients:
+            if user_id not in self.connections:
+                await self._queue_message_for_user(user_id, event)
+                queued_count += 1
         
-        # Alert if broadcast failed completely
-        if broadcast_count == 0:
+        print(f"🔍 SSE: Broadcast summary - sent to {broadcast_count} connections, {len(failed_connections)} failed, {queued_count} queued for offline users")
+        
+        # Alert if broadcast failed completely AND no messages were queued
+        if broadcast_count == 0 and queued_count == 0:
             print(f"🚨 SSE: ALERT - Message broadcast failed completely! No recipients received: {data.get('content', 'unknown')}")
+        elif broadcast_count == 0 and queued_count > 0:
+            print(f"📬 SSE: No active connections, but queued message for {queued_count} offline users")
     
     async def broadcast_to_user(self, user_id: int, event_type: str, data: dict):
         """Send an event to a specific user"""
@@ -264,8 +347,18 @@ class ChatEventManager:
                 "connections": len(queues),
                 "last_heartbeat_seconds_ago": seconds_since_hb,
                 "health": health,
-                "metadata": self.connection_metadata.get(user_id, {})
+                "metadata": self.connection_metadata.get(user_id, {}),
+                "queued_messages": len(self.message_queue.get(user_id, []))
             }
+        
+        # Add queue statistics
+        stats["message_queues"] = {
+            "total_queued_users": len([uid for uid, queue in self.message_queue.items() if queue]),
+            "total_queued_messages": sum(len(queue) for queue in self.message_queue.values()),
+            "queue_details": {
+                user_id: len(queue) for user_id, queue in self.message_queue.items() if queue
+            }
+        }
         
         return stats
 
@@ -324,8 +417,12 @@ async def chat_events_stream(
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                     print(f"🔍 SSE: Broadcasting event to user {current_user.id}: {event.get('type', 'unknown')}")
                     
-                    # Format as SSE
-                    yield f"data: {json.dumps(event)}\n\n"
+                    # Format as SSE with explicit flush
+                    data = f"data: {json.dumps(event)}\n\n"
+                    yield data
+                    
+                    # Force a small delay to prevent rapid disconnections
+                    await asyncio.sleep(0.1)
                     
                 except asyncio.TimeoutError:
                     # Send keepalive ping and update heartbeat
@@ -347,11 +444,14 @@ async def chat_events_stream(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "Cache-Control",
+            "Access-Control-Allow-Credentials": "true",
             "X-Accel-Buffering": "no",  # Disable proxy buffering
+            "Transfer-Encoding": "chunked",
+            "Content-Type": "text/event-stream; charset=utf-8",
         }
     )
 
