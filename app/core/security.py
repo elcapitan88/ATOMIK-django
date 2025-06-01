@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Query, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 import logging
@@ -159,6 +159,76 @@ async def get_current_user(
         logger.error(f"Error in get_current_user: {str(e)}")
         raise credentials_exception
 
+
+async def get_current_user_from_query(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Get current authenticated user from query parameter token (for SSE connections)
+    
+    This function extracts the JWT token from query parameters instead of headers,
+    which is useful for Server-Sent Events (SSE) connections where setting custom
+    headers is not possible in browsers.
+    
+    Query parameter: ?token=your_jwt_token_here
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials - token required in query parameter",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        # Extract token from query parameters
+        token = request.query_params.get("token")
+        
+        if not token:
+            logger.warning("No token provided in query parameters")
+            raise credentials_exception
+        
+        # Decode JWT token (same validation logic as get_current_user)
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
+        )
+        
+        # Extract and validate claims
+        email: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        
+        if email is None or token_type != "access":
+            logger.warning("Invalid token claims in query parameter")
+            raise credentials_exception
+            
+        # Get user from database
+        user = db.query(User).filter(User.email == email).first()
+        if user is None:
+            logger.warning(f"User not found: {email}")
+            raise credentials_exception
+            
+        # Check if user is active
+        if not user.is_active:
+            logger.warning(f"Inactive user attempted access: {email}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user"
+            )
+            
+        logger.debug(f"Successfully authenticated user via query token: {email}")
+        return user
+        
+    except JWTError as e:
+        logger.error(f"JWT validation error from query parameter: {str(e)}")
+        raise credentials_exception
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_current_user_from_query: {str(e)}")
+        raise credentials_exception
+
 async def validate_token(token: str) -> bool:
     """
     Validate token without extracting user
@@ -264,6 +334,106 @@ def get_user_from_token(token: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Error in get_user_from_token: {str(e)}")
         return None
+
+
+def extract_token_from_request(request: Request) -> Optional[str]:
+    """
+    Extract JWT token from either Authorization header or query parameter
+    
+    This utility function provides flexible token extraction for different types
+    of requests (standard API calls vs SSE connections).
+    
+    Returns:
+        str: The token if found, None otherwise
+    """
+    try:
+        # First try to get token from Authorization header
+        authorization = request.headers.get("Authorization")
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization[7:]  # Remove "Bearer " prefix
+            if token:
+                logger.debug("Token extracted from Authorization header")
+                return token
+        
+        # Fallback to query parameter
+        token = request.query_params.get("token")
+        if token:
+            logger.debug("Token extracted from query parameter")
+            return token
+        
+        logger.warning("No token found in header or query parameter")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error extracting token from request: {str(e)}")
+        return None
+
+
+async def get_current_user_flexible(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Get current authenticated user with flexible token extraction
+    
+    This function can handle tokens from both Authorization headers and query parameters,
+    making it suitable for both regular API endpoints and SSE connections.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials - token required in header or query parameter",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        # Extract token using flexible method
+        token = extract_token_from_request(request)
+        
+        if not token:
+            logger.warning("No token provided in header or query parameters")
+            raise credentials_exception
+        
+        # Decode JWT token (same validation logic as other auth functions)
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
+        )
+        
+        # Extract and validate claims
+        email: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        
+        if email is None or token_type != "access":
+            logger.warning("Invalid token claims in flexible auth")
+            raise credentials_exception
+            
+        # Get user from database
+        user = db.query(User).filter(User.email == email).first()
+        if user is None:
+            logger.warning(f"User not found: {email}")
+            raise credentials_exception
+            
+        # Check if user is active
+        if not user.is_active:
+            logger.warning(f"Inactive user attempted access: {email}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user"
+            )
+            
+        logger.debug(f"Successfully authenticated user via flexible auth: {email}")
+        return user
+        
+    except JWTError as e:
+        logger.error(f"JWT validation error in flexible auth: {str(e)}")
+        raise credentials_exception
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_current_user_flexible: {str(e)}")
+        raise credentials_exception
 
 # Create singleton instance
 security_service = SecurityService()
