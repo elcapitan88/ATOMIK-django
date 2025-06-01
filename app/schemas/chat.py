@@ -60,6 +60,7 @@ class ChatMessage(ChatMessageBase):
     user_id: int
     user_name: str
     user_role_color: str
+    user_profile_picture: Optional[str] = None
     is_edited: bool
     edited_at: Optional[datetime]
     created_at: datetime

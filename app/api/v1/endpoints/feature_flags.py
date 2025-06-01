@@ -380,3 +380,99 @@ async def disable_feature(
     except Exception as e:
         logger.error(f"Error disabling feature: {str(e)}")
         raise HTTPException(status_code=500, detail="Error disabling feature")
+
+
+@router.get("/admin/debug/user/{user_id}")
+async def debug_user_access(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Debug user role and feature access (admin only)"""
+    try:
+        # Check admin access (both app_role and chat role)
+        if not current_user.is_admin() and not await is_user_admin(db, current_user.id):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        # Get user details
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check chat roles
+        from app.services.chat_role_service import is_user_admin, is_user_moderator, is_user_beta_tester
+        admin_chat_role = await is_user_admin(db, user_id)
+        moderator_chat_role = await is_user_moderator(db, user_id)
+        beta_chat_role = await is_user_beta_tester(db, user_id)
+        
+        # Get feature access
+        feature_service = FeatureFlagService(db)
+        all_features = await feature_service.get_user_features(user_id)
+        
+        return {
+            "user_id": user_id,
+            "email": user.email,
+            "app_role": user.app_role,
+            "app_role_checks": {
+                "is_admin": user.is_admin(),
+                "is_moderator": user.is_moderator(),
+                "is_beta_tester": user.is_beta_tester()
+            },
+            "chat_roles": {
+                "admin": admin_chat_role,
+                "moderator": moderator_chat_role,
+                "beta_tester": beta_chat_role
+            },
+            "feature_access": all_features,
+            "strategy_builder_access": {
+                "enabled": all_features.get("strategy-builder", False),
+                "config": await feature_service.get_feature_config("strategy-builder")
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error debugging user access: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error debugging user access")
+
+
+@router.get("/admin/debug/current-user")
+async def debug_current_user_access(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Debug current user role and feature access"""
+    try:
+        # Check chat roles
+        from app.services.chat_role_service import is_user_admin, is_user_moderator, is_user_beta_tester
+        admin_chat_role = await is_user_admin(db, current_user.id)
+        moderator_chat_role = await is_user_moderator(db, current_user.id)
+        beta_chat_role = await is_user_beta_tester(db, current_user.id)
+        
+        # Get feature access
+        feature_service = FeatureFlagService(db)
+        all_features = await feature_service.get_user_features(current_user.id)
+        
+        return {
+            "user_id": current_user.id,
+            "email": current_user.email,
+            "app_role": current_user.app_role,
+            "app_role_checks": {
+                "is_admin": current_user.is_admin(),
+                "is_moderator": current_user.is_moderator(),
+                "is_beta_tester": current_user.is_beta_tester()
+            },
+            "chat_roles": {
+                "admin": admin_chat_role,
+                "moderator": moderator_chat_role,
+                "beta_tester": beta_chat_role
+            },
+            "feature_access": all_features,
+            "strategy_builder_access": {
+                "enabled": all_features.get("strategy-builder", False),
+                "config": await feature_service.get_feature_config("strategy-builder")
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error debugging current user access: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error debugging current user access")
