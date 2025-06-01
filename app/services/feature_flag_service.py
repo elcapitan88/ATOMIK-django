@@ -153,7 +153,7 @@ class FeatureFlagService:
                 name="strategy-builder",
                 status=FeatureStatus.BETA,
                 rollout_strategy=RolloutStrategy.ROLE_BASED,
-                target_roles=["Admin"],
+                target_roles=["Admin", "Beta Tester"],
                 description="Advanced strategy builder with drag-drop interface and AI integration",
                 metadata={"category": "Trading Features", "priority": "high"}
             )
@@ -171,24 +171,31 @@ class FeatureFlagService:
             bool: True if feature is enabled for user
         """
         try:
+            logger.info(f"Checking feature '{feature_name}' for user {user_id}")
             config = self._feature_configs.get(feature_name)
             if not config:
                 logger.warning(f"Feature config not found: {feature_name}")
                 return False
             
+            logger.info(f"Feature {feature_name} config: status={config.status}, strategy={config.rollout_strategy}, target_roles={config.target_roles}")
+            
             # Check if feature is globally disabled
             if config.status == FeatureStatus.DISABLED:
+                logger.info(f"Feature {feature_name} is globally disabled")
                 return False
             
             # Check if feature is globally enabled
             if config.status == FeatureStatus.ENABLED and config.rollout_strategy == RolloutStrategy.ALL_USERS:
+                logger.info(f"Feature {feature_name} is globally enabled for all users")
                 return True
             
             # Check date constraints
             now = datetime.now()
             if config.start_date and now < config.start_date:
+                logger.info(f"Feature {feature_name} not yet available (start_date: {config.start_date})")
                 return False
             if config.end_date and now > config.end_date:
+                logger.info(f"Feature {feature_name} expired (end_date: {config.end_date})")
                 return False
             
             # Check dependencies
@@ -199,7 +206,9 @@ class FeatureFlagService:
                         return False
             
             # Apply rollout strategy
-            return await self._check_rollout_strategy(config, user_id)
+            result = await self._check_rollout_strategy(config, user_id)
+            logger.info(f"Feature {feature_name} rollout strategy result for user {user_id}: {result}")
+            return result
             
         except Exception as e:
             logger.error(f"Error checking feature access for {feature_name}: {str(e)}")
@@ -248,33 +257,47 @@ class FeatureFlagService:
             logger.info(f"Checking role access for user {user_id}, target_roles: {target_roles}")
             
             if user:
-                logger.info(f"User {user_id} app_role: {user.app_role}, is_admin(): {user.is_admin()}, is_beta_tester(): {user.is_beta_tester()}")
+                logger.info(f"User {user_id} found - email: {user.email}, app_role: '{user.app_role}', is_admin(): {user.is_admin()}, is_beta_tester(): {user.is_beta_tester()}")
                 
-                if "Admin" in target_roles and user.is_admin():
-                    logger.info(f"User {user_id} granted access via Admin app_role")
-                    return True
-                if "Beta Tester" in target_roles and user.is_beta_tester():
-                    logger.info(f"User {user_id} granted access via Beta Tester app_role")
-                    return True
+                # Check each target role explicitly
+                for target_role in target_roles:
+                    logger.info(f"Checking target role: '{target_role}'")
+                    
+                    if target_role == "Admin" and user.is_admin():
+                        logger.info(f"User {user_id} granted access via Admin app_role (app_role='{user.app_role}')")
+                        return True
+                    if target_role == "Beta Tester" and user.is_beta_tester():
+                        logger.info(f"User {user_id} granted access via Beta Tester app_role (app_role='{user.app_role}')")
+                        return True
+                    if target_role == "Moderator" and user.is_moderator():
+                        logger.info(f"User {user_id} granted access via Moderator app_role (app_role='{user.app_role}')")
+                        return True
+            else:
+                logger.warning(f"User {user_id} not found in database!")
             
             # Also check chat roles for backwards compatibility
+            logger.info(f"Checking chat roles for user {user_id}")
             admin_chat_role = await is_user_admin(self.db, user_id)
             beta_chat_role = await is_user_beta_tester(self.db, user_id)
             logger.info(f"User {user_id} chat roles - admin: {admin_chat_role}, beta_tester: {beta_chat_role}")
             
-            if "Admin" in target_roles and admin_chat_role:
-                logger.info(f"User {user_id} granted access via Admin chat role")
-                return True
-            if "Moderator" in target_roles and await is_user_moderator(self.db, user_id):
-                return True
-            if "Beta Tester" in target_roles and beta_chat_role:
-                logger.info(f"User {user_id} granted access via Beta Tester chat role")
-                return True
+            for target_role in target_roles:
+                if target_role == "Admin" and admin_chat_role:
+                    logger.info(f"User {user_id} granted access via Admin chat role")
+                    return True
+                if target_role == "Moderator" and await is_user_moderator(self.db, user_id):
+                    logger.info(f"User {user_id} granted access via Moderator chat role")
+                    return True
+                if target_role == "Beta Tester" and beta_chat_role:
+                    logger.info(f"User {user_id} granted access via Beta Tester chat role")
+                    return True
             
-            logger.info(f"User {user_id} denied access - no matching roles")
+            logger.info(f"User {user_id} denied access - no matching roles in app_role ('{user.app_role if user else 'USER_NOT_FOUND'}') or chat roles")
             return False
         except Exception as e:
             logger.error(f"Error checking role access: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     async def get_user_features(self, user_id: int) -> Dict[str, bool]:
@@ -288,9 +311,14 @@ class FeatureFlagService:
             Dict mapping feature names to availability status
         """
         try:
+            logger.info(f"Getting all user features for user {user_id}")
             user_features = {}
             for feature_name in self._feature_configs.keys():
-                user_features[feature_name] = await self.is_feature_enabled(feature_name, user_id)
+                is_enabled = await self.is_feature_enabled(feature_name, user_id)
+                user_features[feature_name] = is_enabled
+                logger.info(f"Feature {feature_name} for user {user_id}: {is_enabled}")
+            
+            logger.info(f"Final user features for user {user_id}: {user_features}")
             return user_features
         except Exception as e:
             logger.error(f"Error getting user features: {str(e)}")
@@ -440,29 +468,44 @@ def create_feature_flag_decorator(feature_name: str):
         from app.core.security import get_current_user
         
         @wraps(func)
-        async def wrapper(*args, db: Session = Depends(get_db), current_user=None, **kwargs):
+        async def wrapper(*args, **kwargs):
             try:
+                # Extract current_user and db from kwargs (FastAPI dependencies)
+                current_user = kwargs.get('current_user')
+                db = kwargs.get('db')
+                
                 if not current_user:
                     raise HTTPException(
                         status_code=401,
                         detail="Authentication required"
                     )
                 
+                if not db:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Database session not available"
+                    )
+                
                 feature_service = FeatureFlagService(db)
                 has_access = await feature_service.is_feature_enabled(feature_name, current_user.id)
                 
                 if not has_access:
+                    logger.warning(f"User {current_user.id} denied access to feature '{feature_name}'")
                     raise HTTPException(
                         status_code=403,
                         detail=f"Feature '{feature_name}' is not available for your account"
                     )
                 
-                return await func(*args, current_user=current_user, db=db, **kwargs)
+                logger.debug(f"User {current_user.id} granted access to feature '{feature_name}'")
+                return await func(*args, **kwargs)
                 
             except HTTPException:
                 raise
             except Exception as e:
                 logger.error(f"Feature flag check error for {feature_name}: {str(e)}")
+                logger.error(f"Exception details: {type(e).__name__}: {str(e)}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 raise HTTPException(
                     status_code=500,
                     detail="Error checking feature availability"
