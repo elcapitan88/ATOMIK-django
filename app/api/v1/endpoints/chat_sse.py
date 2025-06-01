@@ -53,13 +53,23 @@ class ChatEventManager:
             "timestamp": datetime.utcnow().isoformat()
         }
         
+        print(f"🔍 SSE: Broadcasting {event_type} to channel {channel_id}")
+        print(f"🔍 SSE: Connected users: {list(self.connections.keys())}")
+        print(f"🔍 SSE: Message sender: {data.get('user_id', 'unknown')}")
+        
+        broadcast_count = 0
         for user_id, queues in self.connections.items():
             for queue in queues.copy():  # Copy to avoid modification during iteration
                 try:
                     await queue.put(event)
+                    print(f"🔍 SSE: Broadcasting event to user {user_id}: {event_type}")
+                    broadcast_count += 1
                 except Exception as e:
+                    print(f"❌ SSE: Failed to broadcast to user {user_id}: {str(e)}")
                     # Remove broken connections
                     queues.discard(queue)
+        
+        print(f"🔍 SSE: Broadcast complete - sent to {broadcast_count} connections")
     
     async def broadcast_to_user(self, user_id: int, event_type: str, data: dict):
         """Send an event to a specific user"""
