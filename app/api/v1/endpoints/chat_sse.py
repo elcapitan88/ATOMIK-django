@@ -413,23 +413,32 @@ async def chat_events_stream(
                     break
                 
                 try:
-                    # Wait for events with a timeout to allow periodic connection checks
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    # Shorter timeout for better production reliability (15s instead of 30s)
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
                     print(f"🔍 SSE: Broadcasting event to user {current_user.id}: {event.get('type', 'unknown')}")
                     
-                    # Format as SSE with explicit flush
-                    data = f"data: {json.dumps(event)}\n\n"
+                    # Format as SSE with retry directive for automatic reconnection
+                    data = f"retry: 3000\ndata: {json.dumps(event)}\n\n"
                     yield data
                     
-                    # Force a small delay to prevent rapid disconnections
-                    await asyncio.sleep(0.1)
+                    # Update heartbeat on successful message delivery
+                    chat_event_manager.last_heartbeat[current_user.id] = datetime.utcnow()
                     
                 except asyncio.TimeoutError:
-                    # Send keepalive ping and update heartbeat
-                    ping_event = {'type': 'ping', 'timestamp': datetime.utcnow().isoformat()}
-                    yield f"data: {json.dumps(ping_event)}\n\n"
+                    # More frequent keepalives with connection info for production debugging
+                    ping_event = {
+                        'type': 'ping', 
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'user_id': current_user.id,
+                        'connection_count': len(chat_event_manager.connections.get(current_user.id, []))
+                    }
+                    
+                    # Include retry directive and force immediate flush
+                    data = f"retry: 3000\ndata: {json.dumps(ping_event)}\n\n"
+                    yield data
+                    
                     chat_event_manager.last_heartbeat[current_user.id] = datetime.utcnow()
-                    print(f"🔍 SSE: Sent keepalive ping to user {current_user.id}")
+                    print(f"🔍 SSE: Sent keepalive ping to user {current_user.id} (every 15s for production stability)")
                 
         except asyncio.CancelledError:
             print(f"🔍 SSE: Connection cancelled for user {current_user.id}")
@@ -446,12 +455,17 @@ async def chat_events_stream(
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Cache-Control",
-            "Access-Control-Allow-Credentials": "true",
-            "X-Accel-Buffering": "no",  # Disable proxy buffering
-            "Transfer-Encoding": "chunked",
+            "Access-Control-Allow-Origin": "https://atomiktrading.io",  # Specific origin instead of *
+            "Access-Control-Allow-Headers": "Cache-Control, Authorization, Content-Type",
+            "Access-Control-Allow-Credentials": "true", 
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "X-Accel-Buffering": "no",  # Critical for Railway/nginx
+            "X-Proxy-Buffering": "no",  # Additional proxy hint
+            "Proxy-Buffering": "no",    # Another proxy hint
             "Content-Type": "text/event-stream; charset=utf-8",
+            "Transfer-Encoding": "chunked",
+            "Expires": "0",
+            "Pragma": "no-cache",
         }
     )
 
