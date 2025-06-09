@@ -1,0 +1,372 @@
+metadata:
+  id: "trend_following_trend_strength_003"
+  name: "Trend Strength Strategy"
+  category: "trend_following"
+  difficulty: "intermediate"
+  description: "Trade strong trends using ADX, directional movement, and momentum confirmation"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["adx", "trend_strength", "directional_movement", "momentum", "dmi"]
+  market_types: ["stocks", "forex", "crypto", "futures", "etfs"]
+  timeframes: ["30m", "1h", "4h", "1d"]
+
+parameters:
+  - name: "adx_period"
+    type: "integer"
+    default: 14
+    min_value: 7
+    max_value: 28
+    description: "ADX calculation period"
+    required: true
+  
+  - name: "adx_threshold"
+    type: "integer"
+    default: 25
+    min_value: 15
+    max_value: 40
+    description: "Minimum ADX for trend strength"
+    required: true
+  
+  - name: "dmi_period"
+    type: "integer"
+    default: 14
+    min_value: 7
+    max_value: 28
+    description: "Directional Movement Index period"
+    required: true
+  
+  - name: "momentum_period"
+    type: "integer"
+    default: 12
+    min_value: 5
+    max_value: 25
+    description: "Momentum indicator period"
+    required: true
+  
+  - name: "trend_filter_period"
+    type: "integer"
+    default: 50
+    min_value: 20
+    max_value: 200
+    description: "Long-term trend filter period"
+    required: true
+  
+  - name: "stop_loss_atr_multiple"
+    type: "float"
+    default: 2.5
+    min_value: 1.0
+    max_value: 5.0
+    description: "Stop loss in ATR multiples"
+    required: true
+  
+  - name: "take_profit_atr_multiple"
+    type: "float"
+    default: 4.0
+    min_value: 2.0
+    max_value: 8.0
+    description: "Take profit in ATR multiples"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 12.0
+    min_value: 5.0
+    max_value: 25.0
+    description: "Position size percentage"
+    required: true
+  
+  - name: "volume_confirmation"
+    type: "boolean"
+    default: true
+    description: "Require volume confirmation"
+    required: false
+  
+  - name: "use_parabolic_sar"
+    type: "boolean"
+    default: false
+    description: "Use Parabolic SAR for trend following"
+    required: false
+
+template_config:
+  indicators:
+    - type: "ADX"
+      parameters:
+        period: "{{adx_period}}"
+      description: "Average Directional Index for trend strength"
+    
+    - type: "DMI"
+      parameters:
+        period: "{{dmi_period}}"
+      description: "Directional Movement Index"
+    
+    - type: "MOMENTUM"
+      parameters:
+        period: "{{momentum_period}}"
+      description: "Price momentum indicator"
+    
+    - type: "EMA"
+      parameters:
+        period: "{{trend_filter_period}}"
+      description: "Long-term trend filter"
+    
+    - type: "ATR"
+      parameters:
+        period: 14
+      description: "Average True Range for stops"
+    
+    - type: "VOLUME_SMA"
+      parameters:
+        period: 20
+      description: "Volume average for confirmation"
+      enabled: "{{volume_confirmation}}"
+    
+    - type: "PARABOLIC_SAR"
+      parameters:
+        acceleration: 0.02
+        maximum: 0.2
+      description: "Parabolic SAR for trend following"
+      enabled: "{{use_parabolic_sar}}"
+  
+  entry_conditions:
+    # Long entry conditions
+    - description: "ADX indicates strong trend"
+      indicator_id: "adx"
+      operator: "GREATER_THAN"
+      value: "{{adx_threshold}}"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Positive directional movement dominates"
+      indicator_id: "dmi"
+      operator: "GREATER_THAN"
+      value: "di_minus"
+      logical_operator: "AND"
+      trade_direction: "long"
+      condition_detail: "DI+ > DI-"
+    
+    - description: "Price momentum is positive"
+      indicator_id: "momentum"
+      operator: "GREATER_THAN"
+      value: 0
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Price above long-term trend"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "ema_{{trend_filter_period}}"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Volume confirmation (if enabled)"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * 1.2"
+      logical_operator: "AND"
+      enabled: "{{volume_confirmation}}"
+      trade_direction: "long"
+    
+    - description: "Parabolic SAR support (if enabled)"
+      indicator_id: "parabolic_sar"
+      operator: "LESS_THAN"
+      value: "price"
+      logical_operator: "AND"
+      enabled: "{{use_parabolic_sar}}"
+      trade_direction: "long"
+    
+    # Short entry conditions
+    - description: "ADX indicates strong trend"
+      indicator_id: "adx"
+      operator: "GREATER_THAN"
+      value: "{{adx_threshold}}"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Negative directional movement dominates"
+      indicator_id: "dmi"
+      operator: "LESS_THAN"
+      value: "di_plus"
+      logical_operator: "AND"
+      trade_direction: "short"
+      condition_detail: "DI- > DI+"
+    
+    - description: "Price momentum is negative"
+      indicator_id: "momentum"
+      operator: "LESS_THAN"
+      value: 0
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Price below long-term trend"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "ema_{{trend_filter_period}}"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Volume confirmation (if enabled)"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * 1.2"
+      logical_operator: "AND"
+      enabled: "{{volume_confirmation}}"
+      trade_direction: "short"
+    
+    - description: "Parabolic SAR resistance (if enabled)"
+      indicator_id: "parabolic_sar"
+      operator: "GREATER_THAN"
+      value: "price"
+      logical_operator: "AND"
+      enabled: "{{use_parabolic_sar}}"
+      trade_direction: "short"
+  
+  exit_conditions:
+    # Long exit conditions
+    - description: "ADX falls below threshold (trend weakening)"
+      indicator_id: "adx"
+      operator: "LESS_THAN"
+      value: "{{adx_threshold}}"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "Directional movement reverses"
+      indicator_id: "dmi"
+      operator: "LESS_THAN"
+      value: "di_minus"
+      logical_operator: "OR"
+      trade_direction: "long"
+      condition_detail: "DI+ < DI-"
+    
+    - description: "Momentum turns negative"
+      indicator_id: "momentum"
+      operator: "LESS_THAN"
+      value: 0
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "Parabolic SAR exit signal (if enabled)"
+      indicator_id: "parabolic_sar"
+      operator: "GREATER_THAN"
+      value: "price"
+      logical_operator: "OR"
+      enabled: "{{use_parabolic_sar}}"
+      trade_direction: "long"
+    
+    # Short exit conditions
+    - description: "ADX falls below threshold (trend weakening)"
+      indicator_id: "adx"
+      operator: "LESS_THAN"
+      value: "{{adx_threshold}}"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "Directional movement reverses"
+      indicator_id: "dmi"
+      operator: "GREATER_THAN"
+      value: "di_plus"
+      logical_operator: "OR"
+      trade_direction: "short"
+      condition_detail: "DI- < DI+"
+    
+    - description: "Momentum turns positive"
+      indicator_id: "momentum"
+      operator: "GREATER_THAN"
+      value: 0
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "Parabolic SAR exit signal (if enabled)"
+      indicator_id: "parabolic_sar"
+      operator: "LESS_THAN"
+      value: "price"
+      logical_operator: "OR"
+      enabled: "{{use_parabolic_sar}}"
+      trade_direction: "short"
+  
+  risk_management:
+    stop_loss:
+      type: "atr_based"
+      atr_multiple: "{{stop_loss_atr_multiple}}"
+      trailing: true
+      trailing_trigger: 2.0  # Start trailing after 2 ATR profit
+    
+    take_profit:
+      type: "atr_based"
+      atr_multiple: "{{take_profit_atr_multiple}}"
+      partial_exits: true
+      levels: [25, 50, 25]  # Scale out in portions
+    
+    max_open_positions: 4
+    max_daily_loss: 8.0
+    
+    # Trend strength specific risk management
+    trend_weakening_exit: true
+    adx_decline_threshold: 5  # Exit if ADX drops 5 points from peak
+    consolidation_timeout: 10  # Exit after 10 bars if no progress
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      trend_strength_adjustment: true
+      adx_multiplier_table:
+        "25-30": 1.0
+        "30-40": 1.2
+        "40-50": 1.4
+        "50+": 1.5
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_low_volatility_periods: true
+  
+  additional_filters:
+    - name: "trend_quality_assessment"
+      description: "Assess overall trend quality"
+      enabled: true
+      factors: ["adx_slope", "dmi_separation", "momentum_consistency"]
+      min_quality_score: 0.7
+    
+    - name: "multiple_timeframe_analysis"
+      description: "Confirm trend on multiple timeframes"
+      enabled: true
+      timeframes: ["current", "higher"]
+      require_alignment: true
+      weight_distribution: [0.6, 0.4]
+    
+    - name: "volatility_regime_filter"
+      description: "Adjust strategy based on volatility regime"
+      enabled: true
+      volatility_lookback: 20
+      high_vol_adx_adjustment: -3
+      low_vol_adx_adjustment: +3
+    
+    - name: "market_phase_detection"
+      description: "Identify market phases (trending vs consolidating)"
+      enabled: true
+      phase_indicators: ["adx", "bollinger_width", "rsi_range"]
+      trending_phase_bias: 1.3
+      consolidation_phase_bias: 0.5
+    
+    - name: "sector_momentum_alignment"
+      description: "Consider sector momentum alignment"
+      enabled: true
+      sector_adx_requirement: 20
+      sector_correlation_weight: 0.3
+    
+    - name: "false_signal_protection"
+      description: "Protect against false trend signals"
+      enabled: true
+      adx_divergence_check: true
+      momentum_confirmation_required: true
+      min_trend_duration: 3  # Minimum bars of trend before entry
+    
+    - name: "profit_maximization"
+      description: "Maximize profits in strong trends"
+      enabled: true
+      pyramid_on_strength: true
+      max_pyramid_levels: 2
+      pyramid_adx_threshold: 35
+      position_scaling_factor: 0.5

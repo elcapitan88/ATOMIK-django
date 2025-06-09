@@ -1,0 +1,535 @@
+metadata:
+  id: "generic_custom_strategy_001"
+  name: "Custom Strategy Builder"
+  category: "generic"
+  difficulty: "customizable"
+  description: "Blank template for building custom trading strategies from scratch with full flexibility"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["custom", "generic", "flexible", "blank_slate", "user_defined"]
+  market_types: ["stocks", "forex", "crypto", "futures", "etfs", "commodities", "bonds"]
+  timeframes: ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
+
+parameters:
+  # Strategy Metadata Parameters
+  - name: "strategy_name"
+    type: "string"
+    default: "My Custom Strategy"
+    description: "Name for your custom strategy"
+    required: true
+  
+  - name: "strategy_description"
+    type: "string"
+    default: "Custom trading strategy"
+    description: "Description of what your strategy does"
+    required: true
+  
+  - name: "strategy_type"
+    type: "choice"
+    default: "momentum"
+    choices: ["momentum", "mean_reversion", "trend_following", "arbitrage", "scalping", "swing", "position", "custom"]
+    description: "Type of trading strategy"
+    required: true
+  
+  # Basic Trading Parameters
+  - name: "trade_direction"
+    type: "choice"
+    default: "both"
+    choices: ["long_only", "short_only", "both"]
+    description: "Trading direction preference"
+    required: true
+  
+  - name: "position_size_method"
+    type: "choice"
+    default: "percentage_of_account"
+    choices: ["fixed_shares", "fixed_dollar", "percentage_of_account", "risk_based", "volatility_adjusted", "kelly_criterion", "custom"]
+    description: "Position sizing method"
+    required: true
+  
+  - name: "position_size_value"
+    type: "float"
+    default: 10.0
+    min_value: 0.1
+    max_value: 100.0
+    description: "Position size value (percentage, dollars, or shares depending on method)"
+    required: true
+  
+  # Risk Management Parameters
+  - name: "use_stop_loss"
+    type: "boolean"
+    default: true
+    description: "Enable stop loss protection"
+    required: false
+  
+  - name: "stop_loss_type"
+    type: "choice"
+    default: "percentage"
+    choices: ["percentage", "fixed_price", "atr_based", "indicator_based", "trailing", "time_based", "custom"]
+    description: "Type of stop loss to use"
+    required: false
+  
+  - name: "stop_loss_value"
+    type: "float"
+    default: 3.0
+    min_value: 0.1
+    max_value: 20.0
+    description: "Stop loss value (depends on stop loss type)"
+    required: false
+  
+  - name: "use_take_profit"
+    type: "boolean"
+    default: true
+    description: "Enable take profit targets"
+    required: false
+  
+  - name: "take_profit_type"
+    type: "choice"
+    default: "percentage"
+    choices: ["percentage", "fixed_price", "atr_based", "indicator_based", "risk_reward_ratio", "time_based", "custom"]
+    description: "Type of take profit to use"
+    required: false
+  
+  - name: "take_profit_value"
+    type: "float"
+    default: 6.0
+    min_value: 0.1
+    max_value: 50.0
+    description: "Take profit value (depends on take profit type)"
+    required: false
+  
+  - name: "max_open_positions"
+    type: "integer"
+    default: 3
+    min_value: 1
+    max_value: 20
+    description: "Maximum number of simultaneous open positions"
+    required: true
+  
+  - name: "max_daily_loss"
+    type: "percentage"
+    default: 5.0
+    min_value: 1.0
+    max_value: 20.0
+    description: "Maximum daily loss percentage"
+    required: true
+  
+  # Indicator Selection Parameters
+  - name: "primary_indicator_1"
+    type: "choice"
+    default: "none"
+    choices: ["none", "SMA", "EMA", "WMA", "RSI", "MACD", "BOLLINGER_BANDS", "ATR", "STOCHASTIC", "ADX", "CCI", "WILLIAMS_R", "MFI", "VOLUME_SMA", "VWAP", "PIVOT_POINTS", "FIBONACCI"]
+    description: "Primary indicator for strategy logic"
+    required: false
+  
+  - name: "primary_indicator_1_period"
+    type: "integer"
+    default: 14
+    min_value: 2
+    max_value: 200
+    description: "Period for primary indicator 1"
+    required: false
+  
+  - name: "primary_indicator_2"
+    type: "choice"
+    default: "none"
+    choices: ["none", "SMA", "EMA", "WMA", "RSI", "MACD", "BOLLINGER_BANDS", "ATR", "STOCHASTIC", "ADX", "CCI", "WILLIAMS_R", "MFI", "VOLUME_SMA", "VWAP", "PIVOT_POINTS", "FIBONACCI"]
+    description: "Secondary indicator for strategy logic"
+    required: false
+  
+  - name: "primary_indicator_2_period"
+    type: "integer"
+    default: 20
+    min_value: 2
+    max_value: 200
+    description: "Period for primary indicator 2"
+    required: false
+  
+  - name: "confirmation_indicator"
+    type: "choice"
+    default: "none"
+    choices: ["none", "VOLUME", "RSI", "MACD", "STOCHASTIC", "ADX", "ATR", "MOMENTUM", "PRICE_ACTION"]
+    description: "Confirmation indicator"
+    required: false
+  
+  # Entry Condition Parameters
+  - name: "entry_condition_1"
+    type: "string"
+    default: "price > sma_20"
+    description: "First entry condition (use indicator names and operators)"
+    required: false
+  
+  - name: "entry_condition_2"
+    type: "string"
+    default: ""
+    description: "Second entry condition (optional)"
+    required: false
+  
+  - name: "entry_condition_3"
+    type: "string"
+    default: ""
+    description: "Third entry condition (optional)"
+    required: false
+  
+  - name: "entry_logic_operator"
+    type: "choice"
+    default: "AND"
+    choices: ["AND", "OR", "CUSTOM"]
+    description: "Logic operator between entry conditions"
+    required: false
+  
+  # Exit Condition Parameters
+  - name: "exit_condition_1"
+    type: "string"
+    default: "price < sma_20"
+    description: "First exit condition"
+    required: false
+  
+  - name: "exit_condition_2"
+    type: "string"
+    default: ""
+    description: "Second exit condition (optional)"
+    required: false
+  
+  - name: "exit_condition_3"
+    type: "string"
+    default: ""
+    description: "Third exit condition (optional)"
+    required: false
+  
+  - name: "exit_logic_operator"
+    type: "choice"
+    default: "OR"
+    choices: ["AND", "OR", "CUSTOM"]
+    description: "Logic operator between exit conditions"
+    required: false
+  
+  # Time and Market Filters
+  - name: "use_time_filter"
+    type: "boolean"
+    default: false
+    description: "Enable time-based trading restrictions"
+    required: false
+  
+  - name: "trading_start_time"
+    type: "string"
+    default: "09:30"
+    description: "Trading start time (HH:MM format)"
+    required: false
+  
+  - name: "trading_end_time"
+    type: "string"
+    default: "15:30"
+    description: "Trading end time (HH:MM format)"
+    required: false
+  
+  - name: "trading_days"
+    type: "choice"
+    default: "weekdays"
+    choices: ["weekdays", "all_days", "monday_friday", "custom"]
+    description: "Days of week to trade"
+    required: false
+  
+  - name: "use_volume_filter"
+    type: "boolean"
+    default: false
+    description: "Enable volume-based filtering"
+    required: false
+  
+  - name: "min_volume_threshold"
+    type: "integer"
+    default: 100000
+    min_value: 1000
+    max_value: 10000000
+    description: "Minimum volume threshold"
+    required: false
+  
+  - name: "use_volatility_filter"
+    type: "boolean"
+    default: false
+    description: "Enable volatility-based filtering"
+    required: false
+  
+  - name: "min_volatility_threshold"
+    type: "percentage"
+    default: 1.0
+    min_value: 0.1
+    max_value: 10.0
+    description: "Minimum volatility threshold (ATR percentage)"
+    required: false
+  
+  # Advanced Parameters
+  - name: "use_trend_filter"
+    type: "boolean"
+    default: false
+    description: "Only trade in direction of longer-term trend"
+    required: false
+  
+  - name: "trend_filter_period"
+    type: "integer"
+    default: 50
+    min_value: 10
+    max_value: 200
+    description: "Period for trend filter"
+    required: false
+  
+  - name: "use_news_filter"
+    type: "boolean"
+    default: false
+    description: "Avoid trading around major news events"
+    required: false
+  
+  - name: "use_earnings_filter"
+    type: "boolean"
+    default: false
+    description: "Avoid trading around earnings announcements"
+    required: false
+
+template_config:
+  indicators:
+    # Dynamic indicator configuration based on user selection
+    - type: "{{primary_indicator_1}}"
+      parameters:
+        period: "{{primary_indicator_1_period}}"
+      description: "User-selected primary indicator 1"
+      enabled: "{{primary_indicator_1 != 'none'}}"
+      id: "primary_1"
+    
+    - type: "{{primary_indicator_2}}"
+      parameters:
+        period: "{{primary_indicator_2_period}}"
+      description: "User-selected primary indicator 2"
+      enabled: "{{primary_indicator_2 != 'none'}}"
+      id: "primary_2"
+    
+    - type: "{{confirmation_indicator}}"
+      parameters:
+        period: 14
+      description: "User-selected confirmation indicator"
+      enabled: "{{confirmation_indicator != 'none'}}"
+      id: "confirmation"
+    
+    - type: "SMA"
+      parameters:
+        period: "{{trend_filter_period}}"
+      description: "Trend filter moving average"
+      enabled: "{{use_trend_filter}}"
+      id: "trend_filter"
+    
+    - type: "VOLUME_SMA"
+      parameters:
+        period: 20
+      description: "Volume average for filtering"
+      enabled: "{{use_volume_filter}}"
+      id: "volume_filter"
+    
+    - type: "ATR"
+      parameters:
+        period: 14
+      description: "Average True Range for volatility"
+      enabled: "{{use_volatility_filter || stop_loss_type == 'atr_based' || take_profit_type == 'atr_based'}}"
+      id: "volatility"
+  
+  entry_conditions:
+    # Dynamic entry conditions based on user input
+    - description: "User-defined entry condition 1"
+      condition: "{{entry_condition_1}}"
+      logical_operator: "{{entry_logic_operator}}"
+      enabled: "{{entry_condition_1 != ''}}"
+      trade_direction: "{{trade_direction}}"
+    
+    - description: "User-defined entry condition 2"
+      condition: "{{entry_condition_2}}"
+      logical_operator: "{{entry_logic_operator}}"
+      enabled: "{{entry_condition_2 != ''}}"
+      trade_direction: "{{trade_direction}}"
+    
+    - description: "User-defined entry condition 3"
+      condition: "{{entry_condition_3}}"
+      logical_operator: "{{entry_logic_operator}}"
+      enabled: "{{entry_condition_3 != ''}}"
+      trade_direction: "{{trade_direction}}"
+    
+    # Automatic filter conditions
+    - description: "Trend filter alignment"
+      indicator_id: "trend_filter"
+      operator: "PRICE_ABOVE_FOR_LONG"
+      value: "trend_sma"
+      logical_operator: "AND"
+      enabled: "{{use_trend_filter}}"
+      trade_direction: "long"
+    
+    - description: "Volume threshold met"
+      indicator_id: "volume_filter"
+      operator: "GREATER_THAN"
+      value: "{{min_volume_threshold}}"
+      logical_operator: "AND"
+      enabled: "{{use_volume_filter}}"
+    
+    - description: "Volatility threshold met"
+      indicator_id: "volatility"
+      operator: "GREATER_THAN"
+      value: "price * {{min_volatility_threshold}}/100"
+      logical_operator: "AND"
+      enabled: "{{use_volatility_filter}}"
+    
+    - description: "Time filter validation"
+      indicator_id: "time"
+      operator: "WITHIN_RANGE"
+      value: "{{trading_start_time}}-{{trading_end_time}}"
+      logical_operator: "AND"
+      enabled: "{{use_time_filter}}"
+  
+  exit_conditions:
+    # Dynamic exit conditions based on user input
+    - description: "User-defined exit condition 1"
+      condition: "{{exit_condition_1}}"
+      logical_operator: "{{exit_logic_operator}}"
+      enabled: "{{exit_condition_1 != ''}}"
+    
+    - description: "User-defined exit condition 2"
+      condition: "{{exit_condition_2}}"
+      logical_operator: "{{exit_logic_operator}}"
+      enabled: "{{exit_condition_2 != ''}}"
+    
+    - description: "User-defined exit condition 3"
+      condition: "{{exit_condition_3}}"
+      logical_operator: "{{exit_logic_operator}}"
+      enabled: "{{exit_condition_3 != ''}}"
+    
+    # Automatic risk management exits
+    - description: "Stop loss protection"
+      type: "{{stop_loss_type}}"
+      value: "{{stop_loss_value}}"
+      logical_operator: "OR"
+      enabled: "{{use_stop_loss}}"
+    
+    - description: "Take profit target"
+      type: "{{take_profit_type}}"
+      value: "{{take_profit_value}}"
+      logical_operator: "OR"
+      enabled: "{{use_take_profit}}"
+  
+  risk_management:
+    stop_loss:
+      type: "{{stop_loss_type}}"
+      value: "{{stop_loss_value}}"
+      trailing: false
+      enabled: "{{use_stop_loss}}"
+    
+    take_profit:
+      type: "{{take_profit_type}}"
+      value: "{{take_profit_value}}"
+      partial_exits: false
+      enabled: "{{use_take_profit}}"
+    
+    max_open_positions: "{{max_open_positions}}"
+    max_daily_loss: "{{max_daily_loss}}"
+    
+    # Additional risk controls
+    position_correlation_limit: 0.8
+    max_sector_exposure: 50.0
+    drawdown_protection: true
+  
+  position_sizing:
+    method: "{{position_size_method}}"
+    parameters:
+      value: "{{position_size_value}}"
+      risk_adjustment: true
+      volatility_scaling: "{{use_volatility_filter}}"
+  
+  time_restrictions:
+    trading_sessions: ["{{trading_start_time}}-{{trading_end_time}}"]
+    days_of_week: "{{trading_days}}"
+    enabled: "{{use_time_filter}}"
+    
+    # Automatic restrictions based on filters
+    avoid_news_events: "{{use_news_filter}}"
+    avoid_earnings: "{{use_earnings_filter}}"
+  
+  additional_filters:
+    - name: "custom_logic_parser"
+      description: "Parse and validate user-defined conditions"
+      enabled: true
+      validation_rules: ["syntax_check", "indicator_availability", "logical_consistency"]
+    
+    - name: "strategy_backtesting_hints"
+      description: "Provide backtesting recommendations"
+      enabled: true
+      suggested_timeframes: ["{{timeframe}}", "higher_tf"]
+      min_data_period: "1_year"
+      recommended_instruments: "{{market_types}}"
+    
+    - name: "performance_optimization"
+      description: "Optimize strategy performance"
+      enabled: true
+      parameter_sensitivity_analysis: true
+      overfitting_protection: true
+      walk_forward_validation: true
+    
+    - name: "risk_assessment"
+      description: "Assess strategy risk characteristics"
+      enabled: true
+      max_drawdown_estimation: true
+      sharpe_ratio_target: 1.0
+      volatility_assessment: true
+    
+    - name: "market_regime_adaptation"
+      description: "Adapt to different market conditions"
+      enabled: true
+      trending_market_adjustment: 1.0
+      ranging_market_adjustment: 1.0
+      volatile_market_adjustment: 0.8
+    
+    - name: "user_guidance_system"
+      description: "Provide guidance for strategy development"
+      enabled: true
+      complexity_warnings: true
+      best_practice_suggestions: true
+      common_pitfall_alerts: true
+      
+  # Help and Documentation Section
+  user_guidance:
+    getting_started:
+      - "1. Choose your primary indicators based on your strategy type"
+      - "2. Define clear entry and exit conditions using simple syntax"
+      - "3. Set appropriate risk management parameters"
+      - "4. Test with small position sizes initially"
+      - "5. Backtest thoroughly before live trading"
+    
+    condition_syntax_help:
+      examples:
+        - "price > sma_20 (price above 20-period SMA)"
+        - "rsi < 30 (RSI oversold)"
+        - "macd_line > macd_signal (MACD bullish crossover)"
+        - "volume > volume_sma * 1.5 (volume spike)"
+        - "atr > price * 0.02 (minimum 2% volatility)"
+      
+      operators: [">" "greater than", "<" "less than", ">=" "greater than or equal", "<=" "less than or equal", "==" "equal to", "!=" "not equal to"]
+      
+      available_references:
+        price: ["open", "high", "low", "close", "price"]
+        volume: ["volume", "volume_sma"]
+        indicators: ["sma", "ema", "rsi", "macd", "bollinger", "atr", "stochastic", "adx"]
+    
+    strategy_type_guidance:
+      momentum: "Focus on breakouts, volume confirmation, and trend continuation"
+      mean_reversion: "Look for oversold/overbought conditions and support/resistance levels"
+      trend_following: "Use moving averages, directional indicators, and trend strength measures"
+      scalping: "Emphasize tight stops, quick exits, and high-frequency signals"
+      swing: "Focus on multi-day holds with wider stops and trend changes"
+    
+    common_mistakes:
+      - "Over-optimizing parameters to historical data"
+      - "Using too many indicators (keep it simple)"
+      - "Ignoring transaction costs and slippage"
+      - "Not testing in different market conditions"
+      - "Position sizes too large for account size"
+    
+    recommended_next_steps:
+      - "Start with paper trading to validate logic"
+      - "Implement proper position sizing"
+      - "Monitor performance metrics closely"
+      - "Keep a trading journal"
+      - "Continuously refine based on results"

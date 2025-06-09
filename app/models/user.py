@@ -35,6 +35,13 @@ class User(Base):
     # Add relationship to used promo code
     used_promo_code = relationship("PromoCode", foreign_keys=[promo_code_id])
     
+    # Strategy AI relationships - temporarily commented out
+    # strategy_interpretations = relationship("StrategyInterpretation", back_populates="user", cascade="all, delete-orphan")
+    # strategy_customizations = relationship("StrategyCustomization", back_populates="user", cascade="all, delete-orphan")
+    # generated_codes = relationship("GeneratedCode", back_populates="user", cascade="all, delete-orphan")
+    # ai_usage_tracking = relationship("AIUsageTracking", back_populates="user", cascade="all, delete-orphan")
+    # component_interpretations = relationship("ComponentInterpretation", back_populates="user", cascade="all, delete-orphan")
+    
     def __str__(self):
         return f"User(email={self.email})"
     

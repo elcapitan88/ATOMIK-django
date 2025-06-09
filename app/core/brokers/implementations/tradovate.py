@@ -865,7 +865,8 @@ class TradovateBroker(BaseBroker):
                 await order_monitoring_service.add_order(
                     order_id=order_id,
                     account=account,
-                    user_id=account.user_id
+                    user_id=account.user_id,
+                    order_data=order_data  # Pass the original order data
                 )
 
             return normalized_response

@@ -1,0 +1,142 @@
+metadata:
+  id: "momentum_breakout_001"
+  name: "Breakout Strategy"
+  category: "momentum"
+  difficulty: "intermediate"
+  description: "Buy when price breaks above resistance with volume confirmation, sell when price breaks below support"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["breakout", "momentum", "volume", "resistance", "support"]
+  market_types: ["stocks", "futures", "crypto"]
+  timeframes: ["5m", "15m", "30m", "1h", "4h"]
+
+parameters:
+  - name: "lookback_period"
+    type: "integer"
+    default: 20
+    min_value: 10
+    max_value: 50
+    description: "Number of bars to look back for resistance/support levels"
+    required: true
+  
+  - name: "volume_multiplier"
+    type: "float"
+    default: 1.5
+    min_value: 1.0
+    max_value: 3.0
+    description: "Volume must be X times the average volume for confirmation"
+    required: true
+  
+  - name: "breakout_threshold"
+    type: "percentage"
+    default: 0.1
+    min_value: 0.01
+    max_value: 1.0
+    description: "Minimum percentage break above/below level for signal"
+    required: true
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 2.0
+    min_value: 0.5
+    max_value: 5.0
+    description: "Stop loss percentage from entry price"
+    required: true
+  
+  - name: "take_profit_pct"
+    type: "percentage"
+    default: 4.0
+    min_value: 1.0
+    max_value: 10.0
+    description: "Take profit percentage from entry price"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 10.0
+    min_value: 1.0
+    max_value: 25.0
+    description: "Percentage of account to risk per trade"
+    required: true
+
+template_config:
+  indicators:
+    - type: "VOLUME_SMA"
+      parameters:
+        period: "{{lookback_period}}"
+      description: "Average volume for comparison"
+    
+    - type: "PIVOT_POINTS"
+      parameters:
+        period: "{{lookback_period}}"
+        calculation_method: "traditional"
+      description: "Support and resistance levels"
+  
+  entry_conditions:
+    - description: "Price breaks above resistance level"
+      indicator_id: "pivot_points"
+      operator: "GREATER_THAN"
+      value: "resistance_level * (1 + {{breakout_threshold}}/100)"
+      logical_operator: "AND"
+    
+    - description: "Volume exceeds average by multiplier"
+      indicator_id: "volume_sma"
+      operator: "GREATER_THAN"
+      value: "volume_sma * {{volume_multiplier}}"
+      logical_operator: "AND"
+    
+    - description: "Price action confirmation (close above resistance)"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "resistance_level"
+      logical_operator: "AND"
+  
+  exit_conditions:
+    - description: "Price breaks below support level"
+      indicator_id: "pivot_points"
+      operator: "LESS_THAN"
+      value: "support_level * (1 - {{breakout_threshold}}/100)"
+      logical_operator: "OR"
+    
+    - description: "Volume dries up (signal weakness)"
+      indicator_id: "volume_sma"
+      operator: "LESS_THAN"
+      value: "volume_sma * 0.8"
+      logical_operator: "OR"
+  
+  risk_management:
+    stop_loss:
+      type: "percentage"
+      value: "{{stop_loss_pct}}"
+      trailing: false
+    
+    take_profit:
+      type: "percentage"
+      value: "{{take_profit_pct}}"
+      partial_exits: false
+    
+    max_open_positions: 3
+    max_daily_loss: 6.0
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      max_position_value: 50000
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    avoid_news_events: true
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+  
+  additional_filters:
+    - name: "trend_filter"
+      description: "Only trade breakouts in direction of longer-term trend"
+      enabled: true
+    
+    - name: "gap_filter"
+      description: "Avoid trading large overnight gaps"
+      enabled: true
+      max_gap_percentage: 3.0

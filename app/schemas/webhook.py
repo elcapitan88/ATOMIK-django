@@ -101,6 +101,43 @@ class WebhookLogOut(WebhookLogBase):
     class Config:
         from_attributes = True
 
+# Secure schema - NEVER exposes secret_key
+class WebhookSecureOut(WebhookBase):
+    id: int
+    token: str  
+    user_id: int
+    is_active: bool
+    is_shared: bool = False
+    created_at: datetime
+    last_triggered: Optional[datetime] = None  
+    webhook_url: str
+    subscriber_count: Optional[int] = 0
+    rating: Optional[float] = 0.0
+    username: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+# Creation response - shows secret_key ONLY during webhook creation
+class WebhookCreateResponse(WebhookBase):
+    id: int
+    token: str  
+    user_id: int
+    secret_key: str  # Only exposed during creation
+    is_active: bool
+    is_shared: bool = False
+    created_at: datetime
+    last_triggered: Optional[datetime] = None  
+    webhook_url: str
+    complete_webhook_url: str  # Full URL with secret for easy copying
+    subscriber_count: Optional[int] = 0
+    rating: Optional[float] = 0.0
+    username: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+# Legacy schema - kept for backward compatibility if needed
 class WebhookOut(WebhookBase):
     id: int
     token: str  

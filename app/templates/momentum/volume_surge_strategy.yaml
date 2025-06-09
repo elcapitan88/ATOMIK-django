@@ -1,0 +1,214 @@
+metadata:
+  id: "momentum_volume_surge_003"
+  name: "Volume Surge Strategy"
+  category: "momentum"
+  difficulty: "beginner"
+  description: "Trade price moves accompanied by unusual volume spikes indicating institutional interest"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["volume", "momentum", "institutional", "surge", "breakout"]
+  market_types: ["stocks", "etfs", "crypto"]
+  timeframes: ["5m", "15m", "30m", "1h"]
+
+parameters:
+  - name: "volume_surge_multiplier"
+    type: "float"
+    default: 3.0
+    min_value: 2.0
+    max_value: 10.0
+    description: "Volume must be X times the average"
+    required: true
+  
+  - name: "volume_average_period"
+    type: "integer"
+    default: 20
+    min_value: 10
+    max_value: 50
+    description: "Period for volume average calculation"
+    required: true
+  
+  - name: "min_price_move"
+    type: "percentage"
+    default: 1.0
+    min_value: 0.5
+    max_value: 5.0
+    description: "Minimum price move percentage to accompany volume"
+    required: true
+  
+  - name: "confirmation_bars"
+    type: "integer"
+    default: 2
+    min_value: 1
+    max_value: 5
+    description: "Number of bars to confirm the move"
+    required: true
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 2.5
+    min_value: 1.0
+    max_value: 5.0
+    description: "Stop loss percentage"
+    required: true
+  
+  - name: "take_profit_pct"
+    type: "percentage"
+    default: 5.0
+    min_value: 2.0
+    max_value: 15.0
+    description: "Take profit percentage"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 12.0
+    min_value: 5.0
+    max_value: 25.0
+    description: "Position size as percentage of account"
+    required: true
+  
+  - name: "trend_filter"
+    type: "boolean"
+    default: true
+    description: "Only trade in direction of trend"
+    required: false
+  
+  - name: "trend_ma_period"
+    type: "integer"
+    default: 50
+    min_value: 20
+    max_value: 200
+    description: "Moving average period for trend filter"
+    required: false
+
+template_config:
+  indicators:
+    - type: "VOLUME_SMA"
+      parameters:
+        period: "{{volume_average_period}}"
+      description: "Volume moving average"
+    
+    - type: "SMA"
+      parameters:
+        period: "{{trend_ma_period}}"
+      description: "Trend filter moving average"
+    
+    - type: "ATR"
+      parameters:
+        period: 14
+      description: "Average True Range for volatility context"
+  
+  entry_conditions:
+    - description: "Volume surge detected"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * {{volume_surge_multiplier}}"
+      logical_operator: "AND"
+    
+    - description: "Significant price move accompanies volume"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "previous_close * (1 + {{min_price_move}}/100)"
+      logical_operator: "AND"
+    
+    - description: "Price action confirmation over multiple bars"
+      indicator_id: "price"
+      operator: "IS_RISING"
+      value: "{{confirmation_bars}}"
+      logical_operator: "AND"
+    
+    # Optional trend filter
+    - description: "Price above trend MA (if trend filter enabled)"
+      indicator_id: "sma"
+      operator: "GREATER_THAN"
+      value: "sma_{{trend_ma_period}}"
+      logical_operator: "AND"
+      enabled: "{{trend_filter}}"
+    
+    - description: "Volume sustained over confirmation period"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * 1.5"
+      logical_operator: "AND"
+      bars_count: "{{confirmation_bars}}"
+  
+  exit_conditions:
+    - description: "Volume drops significantly"
+      indicator_id: "volume"
+      operator: "LESS_THAN"
+      value: "volume_sma * 0.8"
+      logical_operator: "OR"
+    
+    - description: "Price fails to make new highs"
+      indicator_id: "price"
+      operator: "IS_FALLING"
+      value: 2
+      logical_operator: "OR"
+    
+    - description: "Momentum weakening (price below recent low)"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "low_{{confirmation_bars}}_bars_ago"
+      logical_operator: "OR"
+  
+  risk_management:
+    stop_loss:
+      type: "percentage"
+      value: "{{stop_loss_pct}}"
+      trailing: false
+      
+    take_profit:
+      type: "percentage" 
+      value: "{{take_profit_pct}}"
+      partial_exits: true
+      levels: [25, 50, 25]  # Take profits at different levels
+      
+    # Advanced risk management for volume-based trading
+    max_open_positions: 3
+    max_daily_loss: 6.0
+    position_correlation_limit: 0.7  # Avoid highly correlated positions
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      volatility_adjustment: true  # Adjust size based on ATR
+      max_volatility_multiple: 3.0
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    avoid_first_15_minutes: true  # Avoid opening volatility
+    avoid_last_30_minutes: true   # Avoid closing volatility
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+  
+  additional_filters:
+    - name: "liquidity_filter"
+      description: "Ensure adequate liquidity for position size"
+      enabled: true
+      min_average_volume: 100000
+      volume_multiple_of_position: 10
+    
+    - name: "volatility_filter"
+      description: "Avoid extremely volatile conditions"
+      enabled: true
+      max_atr_percentage: 5.0
+    
+    - name: "news_filter"
+      description: "Enhanced caution around news events"
+      enabled: true
+      check_recent_news: true
+      news_impact_threshold: "medium"
+    
+    - name: "sector_filter"
+      description: "Monitor sector-wide volume patterns"
+      enabled: true
+      sector_volume_correlation: true
+    
+    - name: "price_range_filter"
+      description: "Focus on stocks within trading range"
+      enabled: true
+      min_price: 10.0
+      max_price: 1000.0
+      avoid_penny_stocks: true

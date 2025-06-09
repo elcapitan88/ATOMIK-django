@@ -1,0 +1,241 @@
+metadata:
+  id: "mean_reversion_rsi_oversold_002"
+  name: "RSI Oversold Strategy"
+  category: "mean_reversion"
+  difficulty: "beginner"
+  description: "Buy when RSI indicates oversold conditions and shows signs of reversal"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["rsi", "oversold", "mean_reversion", "momentum", "reversal"]
+  market_types: ["stocks", "forex", "crypto", "futures", "etfs"]
+  timeframes: ["30m", "1h", "4h", "1d"]
+
+parameters:
+  - name: "rsi_period"
+    type: "integer"
+    default: 14
+    min_value: 7
+    max_value: 21
+    description: "RSI calculation period"
+    required: true
+  
+  - name: "oversold_threshold"
+    type: "integer"
+    default: 30
+    min_value: 15
+    max_value: 40
+    description: "RSI oversold threshold"
+    required: true
+  
+  - name: "overbought_threshold"
+    type: "integer"
+    default: 70
+    min_value: 60
+    max_value: 85
+    description: "RSI overbought threshold for exits"
+    required: true
+  
+  - name: "confirmation_period"
+    type: "integer"
+    default: 2
+    min_value: 1
+    max_value: 5
+    description: "Bars to confirm RSI reversal"
+    required: true
+  
+  - name: "sma_period"
+    type: "integer"
+    default: 50
+    min_value: 20
+    max_value: 200
+    description: "SMA period for trend filter"
+    required: true
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 4.0
+    min_value: 2.0
+    max_value: 10.0
+    description: "Stop loss percentage"
+    required: true
+  
+  - name: "take_profit_pct"
+    type: "percentage"
+    default: 6.0
+    min_value: 3.0
+    max_value: 15.0
+    description: "Take profit percentage"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 10.0
+    min_value: 5.0
+    max_value: 25.0
+    description: "Position size percentage"
+    required: true
+  
+  - name: "use_trend_filter"
+    type: "boolean"
+    default: true
+    description: "Only buy above SMA (trend filter)"
+    required: false
+  
+  - name: "divergence_detection"
+    type: "boolean"
+    default: false
+    description: "Look for RSI-price divergence"
+    required: false
+
+template_config:
+  indicators:
+    - type: "RSI"
+      parameters:
+        period: "{{rsi_period}}"
+      description: "Relative Strength Index"
+    
+    - type: "SMA"
+      parameters:
+        period: "{{sma_period}}"
+      description: "Simple Moving Average for trend"
+    
+    - type: "STOCHASTIC"
+      parameters:
+        k_period: 14
+        d_period: 3
+      description: "Stochastic oscillator for confirmation"
+  
+  entry_conditions:
+    - description: "RSI is oversold"
+      indicator_id: "rsi"
+      operator: "LESS_THAN"
+      value: "{{oversold_threshold}}"
+      logical_operator: "AND"
+    
+    - description: "RSI starting to turn up (momentum shift)"
+      indicator_id: "rsi"
+      operator: "IS_RISING"
+      value: "{{confirmation_period}}"
+      logical_operator: "AND"
+    
+    - description: "Price above trend SMA (if trend filter enabled)"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "sma_{{sma_period}}"
+      logical_operator: "AND"
+      enabled: "{{use_trend_filter}}"
+    
+    - description: "Stochastic also oversold for confirmation"
+      indicator_id: "stochastic"
+      operator: "LESS_THAN"
+      value: 20
+      logical_operator: "AND"
+    
+    - description: "Price action confirmation (higher low or hammer)"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "previous_bar_low"
+      logical_operator: "AND"
+      pattern_type: "reversal_signal"
+  
+  exit_conditions:
+    - description: "RSI reaches overbought level"
+      indicator_id: "rsi"
+      operator: "GREATER_THAN"
+      value: "{{overbought_threshold}}"
+      logical_operator: "OR"
+    
+    - description: "RSI starts declining from high levels"
+      indicator_id: "rsi"
+      operator: "IS_FALLING"
+      value: 2
+      logical_operator: "OR"
+      threshold: "{{overbought_threshold}}"
+    
+    - description: "Stochastic signals overbought"
+      indicator_id: "stochastic"
+      operator: "GREATER_THAN"
+      value: 80
+      logical_operator: "OR"
+    
+    - description: "Price breaks below recent support"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "swing_low_5_bars"
+      logical_operator: "OR"
+  
+  risk_management:
+    stop_loss:
+      type: "percentage"
+      value: "{{stop_loss_pct}}"
+      trailing: false
+      
+    take_profit:
+      type: "percentage"
+      value: "{{take_profit_pct}}"
+      partial_exits: true
+      levels: [40, 60]  # Scale out: 40% at first target, 60% at second
+    
+    max_open_positions: 4
+    max_daily_loss: 10.0
+    
+    # RSI-specific risk controls
+    avoid_extended_oversold: true  # Don't add to positions if RSI < 20 for >5 bars
+    rsi_exit_threshold: 85  # Emergency exit if RSI becomes extremely overbought
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      rsi_adjustment: true  # Larger positions when RSI more oversold
+      max_rsi_multiplier: 1.5
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_low_volume_periods: true
+  
+  additional_filters:
+    - name: "divergence_scanner"
+      description: "Detect RSI-price divergences"
+      enabled: "{{divergence_detection}}"
+      lookback_period: 10
+      min_divergence_strength: 0.7
+    
+    - name: "multiple_rsi_timeframes"
+      description: "Check RSI on multiple timeframes"
+      enabled: true
+      timeframes: ["current", "higher"]
+      require_alignment: true
+    
+    - name: "volatility_context"
+      description: "Adjust thresholds based on volatility"
+      enabled: true
+      high_vol_adjustment: -5  # Lower thresholds in high volatility
+      low_vol_adjustment: +5   # Higher thresholds in low volatility
+    
+    - name: "sector_relative_strength"
+      description: "Compare to sector performance"
+      enabled: true
+      prefer_relative_weakness: true
+      max_sector_outperformance: 10
+    
+    - name: "news_sentiment_filter"
+      description: "Avoid stocks with very negative news"
+      enabled: true
+      min_sentiment_score: -0.5
+      news_lookback_hours: 24
+    
+    - name: "earnings_calendar"
+      description: "Avoid trading before earnings"
+      enabled: true
+      days_before_earnings: 3
+      days_after_earnings: 1
+    
+    - name: "liquidity_requirements"
+      description: "Ensure adequate liquidity"
+      enabled: true
+      min_average_volume: 500000
+      min_dollar_volume: 5000000

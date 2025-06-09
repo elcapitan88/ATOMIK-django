@@ -156,6 +156,15 @@ class FeatureFlagService:
                 target_roles=["Admin", "Beta Tester"],
                 description="Advanced strategy builder with drag-drop interface and AI integration",
                 metadata={"category": "Trading Features", "priority": "high"}
+            ),
+            "atomik-trading-lab": FeatureConfig(
+                name="atomik-trading-lab",
+                status=FeatureStatus.BETA,
+                rollout_strategy=RolloutStrategy.PERCENTAGE,
+                rollout_percentage=5,  # Start with 5% of new users
+                description="Premium onboarding flow and Trading Lab dashboard with network synchronization",
+                dependencies=[],
+                metadata={"category": "UI Enhancements", "priority": "high"}
             )
         }
     
@@ -523,3 +532,4 @@ require_ai_insights = create_feature_flag_decorator("ai-insights")
 require_broker_integration_v2 = create_feature_flag_decorator("broker-integration-v2")
 require_member_chat = create_feature_flag_decorator("member-chat")
 require_strategy_builder = create_feature_flag_decorator("strategy-builder")
+require_atomik_trading_lab = create_feature_flag_decorator("atomik-trading-lab")

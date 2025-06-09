@@ -1,0 +1,261 @@
+metadata:
+  id: "mean_reversion_bollinger_001"
+  name: "Bollinger Bounce Strategy"
+  category: "mean_reversion"
+  difficulty: "beginner"
+  description: "Buy when price touches lower Bollinger Band and bounces, sell when price touches upper band"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["bollinger_bands", "mean_reversion", "oversold", "overbought", "bounce"]
+  market_types: ["stocks", "forex", "crypto", "futures"]
+  timeframes: ["15m", "30m", "1h", "4h", "1d"]
+
+parameters:
+  - name: "bb_period"
+    type: "integer"
+    default: 20
+    min_value: 10
+    max_value: 50
+    description: "Bollinger Bands period"
+    required: true
+  
+  - name: "bb_deviation"
+    type: "float"
+    default: 2.0
+    min_value: 1.0
+    max_value: 3.0
+    description: "Bollinger Bands standard deviation"
+    required: true
+  
+  - name: "rsi_period"
+    type: "integer"
+    default: 14
+    min_value: 7
+    max_value: 21
+    description: "RSI period for additional confirmation"
+    required: true
+  
+  - name: "rsi_oversold"
+    type: "integer"
+    default: 30
+    min_value: 20
+    max_value: 40
+    description: "RSI oversold threshold"
+    required: true
+  
+  - name: "rsi_overbought"
+    type: "integer"
+    default: 70
+    min_value: 60
+    max_value: 80
+    description: "RSI overbought threshold"
+    required: true
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 3.0
+    min_value: 1.0
+    max_value: 8.0
+    description: "Stop loss percentage"
+    required: true
+  
+  - name: "take_profit_pct"
+    type: "percentage"
+    default: 4.0
+    min_value: 1.5
+    max_value: 10.0
+    description: "Take profit percentage"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 15.0
+    min_value: 5.0
+    max_value: 30.0
+    description: "Position size percentage"
+    required: true
+  
+  - name: "use_rsi_filter"
+    type: "boolean"
+    default: true
+    description: "Use RSI for additional confirmation"
+    required: false
+  
+  - name: "squeeze_filter"
+    type: "boolean"
+    default: false
+    description: "Avoid trades during low volatility periods"
+    required: false
+
+template_config:
+  indicators:
+    - type: "BOLLINGER_BANDS"
+      parameters:
+        period: "{{bb_period}}"
+        deviation: "{{bb_deviation}}"
+      description: "Bollinger Bands for mean reversion signals"
+    
+    - type: "RSI"
+      parameters:
+        period: "{{rsi_period}}"
+      description: "RSI for momentum confirmation"
+    
+    - type: "SMA"
+      parameters:
+        period: "{{bb_period}}"
+      description: "Middle band (SMA) for trend context"
+  
+  entry_conditions:
+    # Long entry conditions
+    - description: "Price touches or penetrates lower Bollinger Band"
+      indicator_id: "bollinger_bands"
+      operator: "LESS_THAN_EQUAL"
+      value: "lower_band"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "RSI confirms oversold condition (if enabled)"
+      indicator_id: "rsi"
+      operator: "LESS_THAN"
+      value: "{{rsi_oversold}}"
+      logical_operator: "AND"
+      enabled: "{{use_rsi_filter}}"
+      trade_direction: "long"
+    
+    - description: "Price shows signs of bouncing (close above low)"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "current_bar_low"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    # Short entry conditions  
+    - description: "Price touches or penetrates upper Bollinger Band"
+      indicator_id: "bollinger_bands"
+      operator: "GREATER_THAN_EQUAL"
+      value: "upper_band"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "RSI confirms overbought condition (if enabled)"
+      indicator_id: "rsi"
+      operator: "GREATER_THAN"
+      value: "{{rsi_overbought}}"
+      logical_operator: "AND"
+      enabled: "{{use_rsi_filter}}"
+      trade_direction: "short"
+    
+    - description: "Price shows signs of rejection (close below high)"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "current_bar_high"
+      logical_operator: "AND"
+      trade_direction: "short"
+  
+  exit_conditions:
+    # Long exit conditions
+    - description: "Price reaches middle band (mean reversion complete)"
+      indicator_id: "sma"
+      operator: "GREATER_THAN_EQUAL"
+      value: "sma_{{bb_period}}"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "Price touches upper Bollinger Band"
+      indicator_id: "bollinger_bands"
+      operator: "GREATER_THAN_EQUAL"
+      value: "upper_band"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "RSI becomes overbought"
+      indicator_id: "rsi"
+      operator: "GREATER_THAN"
+      value: "{{rsi_overbought}}"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    # Short exit conditions
+    - description: "Price reaches middle band (mean reversion complete)"
+      indicator_id: "sma"
+      operator: "LESS_THAN_EQUAL"
+      value: "sma_{{bb_period}}"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "Price touches lower Bollinger Band"
+      indicator_id: "bollinger_bands"
+      operator: "LESS_THAN_EQUAL"
+      value: "lower_band"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "RSI becomes oversold"
+      indicator_id: "rsi"
+      operator: "LESS_THAN"
+      value: "{{rsi_oversold}}"
+      logical_operator: "OR"
+      trade_direction: "short"
+  
+  risk_management:
+    stop_loss:
+      type: "percentage"
+      value: "{{stop_loss_pct}}"
+      trailing: false
+    
+    take_profit:
+      type: "percentage"
+      value: "{{take_profit_pct}}"
+      partial_exits: true
+      levels: [50, 50]  # Exit 50% at middle band, 50% at opposite band
+    
+    max_open_positions: 3
+    max_daily_loss: 8.0
+    
+    # Mean reversion specific risk controls
+    max_drawdown_per_trade: 5.0
+    correlation_limit: 0.6  # Avoid too many correlated positions
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      volatility_adjustment: true
+      max_position_value: 25000
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_major_news: true
+  
+  additional_filters:
+    - name: "volatility_filter"
+      description: "Avoid trading during very low volatility (squeeze)"
+      enabled: "{{squeeze_filter}}"
+      min_band_width_percentage: 2.0
+    
+    - name: "trend_context"
+      description: "Consider overall trend direction"
+      enabled: true
+      trend_lookback_period: 50
+      prefer_counter_trend: true
+    
+    - name: "volume_confirmation"
+      description: "Look for volume confirmation on bounces"
+      enabled: true
+      min_volume_multiple: 1.2
+    
+    - name: "multiple_timeframe"
+      description: "Check higher timeframe for context"
+      enabled: true
+      higher_timeframe_multiplier: 4
+      confirm_with_higher_tf: true
+    
+    - name: "market_regime"
+      description: "Adjust strategy based on market regime"
+      enabled: true
+      volatility_regime_lookback: 20
+      high_vol_adjustment: 1.5
+      low_vol_adjustment: 0.8

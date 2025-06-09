@@ -1,0 +1,196 @@
+metadata:
+  id: "momentum_gap_and_go_002"
+  name: "Gap and Go Strategy"
+  category: "momentum"
+  difficulty: "intermediate"
+  description: "Trade stocks that gap up/down at market open with strong volume continuation"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["gap", "momentum", "volume", "market_open", "continuation"]
+  market_types: ["stocks", "etfs"]
+  timeframes: ["1m", "5m", "15m"]
+
+parameters:
+  - name: "min_gap_percentage"
+    type: "percentage"
+    default: 2.0
+    min_value: 0.5
+    max_value: 10.0
+    description: "Minimum gap percentage to qualify for trade"
+    required: true
+  
+  - name: "max_gap_percentage"
+    type: "percentage"
+    default: 8.0
+    min_value: 3.0
+    max_value: 20.0
+    description: "Maximum gap percentage (avoid extreme gaps)"
+    required: true
+  
+  - name: "volume_surge_multiplier"
+    type: "float"
+    default: 2.0
+    min_value: 1.5
+    max_value: 5.0
+    description: "Volume must be X times 10-day average"
+    required: true
+  
+  - name: "continuation_bars"
+    type: "integer"
+    default: 3
+    min_value: 1
+    max_value: 10
+    description: "Number of bars to confirm continuation after gap"
+    required: true
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 1.5
+    min_value: 0.5
+    max_value: 3.0
+    description: "Stop loss percentage from entry"
+    required: true
+  
+  - name: "take_profit_pct"
+    type: "percentage"
+    default: 3.0
+    min_value: 1.0
+    max_value: 8.0
+    description: "Take profit percentage from entry"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 15.0
+    min_value: 5.0
+    max_value: 30.0
+    description: "Percentage of account to allocate"
+    required: true
+  
+  - name: "trade_direction"
+    type: "choice"
+    default: "both"
+    choices: ["long_only", "short_only", "both"]
+    description: "Direction to trade gaps"
+    required: true
+
+template_config:
+  indicators:
+    - type: "VOLUME_SMA"
+      parameters:
+        period: 10
+      description: "10-day average volume"
+    
+    - type: "SMA"
+      parameters:
+        period: 20
+      description: "20-day moving average for trend context"
+  
+  entry_conditions:
+    - description: "Gap size within acceptable range"
+      indicator_id: "price"
+      operator: "GREATER_THAN_EQUAL"
+      value: "previous_close * (1 + {{min_gap_percentage}}/100)"
+      logical_operator: "AND"
+      
+    - description: "Gap not too extreme"
+      indicator_id: "price"
+      operator: "LESS_THAN_EQUAL"
+      value: "previous_close * (1 + {{max_gap_percentage}}/100)"
+      logical_operator: "AND"
+    
+    - description: "Strong volume confirmation"
+      indicator_id: "volume_sma"
+      operator: "GREATER_THAN"
+      value: "volume_avg_10day * {{volume_surge_multiplier}}"
+      logical_operator: "AND"
+    
+    - description: "Price continues in gap direction"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "open_price"
+      logical_operator: "AND"
+      bars_count: "{{continuation_bars}}"
+    
+    - description: "Market hours trading only"
+      indicator_id: "time"
+      operator: "WITHIN_RANGE"
+      value: "09:30-16:00"
+      logical_operator: "AND"
+  
+  exit_conditions:
+    - description: "Gap fills (price returns to previous close)"
+      indicator_id: "price"
+      operator: "LESS_THAN_EQUAL"
+      value: "previous_close"
+      logical_operator: "OR"
+    
+    - description: "Volume dries up significantly"
+      indicator_id: "volume"
+      operator: "LESS_THAN"
+      value: "volume_avg_10day * 0.5"
+      logical_operator: "OR"
+    
+    - description: "End of trading day approach"
+      indicator_id: "time"
+      operator: "GREATER_THAN"
+      value: "15:30"
+      logical_operator: "OR"
+  
+  risk_management:
+    stop_loss:
+      type: "percentage"
+      value: "{{stop_loss_pct}}"
+      trailing: false
+      
+    take_profit:
+      type: "percentage"
+      value: "{{take_profit_pct}}"
+      partial_exits: true
+      levels: [50, 100]  # 50% at 1.5% profit, 50% at 3% profit
+    
+    max_open_positions: 2
+    max_daily_loss: 5.0
+    
+    # Special gap trading rules
+    max_trades_per_day: 3
+    avoid_earnings_days: true
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      max_shares: 1000
+      min_shares: 10
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    start_time: "09:30"
+    end_time: "15:30"
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_market_holidays: true
+  
+  additional_filters:
+    - name: "pre_market_volume_filter"
+      description: "Ensure adequate pre-market volume"
+      enabled: true
+      min_premarket_volume: 10000
+    
+    - name: "float_filter"
+      description: "Avoid low float stocks (hard to exit)"
+      enabled: true
+      min_float_shares: 10000000
+    
+    - name: "price_filter"
+      description: "Trade stocks within price range"
+      enabled: true
+      min_price: 5.0
+      max_price: 500.0
+    
+    - name: "earnings_filter"
+      description: "Avoid trading around earnings announcements"
+      enabled: true
+      days_before_earnings: 2
+      days_after_earnings: 1

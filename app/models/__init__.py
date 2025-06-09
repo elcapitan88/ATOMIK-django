@@ -16,6 +16,15 @@ from .chat import (
     UserChatSettings,
     ChatChannelMember
 )
+# Temporarily commented out to fix database schema issues
+# from .strategy_ai import (
+#     StrategyTemplate,
+#     StrategyInterpretation,
+#     StrategyCustomization,
+#     GeneratedCode,
+#     AIUsageTracking,
+#     ComponentInterpretation
+# )
 
 # This ensures all models are registered
 __all__ = [
@@ -35,5 +44,11 @@ __all__ = [
     "ChatReaction",
     "UserChatRole",
     "UserChatSettings",
-    "ChatChannelMember"
+    "ChatChannelMember",
+    # "StrategyTemplate",
+    # "StrategyInterpretation", 
+    # "StrategyCustomization",
+    # "GeneratedCode",
+    # "AIUsageTracking",
+    # "ComponentInterpretation"
 ]

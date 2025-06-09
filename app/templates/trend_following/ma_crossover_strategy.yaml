@@ -1,0 +1,280 @@
+metadata:
+  id: "trend_following_ma_crossover_001"
+  name: "Moving Average Crossover Strategy"
+  category: "trend_following"
+  difficulty: "beginner"
+  description: "Buy when fast MA crosses above slow MA, sell when fast MA crosses below slow MA"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["moving_average", "crossover", "trend", "ema", "sma"]
+  market_types: ["stocks", "forex", "crypto", "futures", "etfs"]
+  timeframes: ["15m", "30m", "1h", "4h", "1d"]
+
+parameters:
+  - name: "fast_ma_period"
+    type: "integer"
+    default: 12
+    min_value: 5
+    max_value: 50
+    description: "Fast moving average period"
+    required: true
+  
+  - name: "slow_ma_period"
+    type: "integer"
+    default: 26
+    min_value: 10
+    max_value: 200
+    description: "Slow moving average period"
+    required: true
+  
+  - name: "ma_type"
+    type: "choice"
+    default: "EMA"
+    choices: ["SMA", "EMA", "WMA"]
+    description: "Type of moving average"
+    required: true
+  
+  - name: "trend_filter_period"
+    type: "integer"
+    default: 50
+    min_value: 20
+    max_value: 200
+    description: "Longer-term trend filter period"
+    required: true
+  
+  - name: "use_trend_filter"
+    type: "boolean"
+    default: true
+    description: "Only trade in direction of longer-term trend"
+    required: false
+  
+  - name: "volume_confirmation"
+    type: "boolean"
+    default: false
+    description: "Require volume spike for confirmation"
+    required: false
+  
+  - name: "volume_multiplier"
+    type: "float"
+    default: 1.5
+    min_value: 1.0
+    max_value: 3.0
+    description: "Volume multiplier for confirmation"
+    required: false
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 3.0
+    min_value: 1.0
+    max_value: 8.0
+    description: "Stop loss percentage"
+    required: true
+  
+  - name: "take_profit_pct"
+    type: "percentage"
+    default: 6.0
+    min_value: 2.0
+    max_value: 15.0
+    description: "Take profit percentage"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 15.0
+    min_value: 5.0
+    max_value: 30.0
+    description: "Position size percentage"
+    required: true
+
+template_config:
+  indicators:
+    - type: "{{ma_type}}"
+      parameters:
+        period: "{{fast_ma_period}}"
+      description: "Fast moving average"
+      id: "fast_ma"
+    
+    - type: "{{ma_type}}"
+      parameters:
+        period: "{{slow_ma_period}}"
+      description: "Slow moving average"  
+      id: "slow_ma"
+    
+    - type: "{{ma_type}}"
+      parameters:
+        period: "{{trend_filter_period}}"
+      description: "Trend filter moving average"
+      id: "trend_ma"
+    
+    - type: "VOLUME_SMA"
+      parameters:
+        period: 20
+      description: "Volume average for confirmation"
+      enabled: "{{volume_confirmation}}"
+  
+  entry_conditions:
+    # Long entry conditions
+    - description: "Fast MA crosses above slow MA"
+      indicator_id: "fast_ma"
+      operator: "CROSSES_ABOVE"
+      value: "slow_ma"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Price above trend filter (if enabled)"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "trend_ma"
+      logical_operator: "AND"
+      enabled: "{{use_trend_filter}}"
+      trade_direction: "long"
+    
+    - description: "Volume confirmation (if enabled)"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * {{volume_multiplier}}"
+      logical_operator: "AND"
+      enabled: "{{volume_confirmation}}"
+      trade_direction: "long"
+    
+    - description: "Both MAs trending upward"
+      indicator_id: "fast_ma"
+      operator: "IS_RISING"
+      value: 2
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    # Short entry conditions
+    - description: "Fast MA crosses below slow MA"
+      indicator_id: "fast_ma"
+      operator: "CROSSES_BELOW"
+      value: "slow_ma"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Price below trend filter (if enabled)"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "trend_ma"
+      logical_operator: "AND"
+      enabled: "{{use_trend_filter}}"
+      trade_direction: "short"
+    
+    - description: "Volume confirmation (if enabled)"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * {{volume_multiplier}}"
+      logical_operator: "AND"
+      enabled: "{{volume_confirmation}}"
+      trade_direction: "short"
+    
+    - description: "Both MAs trending downward"
+      indicator_id: "fast_ma"
+      operator: "IS_FALLING"
+      value: 2
+      logical_operator: "AND"
+      trade_direction: "short"
+  
+  exit_conditions:
+    # Long exit conditions
+    - description: "Fast MA crosses below slow MA"
+      indicator_id: "fast_ma"
+      operator: "CROSSES_BELOW"
+      value: "slow_ma"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "Price falls significantly below fast MA"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "fast_ma * 0.98"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    # Short exit conditions
+    - description: "Fast MA crosses above slow MA"
+      indicator_id: "fast_ma"
+      operator: "CROSSES_ABOVE"
+      value: "slow_ma"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "Price rises significantly above fast MA"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "fast_ma * 1.02"
+      logical_operator: "OR"
+      trade_direction: "short"
+  
+  risk_management:
+    stop_loss:
+      type: "percentage"
+      value: "{{stop_loss_pct}}"
+      trailing: true
+      trailing_distance: 1.5
+    
+    take_profit:
+      type: "percentage"
+      value: "{{take_profit_pct}}"
+      partial_exits: true
+      levels: [50, 50]  # Scale out at targets
+    
+    max_open_positions: 3
+    max_daily_loss: 8.0
+    
+    # Trend following specific risk management
+    trend_strength_exit: true  # Exit if trend weakens significantly
+    max_adverse_excursion: 4.0  # Maximum drawdown per trade
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      trend_strength_adjustment: true  # Larger positions in stronger trends
+      max_trend_multiplier: 1.5
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_choppy_periods: true
+  
+  additional_filters:
+    - name: "trend_strength_filter"
+      description: "Measure trend strength before entry"
+      enabled: true
+      min_ma_separation: 1.0  # Minimum % separation between MAs
+      ma_alignment_required: true
+    
+    - name: "false_signal_filter"
+      description: "Avoid false breakouts and whipsaws"
+      enabled: true
+      confirmation_bars: 2
+      min_price_move: 0.5
+    
+    - name: "market_regime_filter"
+      description: "Adapt to different market conditions"
+      enabled: true
+      trending_market_bias: 1.2
+      ranging_market_bias: 0.6
+    
+    - name: "correlation_diversification"
+      description: "Avoid over-concentration in correlated assets"
+      enabled: true
+      max_correlation: 0.7
+      max_correlated_positions: 2
+    
+    - name: "volatility_adjustment"
+      description: "Adjust parameters based on volatility"
+      enabled: true
+      volatility_lookback: 20
+      high_vol_ma_adjustment: 1.2
+      low_vol_ma_adjustment: 0.8
+    
+    - name: "news_impact_filter"
+      description: "Consider impact of news and events"
+      enabled: true
+      avoid_major_events: true
+      earnings_calendar_check: true
+      economic_calendar_check: true

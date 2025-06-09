@@ -1,0 +1,311 @@
+metadata:
+  id: "mean_reversion_support_resistance_003"
+  name: "Support/Resistance Bounce Strategy"
+  category: "mean_reversion"
+  difficulty: "intermediate"
+  description: "Trade bounces off established support and resistance levels with confirmation"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["support", "resistance", "levels", "bounce", "mean_reversion", "price_action"]
+  market_types: ["stocks", "forex", "crypto", "futures"]
+  timeframes: ["15m", "30m", "1h", "4h", "1d"]
+
+parameters:
+  - name: "lookback_period"
+    type: "integer"
+    default: 50
+    min_value: 20
+    max_value: 100
+    description: "Period to identify support/resistance levels"
+    required: true
+  
+  - name: "min_touches"
+    type: "integer"
+    default: 2
+    min_value: 2
+    max_value: 5
+    description: "Minimum touches to confirm level"
+    required: true
+  
+  - name: "level_tolerance"
+    type: "percentage"
+    default: 0.5
+    min_value: 0.1
+    max_value: 2.0
+    description: "Tolerance around support/resistance level"
+    required: true
+  
+  - name: "confirmation_bars"
+    type: "integer"
+    default: 2
+    min_value: 1
+    max_value: 5
+    description: "Bars needed to confirm bounce"
+    required: true
+  
+  - name: "volume_confirmation"
+    type: "boolean"
+    default: true
+    description: "Require volume spike for confirmation"
+    required: false
+  
+  - name: "volume_multiplier"
+    type: "float"
+    default: 1.5
+    min_value: 1.0
+    max_value: 3.0
+    description: "Volume multiplier for confirmation"
+    required: false
+  
+  - name: "stop_loss_pct"
+    type: "percentage"
+    default: 2.0
+    min_value: 1.0
+    max_value: 5.0
+    description: "Stop loss percentage beyond level"
+    required: true
+  
+  - name: "take_profit_ratio"
+    type: "float"
+    default: 2.0
+    min_value: 1.0
+    max_value: 5.0
+    description: "Risk:reward ratio for take profit"
+    required: true
+  
+  - name: "position_size_pct"
+    type: "percentage"
+    default: 12.0
+    min_value: 5.0
+    max_value: 25.0
+    description: "Position size percentage"
+    required: true
+  
+  - name: "rsi_filter"
+    type: "boolean"
+    default: true
+    description: "Use RSI to filter extreme conditions"
+    required: false
+
+template_config:
+  indicators:
+    - type: "PIVOT_POINTS"
+      parameters:
+        period: "{{lookback_period}}"
+        sensitivity: "medium"
+      description: "Identify support and resistance levels"
+    
+    - type: "VOLUME_SMA"
+      parameters:
+        period: 20
+      description: "Average volume for confirmation"
+    
+    - type: "RSI"
+      parameters:
+        period: 14
+      description: "RSI for extreme condition filter"
+    
+    - type: "ATR"
+      parameters:
+        period: 14
+      description: "Average True Range for stop placement"
+  
+  entry_conditions:
+    # Support bounce (long) conditions
+    - description: "Price approaches established support level"
+      indicator_id: "pivot_points"
+      operator: "WITHIN_RANGE"
+      value: "support_level ± {{level_tolerance}}%"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Support level has minimum required touches"
+      indicator_id: "pivot_points"
+      operator: "TOUCHES_COUNT"
+      value: "{{min_touches}}"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Price shows bounce pattern (higher low or hammer)"
+      indicator_id: "price"
+      operator: "REVERSAL_PATTERN"
+      value: "bullish_reversal"
+      logical_operator: "AND"
+      trade_direction: "long"
+      confirmation_bars: "{{confirmation_bars}}"
+    
+    - description: "Volume confirms the bounce"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * {{volume_multiplier}}"
+      logical_operator: "AND"
+      enabled: "{{volume_confirmation}}"
+      trade_direction: "long"
+    
+    - description: "RSI not extremely overbought"
+      indicator_id: "rsi"
+      operator: "LESS_THAN"
+      value: 75
+      logical_operator: "AND"
+      enabled: "{{rsi_filter}}"
+      trade_direction: "long"
+    
+    # Resistance rejection (short) conditions
+    - description: "Price approaches established resistance level"
+      indicator_id: "pivot_points"
+      operator: "WITHIN_RANGE"
+      value: "resistance_level ± {{level_tolerance}}%"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Resistance level has minimum required touches"
+      indicator_id: "pivot_points"
+      operator: "TOUCHES_COUNT"
+      value: "{{min_touches}}"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Price shows rejection pattern (lower high or shooting star)"
+      indicator_id: "price"
+      operator: "REVERSAL_PATTERN"
+      value: "bearish_reversal"
+      logical_operator: "AND"
+      trade_direction: "short"
+      confirmation_bars: "{{confirmation_bars}}"
+    
+    - description: "Volume confirms the rejection"
+      indicator_id: "volume"
+      operator: "GREATER_THAN"
+      value: "volume_sma * {{volume_multiplier}}"
+      logical_operator: "AND"
+      enabled: "{{volume_confirmation}}"
+      trade_direction: "short"
+    
+    - description: "RSI not extremely oversold"
+      indicator_id: "rsi"
+      operator: "GREATER_THAN"
+      value: 25
+      logical_operator: "AND"
+      enabled: "{{rsi_filter}}"
+      trade_direction: "short"
+  
+  exit_conditions:
+    # Long exit conditions
+    - description: "Price reaches target (risk:reward ratio)"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "entry_price + (stop_distance * {{take_profit_ratio}})"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "Price approaches next resistance level"
+      indicator_id: "pivot_points"
+      operator: "WITHIN_RANGE"
+      value: "next_resistance_level ± {{level_tolerance}}%"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "Support level is broken convincingly"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "support_level * (1 - {{level_tolerance}}/100)"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    # Short exit conditions
+    - description: "Price reaches target (risk:reward ratio)"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "entry_price - (stop_distance * {{take_profit_ratio}})"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "Price approaches next support level"
+      indicator_id: "pivot_points"
+      operator: "WITHIN_RANGE"
+      value: "next_support_level ± {{level_tolerance}}%"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "Resistance level is broken convincingly"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "resistance_level * (1 + {{level_tolerance}}/100)"
+      logical_operator: "OR"
+      trade_direction: "short"
+  
+  risk_management:
+    stop_loss:
+      type: "level_based"
+      value: "{{stop_loss_pct}}"
+      placement: "beyond_level"  # Stop beyond support/resistance level
+      
+    take_profit:
+      type: "risk_reward_ratio"
+      ratio: "{{take_profit_ratio}}"
+      partial_exits: true
+      levels: [50, 50]  # 50% at 1:1, 50% at full target
+    
+    max_open_positions: 3
+    max_daily_loss: 6.0
+    
+    # Level-based risk management
+    max_simultaneous_levels: 2  # Don't trade too many levels at once
+    min_level_separation: 2.0   # Minimum % separation between levels
+  
+  position_sizing:
+    method: "PERCENTAGE_OF_ACCOUNT"
+    parameters:
+      percentage: "{{position_size_pct}}"
+      risk_based_sizing: true  # Size based on distance to stop
+      max_risk_per_trade: 2.0
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_major_economic_events: true
+  
+  additional_filters:
+    - name: "level_strength_analysis"
+      description: "Analyze strength of support/resistance levels"
+      enabled: true
+      factors: ["age", "touches", "volume", "timeframe_confluence"]
+      min_strength_score: 0.6
+    
+    - name: "multiple_timeframe_confluence"
+      description: "Confirm levels on multiple timeframes"
+      enabled: true
+      timeframes: ["current", "higher"]
+      require_confluence: true
+    
+    - name: "market_structure_context"
+      description: "Consider overall market structure"
+      enabled: true
+      trend_alignment: "prefer_counter_trend"
+      structure_breaks: "monitor"
+    
+    - name: "order_flow_analysis"
+      description: "Analyze order flow around levels"
+      enabled: true
+      look_for_absorption: true
+      volume_profile_confirmation: true
+    
+    - name: "time_of_day_filter"
+      description: "Prefer certain times for level trading"
+      enabled: true
+      preferred_hours: ["09:30-11:00", "14:00-15:30"]
+      avoid_lunch_hour: true
+    
+    - name: "correlation_filter"
+      description: "Avoid trading correlated instruments simultaneously"
+      enabled: true
+      max_correlation: 0.7
+      correlation_lookback: 30
+    
+    - name: "market_regime_adaptation"
+      description: "Adapt to different market conditions"
+      enabled: true
+      trending_market_adjustment: 0.8  # Reduce activity in strong trends
+      ranging_market_adjustment: 1.2   # Increase activity in ranges

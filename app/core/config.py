@@ -34,11 +34,12 @@ class Settings(BaseSettings):
     PROD_DATABASE_URL: str = ""
     SQL_ECHO: bool = False 
     
-    # Database pool settings
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 10
-    DB_POOL_TIMEOUT: int = 30
-    DB_POOL_RECYCLE: int = 1800
+    # Database pool settings (optimized for memory efficiency)
+    DB_POOL_SIZE: int = 8
+    DB_MAX_OVERFLOW: int = 15
+    DB_POOL_TIMEOUT: int = 20
+    DB_POOL_RECYCLE: int = 3600  # 1 hour
+    DB_POOL_PRE_PING: bool = True
     
 
     #Email Settings
@@ -72,18 +73,27 @@ class Settings(BaseSettings):
                 "max_overflow": self.DB_MAX_OVERFLOW,
                 "pool_timeout": self.DB_POOL_TIMEOUT,
                 "pool_recycle": self.DB_POOL_RECYCLE,
-                "pool_pre_ping": True,
+                "pool_pre_ping": self.DB_POOL_PRE_PING,
                 "echo": self.SQL_ECHO,
+                # Add connection health checks
+                "connect_args": {
+                    "connect_timeout": 10,
+                    "application_name": "atomik_trading_api"
+                }
             }
         else:
-            # Development parameters
+            # Development parameters (more conservative)
             return {
-                "pool_size": 2,
-                "max_overflow": 5,
-                "pool_timeout": 30,
-                "pool_recycle": 900,  # 15 minutes
-                "pool_pre_ping": True,
+                "pool_size": 3,
+                "max_overflow": 7,
+                "pool_timeout": 20,
+                "pool_recycle": 1800,  # 30 minutes
+                "pool_pre_ping": self.DB_POOL_PRE_PING,
                 "echo": self.SQL_ECHO,
+                "connect_args": {
+                    "connect_timeout": 10,
+                    "application_name": "atomik_trading_api_dev"
+                }
             }
     
     # Security and Authentication Settings

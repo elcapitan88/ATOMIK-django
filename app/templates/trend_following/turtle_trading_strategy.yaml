@@ -1,0 +1,314 @@
+metadata:
+  id: "trend_following_turtle_trading_002"
+  name: "Turtle Trading Strategy"
+  category: "trend_following"
+  difficulty: "advanced"
+  description: "Classic turtle trading system with breakout entries and ATR-based position sizing"
+  version: "1.0"
+  author: "System"
+  created_at: "2025-06-05T00:00:00Z"
+  updated_at: "2025-06-05T00:00:00Z"
+  tags: ["turtle", "breakout", "atr", "position_sizing", "trend_following", "classic"]
+  market_types: ["stocks", "futures", "commodities", "forex"]
+  timeframes: ["1h", "4h", "1d"]
+
+parameters:
+  - name: "entry_breakout_period"
+    type: "integer"
+    default: 20
+    min_value: 10
+    max_value: 55
+    description: "Breakout period for entry signals"
+    required: true
+  
+  - name: "exit_breakout_period"
+    type: "integer"
+    default: 10
+    min_value: 5
+    max_value: 30
+    description: "Breakout period for exit signals"
+    required: true
+  
+  - name: "atr_period"
+    type: "integer"
+    default: 20
+    min_value: 10
+    max_value: 30
+    description: "ATR calculation period"
+    required: true
+  
+  - name: "stop_loss_atr_multiple"
+    type: "float"
+    default: 2.0
+    min_value: 1.0
+    max_value: 4.0
+    description: "Stop loss distance in ATR multiples"
+    required: true
+  
+  - name: "position_size_atr_multiple"
+    type: "float"
+    default: 1.0
+    min_value: 0.5
+    max_value: 2.0
+    description: "Position sizing ATR multiple (risk per unit)"
+    required: true
+  
+  - name: "max_account_risk"
+    type: "percentage"
+    default: 2.0
+    min_value: 0.5
+    max_value: 5.0
+    description: "Maximum account risk per trade"
+    required: true
+  
+  - name: "max_correlated_positions"
+    type: "integer"
+    default: 4
+    min_value: 1
+    max_value: 10
+    description: "Maximum correlated positions"
+    required: true
+  
+  - name: "max_total_positions"
+    type: "integer"
+    default: 8
+    min_value: 2
+    max_value: 20
+    description: "Maximum total positions"
+    required: true
+  
+  - name: "use_filtered_entry"
+    type: "boolean"
+    default: true
+    description: "Use filtered entry system (avoid recent breakouts)"
+    required: false
+  
+  - name: "filter_lookback"
+    type: "integer"
+    default: 55
+    min_value: 20
+    max_value: 100
+    description: "Lookback period for entry filter"
+    required: false
+
+template_config:
+  indicators:
+    - type: "DONCHIAN_CHANNEL"
+      parameters:
+        period: "{{entry_breakout_period}}"
+      description: "Entry breakout channel"
+      id: "entry_channel"
+    
+    - type: "DONCHIAN_CHANNEL" 
+      parameters:
+        period: "{{exit_breakout_period}}"
+      description: "Exit breakout channel"
+      id: "exit_channel"
+    
+    - type: "DONCHIAN_CHANNEL"
+      parameters:
+        period: "{{filter_lookback}}"
+      description: "Filter channel for entry validation"
+      id: "filter_channel"
+      enabled: "{{use_filtered_entry}}"
+    
+    - type: "ATR"
+      parameters:
+        period: "{{atr_period}}"
+      description: "Average True Range for position sizing"
+    
+    - type: "SMA"
+      parameters:
+        period: 50
+      description: "Trend filter moving average"
+  
+  entry_conditions:
+    # Long entry conditions
+    - description: "Price breaks above entry channel high"
+      indicator_id: "entry_channel"
+      operator: "GREATER_THAN"
+      value: "upper_band"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Entry filter validation (if enabled)"
+      indicator_id: "filter_channel"
+      operator: "BREAK_VALIDATION"
+      value: "no_recent_failure"
+      logical_operator: "AND"
+      enabled: "{{use_filtered_entry}}"
+      trade_direction: "long"
+      description_detail: "No failed breakout in last {{filter_lookback}} periods"
+    
+    - description: "Trend alignment check"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "sma_50"
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    - description: "Sufficient volatility for trading"
+      indicator_id: "atr"
+      operator: "GREATER_THAN"
+      value: "price * 0.005"  # Minimum 0.5% volatility
+      logical_operator: "AND"
+      trade_direction: "long"
+    
+    # Short entry conditions
+    - description: "Price breaks below entry channel low"
+      indicator_id: "entry_channel"
+      operator: "LESS_THAN"
+      value: "lower_band"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Entry filter validation (if enabled)"
+      indicator_id: "filter_channel"
+      operator: "BREAK_VALIDATION"
+      value: "no_recent_failure"
+      logical_operator: "AND"
+      enabled: "{{use_filtered_entry}}"
+      trade_direction: "short"
+    
+    - description: "Trend alignment check"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "sma_50"
+      logical_operator: "AND"
+      trade_direction: "short"
+    
+    - description: "Sufficient volatility for trading"
+      indicator_id: "atr"
+      operator: "GREATER_THAN"
+      value: "price * 0.005"
+      logical_operator: "AND"
+      trade_direction: "short"
+  
+  exit_conditions:
+    # Long exit conditions
+    - description: "Price breaks below exit channel low"
+      indicator_id: "exit_channel"
+      operator: "LESS_THAN"
+      value: "lower_band"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    - description: "ATR-based stop loss hit"
+      indicator_id: "price"
+      operator: "LESS_THAN"
+      value: "entry_price - (atr * {{stop_loss_atr_multiple}})"
+      logical_operator: "OR"
+      trade_direction: "long"
+    
+    # Short exit conditions
+    - description: "Price breaks above exit channel high"
+      indicator_id: "exit_channel"
+      operator: "GREATER_THAN"
+      value: "upper_band"
+      logical_operator: "OR"
+      trade_direction: "short"
+    
+    - description: "ATR-based stop loss hit"
+      indicator_id: "price"
+      operator: "GREATER_THAN"
+      value: "entry_price + (atr * {{stop_loss_atr_multiple}})"
+      logical_operator: "OR"
+      trade_direction: "short"
+  
+  risk_management:
+    stop_loss:
+      type: "atr_based"
+      atr_multiple: "{{stop_loss_atr_multiple}}"
+      trailing: false
+    
+    take_profit:
+      type: "none"  # Turtle system relies on exit signals, not fixed targets
+      exit_strategy: "channel_breakout"
+    
+    # Core turtle risk management rules
+    max_account_risk_per_trade: "{{max_account_risk}}"
+    max_correlated_positions: "{{max_correlated_positions}}"
+    max_total_positions: "{{max_total_positions}}"
+    
+    # Unit sizing rules
+    unit_calculation: "atr_based"
+    risk_per_unit: "{{position_size_atr_multiple}}"
+    max_units_per_market: 4
+    
+    # Portfolio heat management
+    max_portfolio_heat: 12.0  # Maximum 12% portfolio risk
+    heat_calculation: "sum_of_unit_risks"
+  
+  position_sizing:
+    method: "TURTLE_UNITS"
+    parameters:
+      base_risk_percentage: "{{max_account_risk}}"
+      atr_multiple: "{{position_size_atr_multiple}}"
+      max_units: 4
+      pyramid_scaling: true
+      unit_addition_rules:
+        - add_on_breakout: true
+        - min_gap_atr: 0.5
+        - max_additions: 3
+  
+  time_restrictions:
+    trading_sessions: ["market_hours"]
+    days_of_week: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    avoid_rollover_days: true  # For futures
+  
+  additional_filters:
+    - name: "market_selection_criteria"
+      description: "Original turtle market selection rules"
+      enabled: true
+      min_average_volume: 1000000
+      min_price: 5.0
+      avoid_penny_stocks: true
+      liquidity_requirements: "high"
+    
+    - name: "correlation_management"
+      description: "Manage position correlation as per turtle rules"
+      enabled: true
+      max_correlation: 0.7
+      correlation_lookback: 60
+      sector_limits:
+        technology: 3
+        financials: 3
+        energy: 2
+        healthcare: 3
+    
+    - name: "pyramid_addition_rules"
+      description: "Rules for adding to winning positions"
+      enabled: true
+      min_profit_for_addition: 0.5  # 0.5 ATR profit before adding
+      max_pyramid_levels: 4
+      position_scaling_factor: 1.0
+    
+    - name: "drawdown_protection"
+      description: "Protect against significant drawdowns"
+      enabled: true
+      max_system_drawdown: 20.0
+      drawdown_reduction_factor: 0.5
+      recovery_threshold: 10.0
+    
+    - name: "market_regime_adaptation"
+      description: "Adapt to different market regimes"
+      enabled: true
+      trend_strength_measurement: "adx"
+      min_trend_strength: 25
+      consolidation_pause: true
+    
+    - name: "breakout_quality_filter"
+      description: "Assess quality of breakout signals"
+      enabled: true
+      volume_confirmation: true
+      volume_multiplier: 1.5
+      gap_breakout_handling: "validate"
+      false_breakout_memory: 20  # Remember failed breakouts
+    
+    - name: "seasonal_adjustments"
+      description: "Account for seasonal market patterns"
+      enabled: true
+      holiday_avoidance: true
+      summer_adjustment: 0.8
+      year_end_adjustment: 0.7
+      earnings_season_caution: true
