@@ -233,6 +233,15 @@ if settings.ENVIRONMENT == "production":
         "openapi_url": None  # Disable OpenAPI schema in production
     })
 
+# Add orjson for faster JSON serialization
+try:
+    import orjson
+    from fastapi.responses import ORJSONResponse
+    app_kwargs["default_response_class"] = ORJSONResponse
+    logger.info("Using orjson for faster JSON serialization")
+except ImportError:
+    logger.warning("orjson not available, using standard JSON")
+
 app = FastAPI(**app_kwargs)
 
 # Add CSP middleware first
