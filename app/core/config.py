@@ -7,6 +7,9 @@ import secrets
 from pydantic import validator
 from pydantic_settings import BaseSettings
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     # Base Settings
@@ -65,10 +68,11 @@ class Settings(BaseSettings):
         is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
         
         if is_on_railway:
-            # Running ON Railway - try to use internal Railway connection
-            railway_internal_url = self._get_railway_internal_url()
-            if railway_internal_url:
-                return railway_internal_url
+            # Check for Railway's template variable (internal connection)
+            railway_private_url = os.getenv("DATABASE_PRIVATE_URL")
+            if railway_private_url:
+                logger.info(f"Using Railway private network database URL")
+                return railway_private_url
         
         # Fallback to standard URL logic (works for both local and Railway)
         if self.ENVIRONMENT == "production" and self.PROD_DATABASE_URL:
