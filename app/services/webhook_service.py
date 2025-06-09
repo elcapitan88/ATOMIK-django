@@ -647,29 +647,82 @@ class RailwayOptimizedWebhookProcessor:
         Process individual strategy by executing the actual trade with the broker
         """
         try:
-            # Import the strategy processor to execute trades
-            from app.services.strategy_service import StrategyProcessor
+            # CRITICAL FIX: Bypass complex async infrastructure for Railway processor
+            # Execute strategy directly with broker to avoid async/sync conflicts
             from app.db.session import SessionLocal
+            from app.models.broker import BrokerAccount
+            from app.core.brokers.base import BaseBroker
+            from app.utils.ticker_utils import validate_ticker
             
-            # CRITICAL FIX: StrategyProcessor expects sync session, not async
-            # Create a new sync session for the strategy processor
+            # Execute the strategy (this sends the order to the broker)
+            logger.info(f"Executing trade for strategy {strategy.id}: {signal_data}")
+            
+            # Use sync session for direct broker execution
             with SessionLocal() as sync_db:
-                strategy_processor = StrategyProcessor(sync_db)
-                
-                # Execute the strategy (this sends the order to the broker)
-                logger.info(f"Executing trade for strategy {strategy.id}: {signal_data}")
-                strategy_result = await strategy_processor.execute_strategy(
-                    strategy=strategy,
-                    signal_data=signal_data
-                )
-                
-                # Log the detailed result for debugging
-                logger.info(f"Strategy {strategy.id} execution completed with result: {strategy_result}")
-                
-                return {
-                    "strategy_id": strategy.id,
-                    "result": strategy_result
+                # Get account with validation
+                account = sync_db.query(BrokerAccount).filter(
+                    BrokerAccount.account_id == strategy.account_id,
+                    BrokerAccount.is_active == True
+                ).first()
+
+                if not account:
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": "Trading account not found"}
+                    }
+
+                # Validate account credentials
+                if not account.credentials or not account.credentials.is_valid:
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": "Invalid or expired account credentials"}
+                    }
+
+                # Get broker instance
+                broker = BaseBroker.get_broker_instance(account.broker_id, sync_db)
+
+                # Ensure we have a valid contract ticker
+                valid, contract_ticker = validate_ticker(strategy.ticker)
+                if not valid:
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": f"Invalid ticker format: {strategy.ticker}"}
+                    }
+
+                # Prepare and execute order with the validated contract ticker
+                order_data = {
+                    "account_id": account.account_id,
+                    "symbol": contract_ticker,
+                    "quantity": strategy.quantity,
+                    "side": signal_data["action"],
+                    "type": signal_data.get("order_type", "MARKET"),
+                    "time_in_force": signal_data.get("time_in_force", "GTC"),
                 }
+
+                # Log the order details
+                logger.info(f"Executing order directly via broker API", extra_context={"order_data": order_data})
+
+                # Execute order
+                try:
+                    order_result = await broker.place_order(account, order_data)
+                    
+                    # Log successful order execution
+                    logger.info(f"Order executed successfully for strategy {strategy.id}: {order_result}")
+                    
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {
+                            "status": "success",
+                            "order_details": order_result
+                        }
+                    }
+                    
+                except Exception as order_error:
+                    logger.error(f"Order execution failed for strategy {strategy.id}: {str(order_error)}")
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": f"Order execution failed: {str(order_error)}"}
+                    }
         except Exception as e:
             logger.error(f"Strategy {strategy.id} execution failed: {str(e)}", exc_info=True)
             return {
