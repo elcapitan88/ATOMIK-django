@@ -3,9 +3,10 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+from contextlib import contextmanager
 from sqlalchemy.orm import Session
-from app.db.session import SessionLocal
-from app.models.order import Order, OrderStatus
+from app.db.session import SessionLocal, get_db_context
+from app.models.order import Order, OrderStatus, OrderSide, OrderType
 from app.models.broker import BrokerAccount
 from app.core.brokers.base import BaseBroker
 from app.core.subscription_tiers import SubscriptionTier
@@ -40,52 +41,67 @@ class OrderStatusMonitoringService:
                 pass
         logger.info("Order status monitoring service stopped")
     
-    async def add_order(self, order_id: str, account: BrokerAccount, user_id: int):
+    async def add_order(self, order_id: str, account: BrokerAccount, user_id: int, order_data: Optional[Dict[str, Any]] = None):
         """Add a new order to be monitored"""
         if not order_id or order_id == "None":
             logger.warning(f"Attempted to monitor invalid order ID: {order_id}")
             return
 
-        # Create session for database operations
-        db = SessionLocal()
-        try:
-            # Check if order exists in database
-            order = db.query(Order).filter(
-                Order.broker_order_id == str(order_id)
-            ).first()
-            
-            if not order:
-                logger.warning(f"Order {order_id} not found in database, creating placeholder")
-                # Create a placeholder order if it doesn't exist
-                order = Order(
-                    broker_order_id=str(order_id),
-                    broker_account_id=account.id, 
-                    user_id=user_id,
-                    status=OrderStatus.PENDING,
-                    submitted_at=datetime.utcnow()
-                )
-                db.add(order)
-                db.commit()
-                db.refresh(order)
-            
-            # Add to monitoring list
-            self._active_monitors[order_id] = {
-                "account": account,
-                "last_check": datetime.utcnow(),
-                "next_check": datetime.utcnow(),  # Start checking right away
-                "check_count": 0,
-                "backoff_factor": 1.0,
-                "user_id": user_id,
-                "order_db_id": order.id
-            }
-            
-            logger.info(f"Added order {order_id} to monitoring queue")
-            
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error adding order to monitoring: {str(e)}")
-        finally:
-            db.close()
+        # Use proper session context manager
+        with get_db_context() as db:
+            try:
+                # Check if order exists in database
+                order = db.query(Order).filter(
+                    Order.broker_order_id == str(order_id)
+                ).first()
+                
+                if not order:
+                    if order_data:
+                        logger.info(f"Order {order_id} not found in database, creating complete record with order data")
+                        # Create a complete order record with provided data
+                        order = Order(
+                            broker_order_id=str(order_id),
+                            broker_account_id=account.id, 
+                            user_id=user_id,
+                            symbol=order_data.get('symbol'),
+                            side=OrderSide(order_data.get('side')),
+                            order_type=OrderType(order_data.get('type', 'MARKET')),
+                            quantity=order_data.get('quantity'),
+                            remaining_quantity=order_data.get('quantity'),
+                            time_in_force=order_data.get('time_in_force', 'GTC'),
+                            status=OrderStatus.PENDING,
+                            submitted_at=datetime.utcnow()
+                        )
+                    else:
+                        logger.warning(f"Order {order_id} not found in database, creating minimal placeholder (missing order_data)")
+                        # Fallback to minimal placeholder (this shouldn't happen anymore)
+                        order = Order(
+                            broker_order_id=str(order_id),
+                            broker_account_id=account.id, 
+                            user_id=user_id,
+                            status=OrderStatus.PENDING,
+                            submitted_at=datetime.utcnow()
+                        )
+                    db.add(order)
+                    db.commit()
+                    db.refresh(order)
+                
+                # Add to monitoring list
+                self._active_monitors[order_id] = {
+                    "account": account,
+                    "last_check": datetime.utcnow(),
+                    "next_check": datetime.utcnow(),  # Start checking right away
+                    "check_count": 0,
+                    "backoff_factor": 1.0,
+                    "user_id": user_id,
+                    "order_db_id": order.id
+                }
+                
+                logger.info(f"Added order {order_id} to monitoring queue")
+                
+            except Exception as e:
+                logger.error(f"Error adding order to monitoring: {str(e)}")
+                # Session rollback handled by context manager
     
     async def _run_monitoring_loop(self):
         """Main polling loop"""
@@ -125,86 +141,85 @@ class OrderStatusMonitoringService:
         monitor_data = self._active_monitors[order_id]
         account = monitor_data["account"]
         
-        # Create a new session for this check
-        db = SessionLocal()
-        try:
-            # Get broker instance
-            broker = BaseBroker.get_broker_instance(account.broker_id, db)
-            
-            # Call get_order_status (need to implement in TradovateBroker)
-            status_result = await broker.get_order_status(account, order_id)
-            
-            # Update the order in database
-            order = db.query(Order).get(monitor_data["order_db_id"])
-            if order:
-                old_status = order.status
+        # Use proper session context manager for each check
+        with get_db_context() as db:
+            try:
+                # Get broker instance
+                broker = BaseBroker.get_broker_instance(account.broker_id, db)
                 
-                # Update order fields
-                order.status = status_result.get("status", order.status)
-                order.filled_quantity = status_result.get("filled_quantity", order.filled_quantity)
-                order.remaining_quantity = status_result.get("remaining_quantity", order.remaining_quantity)
-                order.average_fill_price = status_result.get("average_price", order.average_fill_price)
-                order.updated_at = datetime.utcnow()
+                # Call get_order_status (need to implement in TradovateBroker)
+                status_result = await broker.get_order_status(account, order_id)
                 
-                # Set filled_at timestamp if newly filled
-                if old_status != OrderStatus.FILLED and order.status == OrderStatus.FILLED:
-                    order.filled_at = datetime.utcnow()
-                    logger.info(f"Order {order_id} filled at price {order.average_fill_price}")
+                # Update the order in database
+                order = db.query(Order).get(monitor_data["order_db_id"])
+                if order:
+                    old_status = order.status
+                    
+                    # Update order fields
+                    order.status = status_result.get("status", order.status)
+                    order.filled_quantity = status_result.get("filled_quantity", order.filled_quantity)
+                    order.remaining_quantity = status_result.get("remaining_quantity", order.remaining_quantity)
+                    order.average_fill_price = status_result.get("average_price", order.average_fill_price)
+                    order.updated_at = datetime.utcnow()
+                    
+                    # Set filled_at timestamp if newly filled
+                    if old_status != OrderStatus.FILLED and order.status == OrderStatus.FILLED:
+                        order.filled_at = datetime.utcnow()
+                        logger.info(f"Order {order_id} filled at price {order.average_fill_price}")
+                    
+                    # Save changes
+                    db.commit()
+                    
+                    # Log status change
+                    if old_status != order.status:
+                        logger.info(f"Order {order_id} status changed: {old_status} -> {order.status}")
+                    
+                    # Stop monitoring if we've reached a terminal state
+                    if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
+                        logger.info(f"Order {order_id} reached terminal state {order.status}, removing from monitoring")
+                        self._remove_from_monitoring(order_id)
+                        return
                 
-                # Save changes
-                db.commit()
+                # Update monitoring data
+                if order_id in self._active_monitors:
+                    monitor_data["last_check"] = datetime.utcnow()
+                    monitor_data["check_count"] += 1
+                    
+                    # Exponential backoff - check more frequently initially, then slow down
+                    # Start with 3 second interval, increase exponentially, cap at 30 seconds
+                    if monitor_data["check_count"] < 5:
+                        next_interval = 3  # First few checks are frequent
+                    else:
+                        monitor_data["backoff_factor"] = min(
+                            monitor_data["backoff_factor"] * 1.5,  # Exponential growth
+                            10.0  # Maximum backoff factor
+                        )
+                        next_interval = min(3 * monitor_data["backoff_factor"], 30)
+                    
+                    monitor_data["next_check"] = datetime.utcnow() + timedelta(seconds=next_interval)
+                    
+                    # If we've been checking for too long, give up
+                    if monitor_data["check_count"] > 60:  # After ~30 minutes
+                        logger.warning(f"Giving up on monitoring order {order_id} after {monitor_data['check_count']} checks")
+                        self._remove_from_monitoring(order_id)
                 
-                # Log status change
-                if old_status != order.status:
-                    logger.info(f"Order {order_id} status changed: {old_status} -> {order.status}")
+            except Exception as e:
+                logger.error(f"Error checking order {order_id} status: {str(e)}")
                 
-                # Stop monitoring if we've reached a terminal state
-                if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
-                    logger.info(f"Order {order_id} reached terminal state {order.status}, removing from monitoring")
-                    self._remove_from_monitoring(order_id)
-                    return
-            
-            # Update monitoring data
-            if order_id in self._active_monitors:
-                monitor_data["last_check"] = datetime.utcnow()
-                monitor_data["check_count"] += 1
-                
-                # Exponential backoff - check more frequently initially, then slow down
-                # Start with 3 second interval, increase exponentially, cap at 30 seconds
-                if monitor_data["check_count"] < 5:
-                    next_interval = 3  # First few checks are frequent
-                else:
-                    monitor_data["backoff_factor"] = min(
-                        monitor_data["backoff_factor"] * 1.5,  # Exponential growth
-                        10.0  # Maximum backoff factor
+                # Increase backoff on errors
+                if order_id in self._active_monitors:
+                    monitor_data = self._active_monitors[order_id]
+                    monitor_data["backoff_factor"] = min(monitor_data["backoff_factor"] * 2, 10.0)
+                    monitor_data["next_check"] = datetime.utcnow() + timedelta(
+                        seconds=min(5 * monitor_data["backoff_factor"], 60)
                     )
-                    next_interval = min(3 * monitor_data["backoff_factor"], 30)
-                
-                monitor_data["next_check"] = datetime.utcnow() + timedelta(seconds=next_interval)
-                
-                # If we've been checking for too long, give up
-                if monitor_data["check_count"] > 60:  # After ~30 minutes
-                    logger.warning(f"Giving up on monitoring order {order_id} after {monitor_data['check_count']} checks")
-                    self._remove_from_monitoring(order_id)
-            
-        except Exception as e:
-            logger.error(f"Error checking order {order_id} status: {str(e)}")
-            
-            # Increase backoff on errors
-            if order_id in self._active_monitors:
-                monitor_data = self._active_monitors[order_id]
-                monitor_data["backoff_factor"] = min(monitor_data["backoff_factor"] * 2, 10.0)
-                monitor_data["next_check"] = datetime.utcnow() + timedelta(
-                    seconds=min(5 * monitor_data["backoff_factor"], 60)
-                )
-                monitor_data["check_count"] += 1
-                
-                # Give up after too many errors
-                if monitor_data["check_count"] > 20:
-                    logger.warning(f"Giving up on monitoring order {order_id} after too many errors")
-                    self._remove_from_monitoring(order_id)
-        finally:
-            db.close()
+                    monitor_data["check_count"] += 1
+                    
+                    # Give up after too many errors
+                    if monitor_data["check_count"] > 20:
+                        logger.warning(f"Giving up on monitoring order {order_id} after too many errors")
+                        self._remove_from_monitoring(order_id)
+                # Session cleanup handled by context manager
     
     def _remove_from_monitoring(self, order_id: str):
         """Remove an order from monitoring"""

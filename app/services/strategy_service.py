@@ -16,8 +16,16 @@ from ..core.brokers.base import BaseBroker
 from fastapi import HTTPException
 # Import the ticker utilities
 from ..utils.ticker_utils import validate_ticker, get_contract_ticker, get_display_ticker
+# Import distributed locking
+from .distributed_lock import AccountLockManager
+# Import enhanced error handling
+from ..core.enhanced_logging import get_enhanced_logger, logging_context, operation_logging
+from ..core.alert_manager import TradingAlerts
+from ..core.circuit_breaker import circuit_breaker_manager, CircuitBreakerOpenError
+from ..core.rollback_manager import rollback_manager
+from ..core.graceful_shutdown import shutdown_manager
 
-logger = logging.getLogger(__name__)
+logger = get_enhanced_logger(__name__)
 
 class OrderPool:
     def __init__(self, db: Session, strategy_processor):
@@ -67,7 +75,7 @@ class OrderPool:
                     raise
 
     async def _execute_leader_order(self, order: Dict):
-        """Execute leader order with existing logic"""
+        """Execute leader order with distributed locking"""
         try:
             strategy_dict = {
                 'user_id': order['strategy'].user_id,
@@ -80,10 +88,13 @@ class OrderPool:
             }
             
             leader_strategy = ActivatedStrategy(**strategy_dict)
-            await self.strategy_processor._execute_single_account_strategy(
+            result = await self.strategy_processor._execute_single_account_strategy(
                 leader_strategy,
                 order['signal_data']
             )
+            
+            logger.info(f"Leader order execution result: {result}")
+            return result
 
         except Exception as e:
             logger.error(f"Leader order execution failed: {str(e)}")
@@ -199,67 +210,194 @@ class StrategyProcessor:
         strategy: ActivatedStrategy,
         signal_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Execute a single account trading strategy"""
-        try:
-            # Get account with validation
-            account = self.db.query(BrokerAccount).filter(
-                BrokerAccount.account_id == strategy.account_id,
-                BrokerAccount.is_active == True
-            ).first()
+        """Execute a single account trading strategy with enhanced error handling"""
+        
+        circuit_name = f"strategy_{strategy.id}"
+        
+        with logging_context(
+            strategy_id=strategy.id,
+            account_id=strategy.account_id,
+            ticker=strategy.ticker,
+            action=signal_data.get("action")
+        ):
+            async with shutdown_manager.track_task(
+                "strategy_execution",
+                f"strategy_{strategy.id}_{strategy.account_id}",
+                strategy_id=strategy.id,
+                account_id=strategy.account_id
+            ):
+                # Use circuit breaker to prevent repeated failures
+                try:
+                    return await circuit_breaker_manager.execute_with_circuit_breaker(
+                        circuit_name,
+                        self._execute_strategy_with_rollback,
+                        strategy,
+                        signal_data
+                    )
+                except CircuitBreakerOpenError:
+                    logger.warning(f"Circuit breaker open for strategy {strategy.id}",
+                                 extra_context={"circuit_name": circuit_name})
+                    return {
+                        "status": "skipped",
+                        "reason": "Circuit breaker is open - strategy temporarily disabled due to failures"
+                    }
+    
+    async def _execute_strategy_with_rollback(
+        self,
+        strategy: ActivatedStrategy,
+        signal_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute strategy with full rollback support"""
+        
+        # Use rollback manager for transaction safety
+        async with rollback_manager.transaction_context(
+            "strategy_execution",
+            f"strategy_{strategy.id}_{int(time.time())}"
+        ) as rollback_ctx:
+            
+            # Use account-level distributed locking to prevent race conditions
+            async with AccountLockManager.lock_account(
+                account_id=strategy.account_id,
+                timeout=30.0,
+                max_retries=3,
+                operation_name=f"strategy_{strategy.id}_execution"
+            ) as lock_acquired:
+                
+                if not lock_acquired:
+                    logger.warning(f"Failed to acquire lock for account {strategy.account_id}",
+                                 extra_context={"strategy_id": strategy.id})
+                    return {
+                        "status": "skipped",
+                        "reason": "Could not acquire account lock - another strategy may be executing"
+                    }
+                
+                # Use database transaction with automatic rollback
+                async with rollback_ctx.database_transaction() as db:
+                    
+                    # Get account with validation
+                    account = db.query(BrokerAccount).filter(
+                        BrokerAccount.account_id == strategy.account_id,
+                        BrokerAccount.is_active == True
+                    ).first()
 
-            if not account:
-                raise HTTPException(status_code=404, detail="Trading account not found")
+                    if not account:
+                        raise HTTPException(status_code=404, detail="Trading account not found")
 
-            # Validate account credentials
-            if not account.credentials or not account.credentials.is_valid:
-                raise HTTPException(
-                    status_code=401, 
-                    detail="Invalid or expired account credentials"
-                )
+                    # Validate account credentials
+                    if not account.credentials or not account.credentials.is_valid:
+                        raise HTTPException(
+                            status_code=401, 
+                            detail="Invalid or expired account credentials"
+                        )
 
-            # Get broker instance
-            broker = BaseBroker.get_broker_instance(account.broker_id, self.db)
+                    # Get broker instance
+                    broker = BaseBroker.get_broker_instance(account.broker_id, db)
 
-            # Ensure we have a valid contract ticker
-            valid, contract_ticker = validate_ticker(strategy.ticker)
-            if not valid:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid ticker format: {strategy.ticker}"
-                )
+                    # Ensure we have a valid contract ticker
+                    valid, contract_ticker = validate_ticker(strategy.ticker)
+                    if not valid:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid ticker format: {strategy.ticker}"
+                        )
 
-            # Prepare and execute order with the validated contract ticker
-            order_data = {
-                "account_id": account.account_id,
-                "symbol": contract_ticker,  # Use the full contract ticker
-                "quantity": strategy.quantity,
-                "side": signal_data["action"],
-                "type": signal_data.get("order_type", "MARKET"),
-                "time_in_force": signal_data.get("time_in_force", "GTC"),
-            }
+                    # Check current positions to prevent duplicate trades
+                    try:
+                        positions = await broker.get_positions(account)
+                        current_position = 0
+                        for position in positions:
+                            if position.get("symbol") == contract_ticker:
+                                current_position = int(position.get("quantity", 0))
+                                break
+                        
+                        logger.info(f"Current position for {contract_ticker}: {current_position}",
+                                   operation="position_check",
+                                   extra_context={"symbol": contract_ticker, "position": current_position})
+                        
+                        # Position-aware logic: check if we should execute based on current position
+                        action = signal_data["action"].upper()
+                        if action == "SELL" and current_position <= 0:
+                            logger.info(f"Skipping SELL signal - no long position in {contract_ticker}",
+                                       operation="position_validation")
+                            return {
+                                "status": "skipped", 
+                                "reason": f"No long position to sell in {contract_ticker}"
+                            }
+                        elif action == "BUY" and current_position >= 0:
+                            # Allow BUY signals to add to position or initiate new position
+                            logger.info(f"Executing BUY signal for {contract_ticker}",
+                                       operation="position_validation")
+                            
+                    except Exception as pos_error:
+                        logger.warning(f"Could not check positions, proceeding with trade",
+                                     operation="position_check", error=pos_error)
 
-            # Log the order details
-            logger.info(f"Executing order: {order_data}")
+                    # Prepare and execute order with the validated contract ticker
+                    order_data = {
+                        "account_id": account.account_id,
+                        "symbol": contract_ticker,  # Use the full contract ticker
+                        "quantity": strategy.quantity,
+                        "side": signal_data["action"],
+                        "type": signal_data.get("order_type", "MARKET"),
+                        "time_in_force": signal_data.get("time_in_force", "GTC"),
+                    }
 
-            # Execute order
-            order_result = await broker.place_order(account, order_data)
+                    # Log the order details
+                    logger.info(f"Executing order with distributed lock",
+                               operation="order_execution",
+                               extra_context={"order_data": order_data})
 
-            # Update strategy statistics
-            await self._update_strategy_stats(strategy, order_result)
+                    # Execute order
+                    try:
+                        order_result = await broker.place_order(account, order_data)
+                        
+                        # Add broker order cancellation to rollback if needed
+                        if order_result.get("order_id"):
+                            await rollback_ctx.add_broker_order_cancel(
+                                broker, account, order_result["order_id"]
+                            )
+                        
+                        # Log successful order execution
+                        logger.log_trading_event(
+                            "order_executed",
+                            str(strategy.id),
+                            strategy.account_id,
+                            order_id=order_result.get("order_id"),
+                            symbol=contract_ticker,
+                            side=signal_data["action"],
+                            quantity=strategy.quantity
+                        )
+                        
+                    except Exception as order_error:
+                        logger.exception(f"Order execution failed", 
+                                       operation="order_execution", 
+                                       error=order_error,
+                                       extra_context={"order_data": order_data})
+                        
+                        # Send trading failure alert
+                        await TradingAlerts.trading_failure(
+                            strategy_id=str(strategy.id),
+                            account_id=strategy.account_id,
+                            error=str(order_error),
+                            context={"order_data": order_data}
+                        )
+                        raise
 
-            return {
-                "status": "success",
-                "order_details": order_result
-            }
+                    # Update strategy statistics
+                    await self._update_strategy_stats(strategy, order_result)
+                    
+                    # Add notification for successful execution
+                    await rollback_ctx.add_notification(
+                        f"Strategy {strategy.id} executed successfully on account {strategy.account_id}",
+                        "trading_success"
+                    )
 
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error in strategy execution: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Strategy execution failed: {str(e)}"
-            )
+                    return {
+                        "status": "success",
+                        "order_details": order_result,
+                        "locked_execution": True,
+                        "rollback_protected": True
+                    }
 
     async def _execute_group_strategy(
         self,
@@ -545,24 +683,51 @@ class StrategyProcessor:
     ) -> None:
         """Update strategy statistics after order execution"""
         try:
-            strategy.total_trades += 1
-            
-            if order_result.get("status") == "filled":
-                strategy.successful_trades += 1
+            with logging_context(strategy_id=strategy.id, order_status=order_result.get("status")):
+                strategy.total_trades += 1
                 
-                # Calculate P&L if available
-                if "realized_pnl" in order_result:
-                    strategy.total_pnl += Decimal(str(order_result["realized_pnl"]))
-                
-                # Update other metrics
-                if strategy.total_trades > 0:
-                    strategy.win_rate = (strategy.successful_trades / strategy.total_trades) * 100
-                
-            else:
-                strategy.failed_trades += 1
+                if order_result.get("status") == "filled":
+                    strategy.successful_trades += 1
+                    
+                    # Calculate P&L if available
+                    if "realized_pnl" in order_result:
+                        pnl_value = Decimal(str(order_result["realized_pnl"]))
+                        strategy.total_pnl += pnl_value
+                        
+                        logger.log_performance_metric(
+                            "strategy_pnl",
+                            float(pnl_value),
+                            "USD",
+                            strategy_id=strategy.id
+                        )
+                    
+                    # Update other metrics
+                    if strategy.total_trades > 0:
+                        strategy.win_rate = (strategy.successful_trades / strategy.total_trades) * 100
+                    
+                    logger.info(f"Strategy stats updated - successful trade",
+                               operation="stats_update",
+                               extra_context={
+                                   "total_trades": strategy.total_trades,
+                                   "successful_trades": strategy.successful_trades,
+                                   "win_rate": float(strategy.win_rate) if strategy.win_rate else 0
+                               })
+                    
+                else:
+                    strategy.failed_trades += 1
+                    logger.warning(f"Strategy stats updated - failed trade",
+                                 operation="stats_update",
+                                 extra_context={
+                                     "total_trades": strategy.total_trades,
+                                     "failed_trades": strategy.failed_trades,
+                                     "order_status": order_result.get("status")
+                                 })
 
-            self.db.commit()
+                self.db.commit()
 
         except Exception as e:
-            logger.error(f"Error updating strategy stats: {str(e)}")
+            logger.exception(f"Error updating strategy statistics", 
+                           operation="stats_update", 
+                           error=e,
+                           extra_context={"strategy_id": strategy.id})
             # Don't raise here - stats update failure shouldn't fail the trade

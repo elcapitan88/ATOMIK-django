@@ -5,19 +5,63 @@ import json
 import hmac
 import hashlib
 import logging
+from redis.exceptions import RedisError
 from fastapi import HTTPException
 
 from ..models.webhook import Webhook, WebhookLog
 from ..models.strategy import ActivatedStrategy
 from ..core.brokers.base import BaseBroker
 from ..services.strategy_service import StrategyProcessor
+from ..core.config import settings
+from ..core.redis_manager import get_redis_connection
+from ..core.correlation import CorrelationManager
+from ..core.enhanced_logging import get_enhanced_logger, logging_context, operation_logging
+from ..core.alert_manager import TradingAlerts
+from ..core.graceful_shutdown import shutdown_manager
 
-logger = logging.getLogger(__name__)
+logger = get_enhanced_logger(__name__)
 
 class WebhookProcessor:
     def __init__(self, db: Session):
         self.db = db
         self.strategy_processor = StrategyProcessor(db)
+    
+    def _generate_idempotency_key(self, webhook_id: int, payload: Dict[str, Any]) -> str:
+        """Generate idempotency key from webhook ID and payload content"""
+        key_data = {
+            "webhook_id": webhook_id,
+            "action": payload.get("action"),
+            "timestamp": payload.get("timestamp", ""),
+            "source": payload.get("source", "")
+        }
+        key_string = json.dumps(key_data, sort_keys=True)
+        key_hash = hashlib.sha256(key_string.encode()).hexdigest()
+        return f"webhook_idempotency:{webhook_id}:{key_hash[:16]}"
+    
+    def _check_and_set_idempotency(self, key: str, response_data: Dict[str, Any], ttl: int = 300) -> Optional[Dict[str, Any]]:
+        """Check if request is duplicate and set idempotency key. Returns existing response if duplicate."""
+        with get_redis_connection() as redis_client:
+            if not redis_client:
+                logger.debug("Redis not available for idempotency check")
+                return None
+            
+            try:
+                # Check if key exists
+                existing_response = redis_client.get(key)
+                if existing_response:
+                    logger.info(f"Duplicate webhook request detected, returning cached response: {key}")
+                    return json.loads(existing_response)
+                
+                # Set the key with response data
+                redis_client.setex(key, ttl, json.dumps(response_data))
+                return None
+                
+            except RedisError as e:
+                logger.warning(f"Redis error during idempotency check: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error during idempotency check: {e}")
+                return None
 
     def verify_signature(self, payload: str, signature: str, secret: str) -> bool:
         """Verify webhook signature"""
@@ -77,79 +121,166 @@ class WebhookProcessor:
         """Process incoming webhook data"""
         start_time = datetime.utcnow()
         
+        # Set correlation ID for request tracking
+        correlation_id = CorrelationManager.set_correlation_id()
+        
+        with logging_context(webhook_id=webhook.id, client_ip=client_ip, correlation_id=correlation_id):
+            async with shutdown_manager.track_task(
+                "webhook_processing", 
+                f"webhook_{webhook.id}",
+                webhook_id=webhook.id,
+                client_ip=client_ip
+            ):
+                return await self._process_webhook_internal(webhook, payload, client_ip, start_time)
+    
+    async def _process_webhook_internal(
+        self,
+        webhook: Webhook,
+        payload: Dict[str, Any],
+        client_ip: str,
+        start_time: datetime
+    ) -> Dict[str, Any]:
+        """Internal webhook processing with enhanced error handling"""
+        
+        # Check for duplicate request using idempotency protection
+        idempotency_key = self._generate_idempotency_key(webhook.id, payload)
+        
+        # Create response structure for caching
+        processing_response = {
+            "status": "accepted",
+            "message": "Webhook received and being processed",
+            "webhook_id": webhook.id,
+            "timestamp": start_time.isoformat()
+        }
+        
+        # Check if this is a duplicate request
+        cached_response = self._check_and_set_idempotency(idempotency_key, processing_response, ttl=300)
+        if cached_response:
+            logger.info(f"Returning cached response for duplicate webhook request: {idempotency_key}")
+            return cached_response
+        
         try:
-            # Normalize payload based on source
-            normalized_payload = self.normalize_payload(webhook.source_type, payload)
-            
-            # Find associated strategies
-            strategies = self.db.query(ActivatedStrategy).filter(
-                ActivatedStrategy.webhook_id == webhook.token,
-                ActivatedStrategy.is_active == True
-            ).all()
+            with operation_logging(logger, "webhook_processing", webhook_id=webhook.id):
+                # Normalize payload based on source
+                normalized_payload = self.normalize_payload(webhook.source_type, payload)
+                
+                # Find associated strategies
+                strategies = self.db.query(ActivatedStrategy).filter(
+                    ActivatedStrategy.webhook_id == webhook.token,
+                    ActivatedStrategy.is_active == True
+                ).all()
 
-            if not strategies:
-                logger.warning(f"No active strategies found for webhook {webhook.token}")
-                return {
-                    "status": "warning",
-                    "message": "No active strategies found for this webhook"
-                }
-
-            # Execute strategies
-            results = []
-            for strategy in strategies:
-                try:
-                    # Create order data using strategy settings
-                    signal_data = {
-                        "action": normalized_payload["action"],
-                        "symbol": strategy.ticker,
-                        "quantity": strategy.quantity if strategy.strategy_type == 'single' else strategy.leader_quantity,
-                        "order_type": "MARKET",  # Default to market orders for now
-                        "time_in_force": "GTC",  # Good Till Cancelled
+                if not strategies:
+                    logger.warning(f"No active strategies found for webhook {webhook.token}", 
+                                 extra_context={"webhook_token": webhook.token})
+                    return {
+                        "status": "warning",
+                        "message": "No active strategies found for this webhook"
                     }
 
-                    logger.info(f"Executing strategy {strategy.id} with signal: {signal_data}")
-                    
-                    strategy_result = await self.strategy_processor.execute_strategy(
-                        strategy=strategy,
-                        signal_data=signal_data
-                    )
-                    
-                    results.append({
-                        "strategy_id": strategy.id,
-                        "result": strategy_result
-                    })
-                    
-                    logger.info(f"Strategy {strategy.id} execution completed: {strategy_result}")
-                    
-                except Exception as e:
-                    logger.error(f"Strategy execution failed: {str(e)}", exc_info=True)
-                    results.append({
-                        "strategy_id": strategy.id,
-                        "error": str(e)
-                    })
+                logger.info(f"Found {len(strategies)} active strategies for webhook processing",
+                           extra_context={"strategy_count": len(strategies), "webhook_token": webhook.token})
 
-            # Log success
-            processing_time = (datetime.utcnow() - start_time).total_seconds()
-            self.log_webhook_trigger(
-                webhook=webhook,
-                success=True,
-                payload=payload,
-                error_message=None,
-                client_ip=client_ip,
-                processing_time=processing_time
-            )
+                # Execute strategies
+                results = []
+                strategy_errors = []
+                
+                for strategy in strategies:
+                    try:
+                        with logging_context(strategy_id=strategy.id, strategy_type=strategy.strategy_type):
+                            # Create order data using strategy settings
+                            signal_data = {
+                                "action": normalized_payload["action"],
+                                "symbol": strategy.ticker,
+                                "quantity": strategy.quantity if strategy.strategy_type == 'single' else strategy.leader_quantity,
+                                "order_type": "MARKET",  # Default to market orders for now
+                                "time_in_force": "GTC",  # Good Till Cancelled
+                            }
 
-            return {
-                "status": "success",
-                "message": "Webhook processed successfully",
-                "results": results,
-                "processing_time": processing_time
-            }
+                            logger.info(f"Executing strategy {strategy.id} with signal", 
+                                       operation="strategy_execution",
+                                       extra_context={"signal_data": signal_data})
+                            
+                            strategy_result = await self.strategy_processor.execute_strategy(
+                                strategy=strategy,
+                                signal_data=signal_data
+                            )
+                            
+                            results.append({
+                                "strategy_id": strategy.id,
+                                "result": strategy_result
+                            })
+                            
+                            logger.info(f"Strategy {strategy.id} execution completed successfully", 
+                                       operation="strategy_execution",
+                                       extra_context={"result_status": strategy_result.get("status")})
+                        
+                    except Exception as e:
+                        error_msg = f"Strategy {strategy.id} execution failed: {str(e)}"
+                        logger.exception(error_msg, operation="strategy_execution", error=e,
+                                       extra_context={"strategy_id": strategy.id})
+                        
+                        # Send strategy failure alert
+                        await TradingAlerts.strategy_failure(
+                            strategy_id=str(strategy.id),
+                            error=str(e),
+                            context={"webhook_id": webhook.id, "action": normalized_payload["action"]}
+                        )
+                        
+                        strategy_errors.append(error_msg)
+                        results.append({
+                            "strategy_id": strategy.id,
+                            "error": str(e)
+                        })
+
+                # Log success with metrics
+                processing_time = (datetime.utcnow() - start_time).total_seconds()
+                
+                logger.log_performance_metric(
+                    "webhook_processing_time", 
+                    processing_time, 
+                    "seconds",
+                    webhook_id=webhook.id,
+                    strategy_count=len(strategies),
+                    success_count=len([r for r in results if "error" not in r]),
+                    error_count=len(strategy_errors)
+                )
+                
+                self.log_webhook_trigger(
+                    webhook=webhook,
+                    success=True,
+                    payload=payload,
+                    error_message=None,
+                    client_ip=client_ip,
+                    processing_time=processing_time
+                )
+
+                return {
+                    "status": "success",
+                    "message": "Webhook processed successfully",
+                    "results": results,
+                    "processing_time": processing_time,
+                    "strategy_errors": strategy_errors if strategy_errors else None
+                }
 
         except Exception as e:
-            logger.error(f"Webhook processing failed: {str(e)}", exc_info=True)
-            # Log failure
             processing_time = (datetime.utcnow() - start_time).total_seconds()
+            
+            logger.exception(f"Webhook processing failed", operation="webhook_processing", error=e,
+                           extra_context={
+                               "webhook_id": webhook.id,
+                               "processing_time": processing_time,
+                               "payload_action": payload.get("action")
+                           })
+            
+            # Send webhook failure alert
+            await TradingAlerts.webhook_failure(
+                webhook_id=str(webhook.id),
+                error=str(e),
+                context={"client_ip": client_ip, "processing_time": processing_time}
+            )
+            
+            # Log failure
             self.log_webhook_trigger(
                 webhook=webhook,
                 success=False,
@@ -158,6 +289,7 @@ class WebhookProcessor:
                 client_ip=client_ip,
                 processing_time=processing_time
             )
+            
             raise HTTPException(
                 status_code=500,
                 detail=f"Webhook processing failed: {str(e)}"
@@ -192,21 +324,75 @@ class WebhookProcessor:
             self.db.rollback()
             # Don't raise here - logging failure shouldn't fail the webhook processing
 
-    def validate_rate_limit(self, webhook: Webhook, client_ip: str) -> bool:
-        """Validate webhook against rate limits"""
-        try:
-            current_time = datetime.utcnow()
-            one_minute_ago = current_time - timedelta(minutes=1)
+    def _generate_rate_limit_key(self, webhook_id: int, client_ip: str) -> str:
+        """Generate rate limit key for Redis"""
+        return f"webhook_rate_limit:{webhook_id}:{client_ip}"
+    
+    def check_rate_limit(self, webhook: Webhook, client_ip: str) -> bool:
+        """Check if request exceeds rate limit using Redis sliding window"""
+        with get_redis_connection() as redis_client:
+            if not redis_client:
+                logger.debug("Redis not available, falling back to database rate limiting")
+                return self._validate_rate_limit_db(webhook, client_ip)
             
-            # Count triggers in last minute
+            try:
+                rate_limit_key = self._generate_rate_limit_key(webhook.id, client_ip)
+                current_time = datetime.utcnow()
+                window_start = current_time.timestamp()
+                
+                # Use sliding window with 1-second precision
+                # Allow 10 requests per 1-second window to support HFT
+                window_size = 1  # 1 second window
+                max_requests = 10  # 10 requests per second for HFT support
+                
+                # Remove old entries outside the window
+                redis_client.zremrangebyscore(
+                    rate_limit_key, 
+                    0, 
+                    window_start - window_size
+                )
+                
+                # Count current requests in window
+                current_count = redis_client.zcard(rate_limit_key)
+                
+                if current_count >= max_requests:
+                    logger.warning(f"Rate limit exceeded for webhook {webhook.id} from IP {client_ip}: {current_count} requests in {window_size}s window")
+                    return False
+                
+                # Add current request to window
+                request_id = f"{window_start}:{client_ip}"
+                redis_client.zadd(rate_limit_key, {request_id: window_start})
+                
+                # Set expiration for cleanup (window_size + buffer)
+                redis_client.expire(rate_limit_key, window_size + 10)
+                
+                return True
+                
+            except RedisError as e:
+                logger.warning(f"Redis error during rate limit check: {e}, falling back to database")
+                return self._validate_rate_limit_db(webhook, client_ip)
+            except Exception as e:
+                logger.error(f"Unexpected error during rate limit check: {e}, falling back to database")
+                return self._validate_rate_limit_db(webhook, client_ip)
+    
+    def _validate_rate_limit_db(self, webhook: Webhook, client_ip: str) -> bool:
+        """Fallback rate limit validation using database"""
+        try:
+            from datetime import timedelta
+            current_time = datetime.utcnow()
+            one_second_ago = current_time - timedelta(seconds=1)
+            
+            # Count triggers in last second for this specific webhook and IP
             recent_triggers = self.db.query(WebhookLog).filter(
                 WebhookLog.webhook_id == webhook.id,
                 WebhookLog.ip_address == client_ip,
-                WebhookLog.triggered_at >= one_minute_ago
+                WebhookLog.triggered_at >= one_second_ago
             ).count()
             
-            return recent_triggers < webhook.max_triggers_per_minute
+            # Allow 10 requests per second for HFT support
+            return recent_triggers < 10
             
         except Exception as e:
-            logger.error(f"Rate limit validation failed: {str(e)}", exc_info=True)
-            return False
+            logger.error(f"Database rate limit validation failed: {str(e)}", exc_info=True)
+            # On error, allow the request (fail open for availability)
+            return True

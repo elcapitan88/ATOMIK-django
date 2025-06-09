@@ -19,6 +19,8 @@ from ....schemas.webhook import (
     WebhookCreate,
     WebhookUpdate,
     WebhookOut,
+    WebhookSecureOut,
+    WebhookCreateResponse,
     WebhookLogOut,
     WebhookPayload
 )
@@ -43,7 +45,12 @@ def generate_webhook_url(webhook: Webhook) -> str:
     base_url = settings.SERVER_HOST.rstrip('/')
     return f"{base_url}/api/v1/webhooks/{webhook.token}"
 
-@router.post("/generate", response_model=WebhookOut)
+def generate_complete_webhook_url(webhook: Webhook) -> str:
+    """Generate complete webhook URL with secret for TradingView/third-party use"""
+    base_url = settings.SERVER_HOST.rstrip('/')
+    return f"{base_url}/api/v1/webhooks/{webhook.token}?secret={webhook.secret_key}"
+
+@router.post("/generate", response_model=WebhookCreateResponse)
 @check_subscription
 @check_resource_limit("active_webhooks")
 async def generate_webhook(
@@ -96,7 +103,7 @@ async def generate_webhook(
         webhook = Webhook(
             user_id=current_user.id,
             token=secrets.token_urlsafe(32),
-            secret_key=secrets.token_hex(32),
+            secret_key=secrets.token_urlsafe(32),  # URL-safe secret for query parameters
             name=webhook_in.name if webhook_in.name else "New Webhook",
             source_type=webhook_in.source_type,
             details=webhook_in.details,
@@ -121,18 +128,19 @@ async def generate_webhook(
         db.commit()
         db.refresh(webhook)
 
-        # Create the webhook URL
+        # Create webhook URLs
         webhook_url = generate_webhook_url(webhook)
+        complete_webhook_url = generate_complete_webhook_url(webhook)
 
-        # Return response
-        return WebhookOut(
+        # Return response with secret (ONLY during creation)
+        return WebhookCreateResponse(
             id=webhook.id,
             token=webhook.token,
             user_id=webhook.user_id,
             name=webhook.name,
             source_type=webhook.source_type,
             details=webhook.details,
-            secret_key=webhook.secret_key,
+            secret_key=webhook.secret_key,  # Exposed only during creation
             allowed_ips=webhook.allowed_ips,
             max_triggers_per_minute=webhook.max_triggers_per_minute,
             require_signature=webhook.require_signature,
@@ -140,7 +148,11 @@ async def generate_webhook(
             is_active=webhook.is_active,
             created_at=webhook.created_at,
             last_triggered=webhook.last_triggered,
-            webhook_url=webhook_url
+            webhook_url=webhook_url,
+            complete_webhook_url=complete_webhook_url,  # Full URL with secret for TradingView
+            subscriber_count=0,
+            rating=0.0,
+            username=current_user.username
         )
 
     except HTTPException:
@@ -198,8 +210,15 @@ async def webhook_endpoint(
                     detail="IP not allowed"
                 )
 
-        # Process webhook in background
+        # Initialize webhook processor
         webhook_processor = WebhookProcessor(db)
+        
+        # Check rate limiting (1 request per second per webhook per IP)
+        if not webhook_processor.check_rate_limit(webhook, client_ip):
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded. Please wait before sending another request."
+            )
         
         # Convert the Pydantic model to a plain dictionary and ensure action is properly formatted
         processed_payload = payload.dict()
@@ -213,6 +232,22 @@ async def webhook_endpoint(
             # Always ensure it's uppercase
             processed_payload['action'] = str(processed_payload['action']).upper()
 
+        # Check for duplicate request using idempotency protection
+        idempotency_key = webhook_processor._generate_idempotency_key(webhook.id, processed_payload)
+        
+        response_data = {
+            "status": "accepted",
+            "message": "Webhook received and being processed",
+            "webhook_id": webhook.id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Check if this is a duplicate request (1 second TTL for HFT support)
+        cached_response = webhook_processor._check_and_set_idempotency(idempotency_key, response_data, ttl=1)
+        if cached_response:
+            logger.info(f"Duplicate webhook request detected, returning cached response")
+            return cached_response
+
         # Pass the processed payload to the background task with the correct parameter name 'payload'
         background_tasks.add_task(
             webhook_processor.process_webhook,
@@ -221,12 +256,7 @@ async def webhook_endpoint(
             client_ip=client_ip
         )
 
-        return {
-            "status": "accepted",
-            "message": "Webhook received and being processed",
-            "webhook_id": webhook.id,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        return response_data
 
     except HTTPException as he:
         raise he
@@ -237,7 +267,7 @@ async def webhook_endpoint(
             detail=f"Webhook processing failed: {str(e)}"
         )
 
-@router.get("/list", response_model=List[WebhookOut])
+@router.get("/list", response_model=List[WebhookSecureOut])
 @check_subscription
 async def list_webhooks(
     db: Session = Depends(get_db),
@@ -272,7 +302,7 @@ async def list_webhooks(
                     add_upgrade_headers(response, user_tier, UpgradeReason.WEBHOOK_LIMIT)
 
     return [
-        WebhookOut(
+        WebhookSecureOut(
             id=webhook.id,
             token=webhook.token,
             user_id=webhook.user_id,
@@ -287,183 +317,17 @@ async def list_webhooks(
             is_shared=webhook.is_shared,
             created_at=webhook.created_at,
             last_triggered=webhook.last_triggered,
-            secret_key=webhook.secret_key,  # Include the secret key
-            webhook_url=generate_webhook_url(webhook)
+            # secret_key=webhook.secret_key,  # REMOVED - No longer exposed!
+            webhook_url=generate_webhook_url(webhook),
+            subscriber_count=0,  # Default for now
+            rating=0.0,  # Default for now
+            username=current_user.username
         ) for webhook in webhooks
     ]
 
-@router.post("/generate", response_model=WebhookOut)
-@check_subscription
-@check_resource_limit("active_webhooks")
-async def generate_webhook(
-    webhook_in: WebhookCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    response: Response = None  # Added Response parameter
-):
-    try:
-        logger.info(f"Received webhook creation request")
-        logger.info(f"Webhook data: {webhook_in.dict()}")
-        logger.info(f"Current user: {current_user.id}")
-        
-        # Check webhook limits with detailed upgrade information
-        if not settings.SKIP_SUBSCRIPTION_CHECK:
-            subscription = db.query(Subscription).filter(
-                Subscription.user_id == current_user.id
-            ).first()
-            
-            if subscription:
-                user_tier = subscription.tier
-                webhook_count = db.query(Webhook).filter(
-                    Webhook.user_id == current_user.id,
-                    Webhook.is_active == True
-                ).count()
-                
-                max_webhooks = float('inf')
-                if user_tier == "starter":
-                    max_webhooks = 1
-                elif user_tier == "pro":
-                    max_webhooks = 5
-                
-                if webhook_count >= max_webhooks:
-                    # Provide detailed upgrade information
-                    upgrade_info = build_upgrade_response(
-                        reason=UpgradeReason.WEBHOOK_LIMIT,
-                        current_tier=user_tier,
-                        status_code=403
-                    )
-                    
-                    if response:
-                        add_upgrade_headers(response, user_tier, UpgradeReason.WEBHOOK_LIMIT)
-                    
-                    raise HTTPException(
-                        status_code=403,
-                        detail=upgrade_info
-                    )
 
-        # Create webhook
-        webhook = Webhook(
-            user_id=current_user.id,
-            token=secrets.token_urlsafe(32),
-            secret_key=secrets.token_hex(32),
-            name=webhook_in.name if webhook_in.name else "New Webhook",
-            source_type=webhook_in.source_type,
-            details=webhook_in.details,
-            allowed_ips=webhook_in.allowed_ips,
-            max_triggers_per_minute=webhook_in.max_triggers_per_minute or 60,
-            require_signature=webhook_in.require_signature if webhook_in.require_signature is not None else True,
-            max_retries=webhook_in.max_retries or 3,
-            is_active=True,
-            created_at=datetime.utcnow()
-        )
 
-        db.add(webhook)
-        
-        # Update webhook counter
-        subscription = db.query(Subscription).filter(
-            Subscription.user_id == current_user.id
-        ).first()
-        
-        if subscription:
-            subscription.active_webhooks_count = (subscription.active_webhooks_count or 0) + 1
-        
-        db.commit()
-        db.refresh(webhook)
-
-        # Create the webhook URL
-        webhook_url = generate_webhook_url(webhook)
-
-        # Return response
-        return WebhookOut(
-            id=webhook.id,
-            token=webhook.token,
-            user_id=webhook.user_id,
-            name=webhook.name,
-            source_type=webhook.source_type,
-            details=webhook.details,
-            secret_key=webhook.secret_key,
-            allowed_ips=webhook.allowed_ips,
-            max_triggers_per_minute=webhook.max_triggers_per_minute,
-            require_signature=webhook.require_signature,
-            max_retries=webhook.max_retries,
-            is_active=webhook.is_active,
-            created_at=webhook.created_at,
-            last_triggered=webhook.last_triggered,
-            webhook_url=webhook_url
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating webhook: {str(e)}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-@router.post("/generate", response_model=WebhookOut)
-async def generate_webhook(
-    webhook_in: WebhookCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    try:
-        logger.info(f"Received webhook creation request")
-        logger.info(f"Webhook data: {webhook_in.dict()}")
-        logger.info(f"Current user: {current_user.id}")
-
-        # Generate webhook
-        webhook = Webhook(
-            user_id=current_user.id,
-            token=secrets.token_urlsafe(32),
-            secret_key=secrets.token_hex(32),  # Make sure this is generated
-            name=webhook_in.name if webhook_in.name else "New Webhook",
-            source_type=webhook_in.source_type,
-            details=webhook_in.details,
-            allowed_ips=webhook_in.allowed_ips,
-            max_triggers_per_minute=webhook_in.max_triggers_per_minute or 60,
-            require_signature=webhook_in.require_signature if webhook_in.require_signature is not None else True,
-            max_retries=webhook_in.max_retries or 3,
-            is_active=True,
-            created_at=datetime.utcnow()
-        )
-
-        db.add(webhook)
-        db.commit()
-        db.refresh(webhook)
-
-        # Return response with all required fields
-        return WebhookOut(
-            id=webhook.id,
-            token=webhook.token,
-            user_id=webhook.user_id,
-            secret_key=webhook.secret_key,  # Include the secret_key
-            name=webhook.name,
-            source_type=webhook.source_type,
-            details=webhook.details,
-            allowed_ips=webhook.allowed_ips,
-            max_triggers_per_minute=webhook.max_triggers_per_minute,
-            require_signature=webhook.require_signature,
-            max_retries=webhook.max_retries,
-            is_active=webhook.is_active,
-            created_at=webhook.created_at,
-            last_triggered=webhook.last_triggered,
-            webhook_url=generate_webhook_url(webhook)
-        )
-
-    except Exception as e:
-        logger.error(f"Error generating webhook: {str(e)}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        db.rollback()  # Roll back on error
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-@router.patch("/{token}", response_model=WebhookOut)
+@router.patch("/{token}", response_model=WebhookSecureOut)
 async def update_webhook(
     token: str,
     webhook_update: WebhookUpdate,
@@ -486,9 +350,26 @@ async def update_webhook(
     db.commit()
     db.refresh(webhook)
 
-    return WebhookOut(
-        **webhook.__dict__,
-        webhook_url=generate_webhook_url(webhook)
+    # Return secure response without secret_key
+    return WebhookSecureOut(
+        id=webhook.id,
+        token=webhook.token,
+        user_id=webhook.user_id,
+        name=webhook.name,
+        source_type=webhook.source_type,
+        details=webhook.details,
+        allowed_ips=webhook.allowed_ips,
+        max_triggers_per_minute=webhook.max_triggers_per_minute,
+        require_signature=webhook.require_signature,
+        max_retries=webhook.max_retries,
+        is_active=webhook.is_active,
+        is_shared=webhook.is_shared,
+        created_at=webhook.created_at,
+        last_triggered=webhook.last_triggered,
+        webhook_url=generate_webhook_url(webhook),
+        subscriber_count=webhook.subscriber_count or 0,
+        rating=webhook.rating or 0.0,
+        username=current_user.username
     )
 
 @router.delete("/{token}")
@@ -606,7 +487,7 @@ async def test_webhook(
             detail=f"Webhook test failed: {str(e)}"
         )
     
-@router.post("/{token}/share", response_model=WebhookOut)
+@router.post("/{token}/share", response_model=WebhookSecureOut)
 @check_subscription
 @check_feature_access("can_share_webhooks")
 async def toggle_share_webhook(
@@ -667,8 +548,8 @@ async def toggle_share_webhook(
             db.commit()
             db.refresh(webhook)
 
-            # Create a properly formatted response using the model
-            return WebhookOut(
+            # Create a properly formatted response using the secure model
+            return WebhookSecureOut(
                 id=webhook.id,
                 user_id=webhook.user_id,
                 token=webhook.token,
@@ -684,7 +565,7 @@ async def toggle_share_webhook(
                 created_at=webhook.created_at,
                 last_triggered=webhook.last_triggered,
                 webhook_url=generate_webhook_url(webhook),
-                secret_key=webhook.secret_key,
+                # secret_key=webhook.secret_key,  # REMOVED - No longer exposed!
                 strategy_type=webhook.strategy_type,
                 subscriber_count=webhook.subscriber_count,
                 rating=webhook.rating,

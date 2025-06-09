@@ -25,6 +25,9 @@ from app.core.config import settings
 from app.db.base import init_db, get_db
 from app.db.session import engine, get_db, SessionLocal
 from app.core.db_health import check_database_health
+from app.core.redis_manager import redis_manager
+from app.core.memory_monitor import memory_monitor
+from app.services.trading_service import order_monitoring_service
 from fastapi.responses import RedirectResponse, JSONResponse
 from app.core.tasks import cleanup_expired_registrations
 
@@ -128,6 +131,34 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Database initialization failed: {str(db_error)}")
                 raise
 
+        # Initialize Redis connection manager
+        try:
+            logger.info("Initializing Redis connection manager...")
+            if redis_manager.initialize():
+                logger.info("Redis connection manager initialized successfully")
+            else:
+                logger.warning("Redis connection manager failed to initialize - Redis features will be disabled")
+        except Exception as redis_error:
+            logger.warning(f"Redis initialization failed: {str(redis_error)} - Redis features will be disabled")
+
+        # Initialize order monitoring service
+        try:
+            logger.info("Initializing order monitoring service...")
+            await order_monitoring_service.initialize()
+            logger.info("Order monitoring service initialized successfully")
+        except Exception as monitor_error:
+            logger.error(f"Order monitoring service initialization failed: {str(monitor_error)}")
+            if settings.ENVIRONMENT != "production":
+                raise
+
+        # Initialize memory monitoring
+        try:
+            logger.info("Starting memory monitoring...")
+            await memory_monitor.start_monitoring()
+            logger.info("Memory monitoring started successfully")
+        except Exception as memory_error:
+            logger.warning(f"Memory monitoring initialization failed: {str(memory_error)}")
+
         logger.info("Application startup completed successfully")
         yield
 
@@ -141,6 +172,27 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("Initiating application shutdown...")
             
+            # Stop memory monitoring
+            try:
+                await memory_monitor.stop_monitoring()
+                logger.info("Memory monitoring stopped")
+            except Exception as e:
+                logger.error(f"Error stopping memory monitoring: {e}")
+            
+            # Stop order monitoring service
+            try:
+                await order_monitoring_service.shutdown()
+                logger.info("Order monitoring service stopped")
+            except Exception as e:
+                logger.error(f"Error stopping order monitoring service: {e}")
+            
+            # Close Redis connections
+            try:
+                redis_manager.close()
+                logger.info("Redis connections closed")
+            except Exception as e:
+                logger.error(f"Error closing Redis connections: {e}")
+            
             # Cancel all background tasks
             for task in background_tasks:
                 if not task.done():
@@ -150,11 +202,11 @@ async def lifespan(app: FastAPI):
                     except asyncio.CancelledError:
                         pass
             
-            
-            # Close database connections - synchronous version
+            # Close database connections
             from app.db.session import engine
             if engine is not None:
-                engine.dispose()  # Removed await since engine is synchronous
+                engine.dispose()
+                logger.info("Database connections closed")
             
             logger.info("Application shutdown completed successfully")
             
