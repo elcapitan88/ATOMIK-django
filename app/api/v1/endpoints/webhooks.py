@@ -227,8 +227,14 @@ async def webhook_endpoint(
             logger.info("Using standard webhook processor")
         
         # Check rate limiting (10 requests per second for HFT support)
+        # Use optimized pipeline version for Railway-optimized processing
         if hasattr(webhook_processor, 'check_rate_limit'):
-            if not webhook_processor.check_rate_limit(webhook, client_ip):
+            if use_railway_optimization and hasattr(webhook_processor, 'check_rate_limit_pipeline'):
+                rate_check = webhook_processor.check_rate_limit_pipeline(webhook, client_ip)
+            else:
+                rate_check = webhook_processor.check_rate_limit(webhook, client_ip)
+                
+            if not rate_check:
                 raise HTTPException(
                     status_code=429,
                     detail="Rate limit exceeded. Please wait before sending another request."
@@ -275,7 +281,12 @@ async def webhook_endpoint(
         }
         
         # Check if this is a duplicate request (1 second TTL for HFT support)
-        cached_response = webhook_processor._check_and_set_idempotency(idempotency_key, response_data, ttl=1)
+        # Use optimized pipeline version when available
+        if hasattr(webhook_processor, '_check_and_set_idempotency_pipeline'):
+            cached_response = webhook_processor._check_and_set_idempotency_pipeline(idempotency_key, response_data, ttl=1)
+        else:
+            cached_response = webhook_processor._check_and_set_idempotency(idempotency_key, response_data, ttl=1)
+            
         if cached_response:
             logger.info(f"Duplicate webhook request detected, returning cached response")
             return cached_response

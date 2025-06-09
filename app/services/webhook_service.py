@@ -331,6 +331,47 @@ class WebhookProcessor:
         """Generate rate limit key for Redis"""
         return f"webhook_rate_limit:{webhook_id}:{client_ip}"
     
+    def check_rate_limit_pipeline(self, webhook: Webhook, client_ip: str) -> bool:
+        """Optimized rate limit check using Redis pipeline for maximum performance"""
+        with get_redis_connection() as redis_client:
+            if not redis_client:
+                logger.debug("Redis not available, falling back to database rate limiting")
+                return self._validate_rate_limit_db(webhook, client_ip)
+            
+            try:
+                rate_limit_key = self._generate_rate_limit_key(webhook.id, client_ip)
+                current_time = datetime.utcnow()
+                window_start = current_time.timestamp()
+                
+                # Use sliding window with 1-second precision
+                # Allow 10 requests per 1-second window to support HFT
+                window_size = 1  # 1 second window
+                max_requests = 10  # 10 requests per second for HFT support
+                
+                # Use pipeline to batch all Redis operations
+                pipe = redis_client.pipeline()
+                pipe.zremrangebyscore(rate_limit_key, 0, window_start - window_size)  # Clean old entries
+                pipe.zcard(rate_limit_key)  # Count current requests
+                pipe.zadd(rate_limit_key, {f"{window_start}:{client_ip}": window_start})  # Add current request
+                pipe.expire(rate_limit_key, window_size + 10)  # Set expiration
+                
+                # Execute all operations in single round-trip
+                results = pipe.execute()
+                current_count = results[1]  # Get count from zcard operation
+                
+                if current_count >= max_requests:
+                    logger.warning(f"Rate limit exceeded for webhook {webhook.id} from IP {client_ip}: {current_count} requests in {window_size}s window")
+                    return False
+                
+                return True
+                
+            except RedisError as e:
+                logger.warning(f"Redis pipeline error during rate limit check: {e}, falling back to database")
+                return self._validate_rate_limit_db(webhook, client_ip)
+            except Exception as e:
+                logger.error(f"Unexpected error during rate limit check: {e}, falling back to database")
+                return self._validate_rate_limit_db(webhook, client_ip)
+    
     def check_rate_limit(self, webhook: Webhook, client_ip: str) -> bool:
         """Check if request exceeds rate limit using Redis sliding window"""
         with get_redis_connection() as redis_client:
@@ -446,8 +487,8 @@ class RailwayOptimizedWebhookProcessor:
                 "railway_optimized": self.is_on_railway
             }
             
-            # Check if this is a duplicate request (1 second TTL for HFT support)
-            cached_response = self._check_and_set_idempotency(idempotency_key, processing_response, ttl=1)
+            # Check if this is a duplicate request using optimized pipeline (1 second TTL for HFT support)
+            cached_response = self._check_and_set_idempotency_pipeline(idempotency_key, processing_response, ttl=1)
             if cached_response:
                 logger.info(f"Returning cached response for duplicate webhook request: {idempotency_key}")
                 return cached_response
@@ -540,6 +581,31 @@ class RailwayOptimizedWebhookProcessor:
         key_string = json.dumps(key_data, sort_keys=True)
         key_hash = hashlib.sha256(key_string.encode()).hexdigest()
         return f"webhook_idempotency:{webhook_id}:{key_hash[:16]}"
+    
+    def _check_and_set_idempotency_pipeline(self, key: str, response_data: Dict[str, Any], ttl: int = 1) -> Optional[Dict[str, Any]]:
+        """Optimized idempotency check using Redis pipeline for faster performance."""
+        with get_redis_connection() as redis_client:
+            if not redis_client:
+                logger.debug("Redis not available for idempotency check")
+                return None
+            
+            try:
+                # Use pipeline for atomic operations
+                pipe = redis_client.pipeline()
+                pipe.get(key)  # Check if key exists
+                pipe.setex(key, ttl, json.dumps(response_data))  # Set the key regardless
+                results = pipe.execute()
+                
+                existing_response = results[0]
+                if existing_response:
+                    logger.info(f"Duplicate request detected for key: {key}")
+                    return json.loads(existing_response)
+                
+                return None
+                
+            except RedisError as e:
+                logger.error(f"Redis idempotency pipeline failed: {str(e)}")
+                return None
     
     def _check_and_set_idempotency(self, key: str, response_data: Dict[str, Any], ttl: int = 1) -> Optional[Dict[str, Any]]:
         """Check if request is duplicate and set idempotency key. Returns existing response if duplicate."""
