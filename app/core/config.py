@@ -110,13 +110,13 @@ class Settings(BaseSettings):
                 "pool_recycle": 7200,      # Longer recycle (2 hours) - Railway is stable
                 "pool_pre_ping": self.DB_POOL_PRE_PING,
                 "echo": self.SQL_ECHO,
-                # Railway-specific optimizations
+                # Railway-specific optimizations for asyncpg
                 "connect_args": {
-                    "connect_timeout": 5,
-                    "application_name": "atomik_trading_api_railway",
-                    "keepalives_idle": 600,     # Keep connections alive longer
-                    "keepalives_interval": 30,  # Check every 30 seconds
-                    "keepalives_count": 3       # 3 failed checks before disconnect
+                    "server_settings": {
+                        "application_name": "atomik_trading_api_railway"
+                    },
+                    "timeout": 5,  # asyncpg uses 'timeout' not 'connect_timeout'
+                    "command_timeout": 10
                 }
             }
         else:
@@ -129,8 +129,11 @@ class Settings(BaseSettings):
                 "pool_pre_ping": self.DB_POOL_PRE_PING,
                 "echo": self.SQL_ECHO,
                 "connect_args": {
-                    "connect_timeout": 10,  # Longer timeout for external connection
-                    "application_name": "atomik_trading_api_local"
+                    "server_settings": {
+                        "application_name": "atomik_trading_api_local"
+                    },
+                    "timeout": 10,  # asyncpg uses 'timeout' not 'connect_timeout'
+                    "command_timeout": 10
                 }
             }
     
