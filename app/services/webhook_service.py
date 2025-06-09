@@ -454,12 +454,15 @@ class RailwayOptimizedWebhookProcessor:
             
             try:
                 # Find associated strategies using async database query
+                # Use options to avoid loading joined relationships that cause unique() requirement
+                from sqlalchemy.orm import selectinload, noload
                 strategies_result = await self.db.execute(
                     select(ActivatedStrategy)
+                    .options(noload(ActivatedStrategy.follower_accounts_with_quantities))
                     .where(ActivatedStrategy.webhook_id == webhook.token)
                     .where(ActivatedStrategy.is_active == True)
                 )
-                strategies = strategies_result.scalars().unique().all()
+                strategies = strategies_result.scalars().all()
 
                 if not strategies:
                     logger.warning(f"No active strategies found for webhook {webhook.token}")
