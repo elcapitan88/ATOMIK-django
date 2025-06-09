@@ -459,13 +459,16 @@ class RailwayOptimizedWebhookProcessor:
                     .where(ActivatedStrategy.webhook_id == webhook.token)
                     .where(ActivatedStrategy.is_active == True)
                 )
-                strategies = strategies_result.scalars().all()
+                strategies = strategies_result.scalars().unique().all()
 
                 if not strategies:
                     logger.warning(f"No active strategies found for webhook {webhook.token}")
+                    # Calculate processing time even for early returns
+                    processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
                     return {
                         "status": "warning",
                         "message": "No active strategies found for this webhook",
+                        "processing_time_ms": round(processing_time, 2),
                         "railway_optimized": self.is_on_railway
                     }
 

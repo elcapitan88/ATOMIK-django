@@ -258,18 +258,20 @@ async def webhook_endpoint(
                 return result
             except Exception as e:
                 logger.error(f"Railway-optimized processing failed, falling back to standard: {str(e)}")
-                # Fallback to standard processing
+                # Fallback to standard processing - create new processor
+                use_railway_optimization = False
                 webhook_processor = WebhookProcessor(db)
+                logger.info("Switched to standard webhook processor for fallback")
         
         # Standard processing with background tasks
         idempotency_key = webhook_processor._generate_idempotency_key(webhook.id, processed_payload)
         
         response_data = {
-            "status": "accepted",
+            "status": "accepted", 
             "message": "Webhook received and being processed",
             "webhook_id": webhook.id,
             "timestamp": datetime.utcnow().isoformat(),
-            "railway_optimized": False
+            "railway_optimized": use_railway_optimization
         }
         
         # Check if this is a duplicate request (1 second TTL for HFT support)
