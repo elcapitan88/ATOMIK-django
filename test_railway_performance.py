@@ -17,7 +17,7 @@ from typing import List, Dict, Any
 TARGET_URL = "https://api.atomiktrading.io"  # Your Railway production URL
 WEBHOOK_TOKEN = "Uva9KWM-i_fvwT4Bsyqwn4GNmUwCXCuUO1MRy4t9oAw"  # Your webhook token
 WEBHOOK_SECRET = "1153bd34c107ff34edca215dcc12ebb00b3bb07ac0ffe22fca4df60df277034a"  # Your webhook secret
-TOTAL_REQUESTS = 500  # Reduced for quicker testing
+TOTAL_REQUESTS = 50  # Reduced for quicker testing
 
 class RailwayPerformanceTester:
     def __init__(self, base_url: str, webhook_token: str, webhook_secret: str = None):

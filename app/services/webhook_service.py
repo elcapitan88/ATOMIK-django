@@ -632,18 +632,26 @@ class RailwayOptimizedWebhookProcessor:
     
     async def _process_strategy_async(self, strategy: ActivatedStrategy, signal_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process individual strategy with async database operations
-        This is a simplified version - can be expanded based on your needs
+        Process individual strategy by executing the actual trade with the broker
         """
         try:
-            # This would contain your strategy processing logic
-            # For now, returning a success response
+            # Import the strategy processor to execute trades
+            from app.services.strategy_service import StrategyProcessor
+            
+            # Create strategy processor instance with async db session
+            strategy_processor = StrategyProcessor(self.db)
+            
+            # Execute the strategy (this sends the order to the broker)
+            logger.info(f"Executing trade for strategy {strategy.id}: {signal_data}")
+            strategy_result = await strategy_processor.execute_strategy(
+                strategy=strategy,
+                signal_data=signal_data
+            )
+            
             return {
                 "strategy_id": strategy.id,
-                "status": "processed",
-                "signal_data": signal_data,
-                "message": f"Strategy {strategy.id} processed successfully"
+                "result": strategy_result
             }
         except Exception as e:
-            logger.error(f"Strategy processing failed: {str(e)}")
+            logger.error(f"Strategy {strategy.id} execution failed: {str(e)}")
             raise
