@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Body, Response
 from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional
 from pydantic import BaseModel
@@ -8,10 +9,11 @@ import hashlib
 import secrets
 from datetime import datetime
 import logging
+import os
 
 from ....models.webhook import Webhook, WebhookLog, WebhookSubscription, WebhookRating
 from ....core.security import get_current_user
-from ....db.session import get_db
+from ....db.session import get_db, get_async_db, async_engine
 from ....models.user import User
 from ....models.webhook import Webhook, WebhookLog
 from ....models.subscription import Subscription
@@ -24,7 +26,7 @@ from ....schemas.webhook import (
     WebhookLogOut,
     WebhookPayload
 )
-from ....services.webhook_service import WebhookProcessor
+from ....services.webhook_service import WebhookProcessor, RailwayOptimizedWebhookProcessor
 from ....core.config import settings
 from ....core.upgrade_prompts import build_upgrade_response, UpgradeReason, add_upgrade_headers
 from ....core.permissions import check_subscription, check_resource_limit, check_feature_access, require_tier
@@ -173,6 +175,7 @@ async def webhook_endpoint(
     payload: WebhookPayload,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    async_db: AsyncSession = Depends(get_async_db),
     secret: Optional[str] = None  # Add this to get the secret from query params
 ):
     """Handle incoming webhook requests"""
@@ -210,15 +213,26 @@ async def webhook_endpoint(
                     detail="IP not allowed"
                 )
 
-        # Initialize webhook processor
-        webhook_processor = WebhookProcessor(db)
+        # Choose optimal webhook processor based on environment
+        is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        use_railway_optimization = is_on_railway and async_engine is not None
         
-        # Check rate limiting (1 request per second per webhook per IP)
-        if not webhook_processor.check_rate_limit(webhook, client_ip):
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded. Please wait before sending another request."
-            )
+        if use_railway_optimization:
+            # Use Railway-optimized processor for better performance
+            webhook_processor = RailwayOptimizedWebhookProcessor(async_db)
+            logger.info("Using Railway-optimized webhook processor")
+        else:
+            # Fallback to standard processor
+            webhook_processor = WebhookProcessor(db)
+            logger.info("Using standard webhook processor")
+        
+        # Check rate limiting (10 requests per second for HFT support)
+        if hasattr(webhook_processor, 'check_rate_limit'):
+            if not webhook_processor.check_rate_limit(webhook, client_ip):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. Please wait before sending another request."
+                )
         
         # Convert the Pydantic model to a plain dictionary and ensure action is properly formatted
         processed_payload = payload.dict()
@@ -232,14 +246,30 @@ async def webhook_endpoint(
             # Always ensure it's uppercase
             processed_payload['action'] = str(processed_payload['action']).upper()
 
-        # Check for duplicate request using idempotency protection
+        if use_railway_optimization:
+            # Use Railway-optimized direct processing (faster response)
+            try:
+                result = await webhook_processor.process_webhook_fast(
+                    webhook=webhook,
+                    payload=processed_payload,
+                    client_ip=client_ip
+                )
+                logger.info(f"Railway-optimized webhook processed in {result.get('processing_time_ms', 'N/A')}ms")
+                return result
+            except Exception as e:
+                logger.error(f"Railway-optimized processing failed, falling back to standard: {str(e)}")
+                # Fallback to standard processing
+                webhook_processor = WebhookProcessor(db)
+        
+        # Standard processing with background tasks
         idempotency_key = webhook_processor._generate_idempotency_key(webhook.id, processed_payload)
         
         response_data = {
             "status": "accepted",
             "message": "Webhook received and being processed",
             "webhook_id": webhook.id,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "railway_optimized": False
         }
         
         # Check if this is a duplicate request (1 second TTL for HFT support)
@@ -248,11 +278,11 @@ async def webhook_endpoint(
             logger.info(f"Duplicate webhook request detected, returning cached response")
             return cached_response
 
-        # Pass the processed payload to the background task with the correct parameter name 'payload'
+        # Pass the processed payload to the background task
         background_tasks.add_task(
             webhook_processor.process_webhook,
             webhook=webhook,
-            payload=processed_payload,  # Use the correct parameter name
+            payload=processed_payload,
             client_ip=client_ip
         )
 

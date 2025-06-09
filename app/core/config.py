@@ -59,40 +59,78 @@ class Settings(BaseSettings):
 
     @property
     def active_database_url(self) -> str:
+        """Get the optimal database URL based on where we're running"""
+        
+        # Check if we're running ON Railway
+        is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        
+        if is_on_railway:
+            # Running ON Railway - try to use internal Railway connection
+            railway_internal_url = self._get_railway_internal_url()
+            if railway_internal_url:
+                return railway_internal_url
+        
+        # Fallback to standard URL logic (works for both local and Railway)
         if self.ENVIRONMENT == "production" and self.PROD_DATABASE_URL:
             return self.PROD_DATABASE_URL
         elif self.ENVIRONMENT == "development" and self.DEV_DATABASE_URL:
             return self.DEV_DATABASE_URL
         return self.DATABASE_URL
     
+    def _get_railway_internal_url(self) -> Optional[str]:
+        """Build Railway internal database URL if environment variables are available"""
+        try:
+            # Railway provides these environment variables automatically
+            db_host = os.getenv("PGHOST")
+            db_port = os.getenv("PGPORT", "5432")
+            db_user = os.getenv("PGUSER")
+            db_password = os.getenv("PGPASSWORD") 
+            db_name = os.getenv("PGDATABASE")
+            
+            if all([db_host, db_user, db_password, db_name]):
+                # Build Railway internal connection URL
+                return f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+            else:
+                return None
+        except Exception:
+            return None
+    
     def get_db_params(self) -> Dict[str, Any]:
         """Return database connection parameters based on environment"""
-        if self.ENVIRONMENT == "production":
+        
+        # Check if we're running ON Railway (production environment)
+        is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        
+        if is_on_railway:
+            # Running ON Railway - use Railway-optimized settings
             return {
-                "pool_size": self.DB_POOL_SIZE,
-                "max_overflow": self.DB_MAX_OVERFLOW,
+                "pool_size": 30,           # Higher pool for Railway's low latency
+                "max_overflow": 50,        # More overflow connections
                 "pool_timeout": self.DB_POOL_TIMEOUT,
-                "pool_recycle": self.DB_POOL_RECYCLE,
+                "pool_recycle": 7200,      # Longer recycle (2 hours) - Railway is stable
                 "pool_pre_ping": self.DB_POOL_PRE_PING,
                 "echo": self.SQL_ECHO,
-                # Add connection health checks
+                # Railway-specific optimizations
                 "connect_args": {
-                    "connect_timeout": 10,
-                    "application_name": "atomik_trading_api"
+                    "connect_timeout": 5,
+                    "application_name": "atomik_trading_api_railway",
+                    "keepalives_idle": 600,     # Keep connections alive longer
+                    "keepalives_interval": 30,  # Check every 30 seconds
+                    "keepalives_count": 3       # 3 failed checks before disconnect
                 }
             }
         else:
-            # Development parameters (more conservative)
+            # Local development connecting to Railway database
             return {
-                "pool_size": 3,
-                "max_overflow": 7,
+                "pool_size": 8,            # Moderate pool for external connection
+                "max_overflow": 15,        # Standard overflow
                 "pool_timeout": 20,
-                "pool_recycle": 1800,  # 30 minutes
+                "pool_recycle": 1800,      # 30 minutes (shorter for external)
                 "pool_pre_ping": self.DB_POOL_PRE_PING,
                 "echo": self.SQL_ECHO,
                 "connect_args": {
-                    "connect_timeout": 10,
-                    "application_name": "atomik_trading_api_dev"
+                    "connect_timeout": 10,  # Longer timeout for external connection
+                    "application_name": "atomik_trading_api_local"
                 }
             }
     
@@ -110,6 +148,22 @@ class Settings(BaseSettings):
 
     # Redis Settings
     REDIS_URL: Optional[str] = "redis://localhost:6379"
+    
+    @property
+    def active_redis_url(self) -> str:
+        """Get the optimal Redis URL based on where we're running"""
+        
+        # Check if we're running ON Railway
+        is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        
+        if is_on_railway:
+            # Try to use Railway's Redis URL
+            railway_redis_url = os.getenv("REDIS_URL")
+            if railway_redis_url:
+                return railway_redis_url
+        
+        # Fallback to configured Redis URL (for local development)
+        return self.REDIS_URL or "redis://localhost:6379"
 
     DIGITAL_OCEAN_API_KEY: Optional[str] = None
     DIGITAL_OCEAN_REGION: str = "nyc1"

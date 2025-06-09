@@ -22,13 +22,16 @@ class RedisManager:
             return True
             
         try:
-            if not settings.REDIS_URL:
+            redis_url = settings.active_redis_url
+            if not redis_url:
                 logger.warning("Redis URL not configured, Redis features will be disabled")
                 return False
                 
+            logger.info(f"Initializing Redis with URL: {redis_url[:25]}...")
+            
             # Create connection pool with optimized settings
             self._pool = redis.ConnectionPool.from_url(
-                settings.REDIS_URL,
+                redis_url,
                 max_connections=20,  # Pool size for concurrent connections
                 retry_on_timeout=True,
                 retry_on_error=[RedisConnectionError],

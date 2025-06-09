@@ -6,6 +6,7 @@ from sqlalchemy.pool import QueuePool
 from app.core.config import settings
 import logging
 import contextlib
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +19,64 @@ else:
 # Get database parameters from settings
 db_params = settings.get_db_params()
 
-# Configure database engine with proper error handling
+# Check if we're on Railway for optimal setup
+is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+
+# Configure ASYNC database engine (for Railway optimization)
 try:
-    # Use the active_database_url property to get the appropriate URL for the current environment
+    # Check if asyncpg is available
+    import asyncpg
+    
+    # Convert sync URL to async URL if needed
+    database_url = settings.active_database_url
+    if not database_url.startswith("postgresql+asyncpg://"):
+        database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+    
+    # Create async engine for Railway optimization
+    async_engine = create_async_engine(
+        database_url,
+        **db_params
+    )
+    logger.info(f"Async database engine created successfully in {settings.ENVIRONMENT} mode (Railway: {is_on_railway})")
+except ImportError:
+    logger.warning("asyncpg not installed - async database features disabled. Install with: pip install asyncpg")
+    async_engine = None
+except Exception as e:
+    logger.critical(f"Failed to create async database engine: {str(e)}")
+    async_engine = None
+    # Don't raise here, let the sync engine handle everything
+    logger.warning("Falling back to sync database engine only")
+
+# Configure SYNC database engine (for backward compatibility)
+try:
+    # Use sync URL for existing code
+    sync_database_url = settings.active_database_url.replace("postgresql+asyncpg://", "postgresql://")
+    
     engine = create_engine(
-        settings.active_database_url,
+        sync_database_url,
         poolclass=QueuePool,
         **db_params
     )
-    logger.info(f"Database engine created successfully in {settings.ENVIRONMENT} mode")
+    logger.info(f"Sync database engine created successfully in {settings.ENVIRONMENT} mode")
 except Exception as e:
-    logger.critical(f"Failed to create database engine: {str(e)}")
+    logger.critical(f"Failed to create sync database engine: {str(e)}")
     engine = None  # Set to None if creation fails
     raise  # Re-raise the exception after logging
 
-# Create session factory
+# Create ASYNC session factory (for Railway optimization)
+if async_engine is not None:
+    AsyncSessionLocal = sessionmaker(
+        async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+        autocommit=False
+    )
+else:
+    logger.critical("AsyncSessionLocal not created due to async engine initialization failure")
+    AsyncSessionLocal = None
+
+# Create SYNC session factory (for backward compatibility)
 if engine is not None:
     SessionLocal = sessionmaker(
         autocommit=False,
@@ -43,7 +87,27 @@ else:
     logger.critical("SessionLocal not created due to engine initialization failure")
     SessionLocal = None
 
-# Enhanced dependency for FastAPI endpoints
+# ASYNC dependency for FastAPI endpoints (Railway optimized)
+async def get_async_db():
+    """
+    Get ASYNC database session with Railway optimization
+    """
+    if AsyncSessionLocal is None:
+        logger.critical("Cannot create async database session - AsyncSessionLocal is None")
+        raise Exception("Async database session factory not initialized")
+        
+    async with AsyncSessionLocal() as db:
+        try:
+            # Log session creation in development mode
+            if settings.ENVIRONMENT == "development":
+                logger.debug(f"Async database session created (Railway: {is_on_railway})")
+            yield db
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Async database session error: {str(e)}")
+            raise
+
+# SYNC dependency for FastAPI endpoints (backward compatibility)
 async def get_db():
     """
     Get database session with enhanced error handling and logging
@@ -119,9 +183,12 @@ async def test_db_connection():
 
 # Export everything needed by other modules
 __all__ = [
-    "engine",
-    "SessionLocal",
-    "get_db",
-    "get_db_context",
-    "test_db_connection"
+    "engine",           # Sync engine (existing)
+    "async_engine",     # Async engine (new)
+    "SessionLocal",     # Sync session factory (existing)
+    "AsyncSessionLocal", # Async session factory (new)
+    "get_db",           # Sync database dependency (existing)
+    "get_async_db",     # Async database dependency (new)
+    "get_db_context",   # Sync context manager (existing)
+    "test_db_connection" # Connection test (existing)
 ]
