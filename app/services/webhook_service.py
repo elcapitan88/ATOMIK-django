@@ -649,24 +649,27 @@ class RailwayOptimizedWebhookProcessor:
         try:
             # Import the strategy processor to execute trades
             from app.services.strategy_service import StrategyProcessor
+            from app.db.session import SessionLocal
             
-            # Create strategy processor instance with async db session
-            strategy_processor = StrategyProcessor(self.db)
-            
-            # Execute the strategy (this sends the order to the broker)
-            logger.info(f"Executing trade for strategy {strategy.id}: {signal_data}")
-            strategy_result = await strategy_processor.execute_strategy(
-                strategy=strategy,
-                signal_data=signal_data
-            )
-            
-            # Log the detailed result for debugging
-            logger.info(f"Strategy {strategy.id} execution completed with result: {strategy_result}")
-            
-            return {
-                "strategy_id": strategy.id,
-                "result": strategy_result
-            }
+            # CRITICAL FIX: StrategyProcessor expects sync session, not async
+            # Create a new sync session for the strategy processor
+            with SessionLocal() as sync_db:
+                strategy_processor = StrategyProcessor(sync_db)
+                
+                # Execute the strategy (this sends the order to the broker)
+                logger.info(f"Executing trade for strategy {strategy.id}: {signal_data}")
+                strategy_result = await strategy_processor.execute_strategy(
+                    strategy=strategy,
+                    signal_data=signal_data
+                )
+                
+                # Log the detailed result for debugging
+                logger.info(f"Strategy {strategy.id} execution completed with result: {strategy_result}")
+                
+                return {
+                    "strategy_id": strategy.id,
+                    "result": strategy_result
+                }
         except Exception as e:
             logger.error(f"Strategy {strategy.id} execution failed: {str(e)}", exc_info=True)
             return {
