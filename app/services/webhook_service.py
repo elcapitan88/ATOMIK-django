@@ -511,15 +511,18 @@ class RailwayOptimizedWebhookProcessor:
                 # Essential logging only - webhook triggered
                 logger.info(f"Webhook {webhook.id} triggered {len(strategies)} strategies")
 
+                # CRITICAL FIX: Normalize payload first to handle WEBHOOKACTION.BUY -> BUY
+                normalized_payload = self.normalize_payload(webhook.source_type, payload)
+                
                 # Process strategies (keeping existing logic but with async DB operations)
                 results = []
                 strategy_errors = []
                 
                 for strategy in strategies:
                     try:
-                        # Create order data using strategy settings
+                        # Create order data using strategy settings with NORMALIZED action
                         signal_data = {
-                            "action": payload.get("action", "BUY"),
+                            "action": normalized_payload.get("action", "BUY"),  # Use normalized action
                             "symbol": strategy.ticker,
                             "quantity": strategy.quantity if strategy.strategy_type == 'single' else strategy.leader_quantity,
                             "order_type": "MARKET",
@@ -528,7 +531,16 @@ class RailwayOptimizedWebhookProcessor:
                         
                         # Process with strategy processor (this can be optimized further if needed)
                         result = await self._process_strategy_async(strategy, signal_data)
-                        results.append(result)
+                        
+                        # Transform result to show more detail
+                        detailed_result = {
+                            "strategy_id": strategy.id,
+                            "status": "processed" if result.get("result") else "error",
+                            "signal_data": signal_data,
+                            "execution_result": result.get("result"),  # Show actual broker response
+                            "message": f"Strategy {strategy.id} processed successfully" if result.get("result") else f"Strategy {strategy.id} failed"
+                        }
+                        results.append(detailed_result)
                         
                     except Exception as strategy_error:
                         error_msg = f"Error processing strategy {strategy.id}: {str(strategy_error)}"
@@ -648,10 +660,55 @@ class RailwayOptimizedWebhookProcessor:
                 signal_data=signal_data
             )
             
+            # Log the detailed result for debugging
+            logger.info(f"Strategy {strategy.id} execution completed with result: {strategy_result}")
+            
             return {
                 "strategy_id": strategy.id,
                 "result": strategy_result
             }
         except Exception as e:
-            logger.error(f"Strategy {strategy.id} execution failed: {str(e)}")
-            raise
+            logger.error(f"Strategy {strategy.id} execution failed: {str(e)}", exc_info=True)
+            return {
+                "strategy_id": strategy.id,
+                "result": {"status": "error", "error": str(e)}
+            }
+
+    def normalize_payload(self, source_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize webhook payload to standard format (copied from WebhookProcessor)"""
+        try:
+            # Handle Enum string representation
+            if 'action' in payload:
+                action_str = str(payload['action']).strip()
+                if '.' in action_str and 'WEBHOOKACTION' in action_str:
+                    action_str = action_str.split('.')[-1]
+                payload['action'] = action_str.upper()
+
+            # Rest of validation logic
+            if 'action' not in payload:
+                raise ValueError("Missing required field: action")
+
+            action = payload['action']
+            if action not in {'BUY', 'SELL'}:
+                raise ValueError(f"Invalid action: {action}. Must be BUY or SELL.")
+
+            # Create normalized payload
+            normalized = {
+                'action': action,
+                'timestamp': datetime.utcnow().isoformat(),
+                'source': source_type,
+            }
+
+            return normalized
+
+        except ValueError as ve:
+            raise HTTPException(
+                status_code=400,
+                detail=str(ve)
+            )
+        except Exception as e:
+            logger.error(f"Payload normalization failed: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid payload format: {str(e)}"
+            )
