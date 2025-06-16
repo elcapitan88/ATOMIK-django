@@ -33,6 +33,10 @@ from ....services.email.email_notification import send_welcome_email, send_admin
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+class TestEmailRequest(BaseModel):
+    email: EmailStr
+    username: Optional[str] = "Test User"
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
@@ -945,3 +949,35 @@ async def check_username(
     """
     user = db.query(User).filter(User.username == username).first()
     return {"exists": bool(user)}
+
+@router.post("/test-email")
+async def test_welcome_email(
+    request: TestEmailRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Test endpoint to send a welcome email to verify email system is working
+    """
+    try:
+        logger.info(f"Testing welcome email for {request.email}")
+        
+        # Send welcome email using the same function as registration
+        await send_welcome_email(
+            background_tasks=background_tasks,
+            username=request.username,
+            email=request.email
+        )
+        
+        return {
+            "message": f"Test welcome email sent to {request.email}",
+            "email": request.email,
+            "username": request.username,
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Test email failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send test email: {str(e)}"
+        )
