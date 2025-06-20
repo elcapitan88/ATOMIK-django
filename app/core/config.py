@@ -85,6 +85,11 @@ def get_settings() -> Settings:
 # Create settings instance
 settings = get_settings()
 
+# Debug: Log the DATABASE_URL at config initialization
+import logging
+logger = logging.getLogger(__name__)
+logger.info(f"[CONFIG] DATABASE_URL: {settings.DATABASE_URL[:50] if settings.DATABASE_URL else 'NONE'}...")
+
 # Validate critical settings on import
 assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
 assert settings.DATABASE_URL, "DATABASE_URL environment variable is required"
