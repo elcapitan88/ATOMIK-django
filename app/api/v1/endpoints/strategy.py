@@ -16,7 +16,7 @@ from app.models.webhook import Webhook, WebhookSubscription
 from app.services.subscription_service import SubscriptionService
 from app.models.subscription import Subscription
 from app.models.broker import BrokerAccount
-from app.core.upgrade_prompts import add_upgrade_headers, UpgradeReason
+from app.core.upgrade_prompts import add_upgrade_headers, UpgradeReason, upgrade_exception
 from app.schemas.strategy import (
     SingleStrategyCreate,
     MultipleStrategyCreate,
@@ -26,6 +26,7 @@ from app.schemas.strategy import (
     StrategyType,
     StrategyStats
 )
+from app.utils.ticker_utils import get_display_ticker, validate_ticker
 from app.core.permissions import (
     check_subscription, 
     check_resource_limit, 
@@ -109,6 +110,18 @@ async def activate_strategy(
                 detail="You don't have access to this webhook"
             )
 
+        # Validate and convert ticker to display format
+        valid, _ = validate_ticker(strategy.ticker)
+        if not valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid ticker format: {strategy.ticker}"
+            )
+        
+        # Convert to display ticker (e.g., ESU5 -> ES, or ES -> ES)
+        display_ticker = get_display_ticker(strategy.ticker)
+        logger.info(f"Converted ticker {strategy.ticker} to display ticker {display_ticker}")
+
         try:
             if isinstance(strategy, SingleStrategyCreate):
                 logger.info("Processing single account strategy")
@@ -144,7 +157,7 @@ async def activate_strategy(
                     user_id=current_user.id,
                     strategy_type="single",
                     webhook_id=str(strategy.webhook_id),
-                    ticker=strategy.ticker,
+                    ticker=display_ticker,
                     account_id=str(strategy.account_id),
                     quantity=strategy.quantity,
                     is_active=True
@@ -256,7 +269,7 @@ async def activate_strategy(
                     user_id=current_user.id,
                     strategy_type="multiple",
                     webhook_id=str(strategy.webhook_id),
-                    ticker=strategy.ticker,
+                    ticker=display_ticker,
                     leader_account_id=leader_account.account_id,
                     leader_quantity=strategy.leader_quantity,
                     group_name=strategy.group_name,
@@ -496,6 +509,183 @@ async def toggle_strategy(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to toggle strategy: {str(e)}"
+        )
+
+@router.put("/{strategy_id}", response_model=StrategyResponse)
+@check_subscription
+async def update_strategy(
+    strategy_id: int,
+    strategy_update: StrategyUpdate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Update an existing strategy"""
+    try:
+        logger.info(f"Updating strategy {strategy_id} for user {current_user.id}")
+        
+        # Get the strategy with joins for response
+        strategy = (
+            db.query(ActivatedStrategy)
+            .options(
+                joinedload(ActivatedStrategy.broker_account),
+                joinedload(ActivatedStrategy.leader_broker_account),
+                joinedload(ActivatedStrategy.webhook)
+            )
+            .filter(
+                ActivatedStrategy.id == strategy_id,
+                ActivatedStrategy.user_id == current_user.id
+            )
+            .first()
+        )
+        
+        if not strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        # Track if any changes were made
+        changes_made = False
+        
+        # Update fields if provided
+        if strategy_update.is_active is not None:
+            strategy.is_active = strategy_update.is_active
+            changes_made = True
+            logger.info(f"Updated is_active to {strategy_update.is_active}")
+        
+        if strategy.strategy_type == "single":
+            # Handle single strategy updates
+            if strategy_update.quantity is not None:
+                strategy.quantity = strategy_update.quantity
+                changes_made = True
+                logger.info(f"Updated quantity to {strategy_update.quantity}")
+                
+            # Log warning if trying to update multi-account fields on single strategy
+            if strategy_update.leader_quantity is not None:
+                logger.warning(f"Ignoring leader_quantity update on single strategy")
+            if strategy_update.follower_quantities is not None:
+                logger.warning(f"Ignoring follower_quantities update on single strategy")
+                
+        elif strategy.strategy_type == "multiple":
+            # Handle multiple strategy updates
+            if strategy_update.leader_quantity is not None:
+                strategy.leader_quantity = strategy_update.leader_quantity
+                changes_made = True
+                logger.info(f"Updated leader_quantity to {strategy_update.leader_quantity}")
+            
+            if strategy_update.follower_quantities is not None:
+                # Get current follower accounts
+                current_followers = strategy.get_follower_accounts()
+                
+                if len(strategy_update.follower_quantities) != len(current_followers):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Number of quantities ({len(strategy_update.follower_quantities)}) must match number of follower accounts ({len(current_followers)})"
+                    )
+                
+                # Delete existing follower quantities
+                db.execute(
+                    strategy_follower_quantities.delete().where(
+                        strategy_follower_quantities.c.strategy_id == strategy_id
+                    )
+                )
+                
+                # Insert new quantities
+                for idx, follower in enumerate(current_followers):
+                    db.execute(
+                        strategy_follower_quantities.insert().values(
+                            strategy_id=strategy_id,
+                            account_id=follower["account_id"],
+                            quantity=strategy_update.follower_quantities[idx]
+                        )
+                    )
+                changes_made = True
+                logger.info(f"Updated follower quantities: {strategy_update.follower_quantities}")
+            
+            # Log warning if trying to update single-account fields on multi strategy
+            if strategy_update.quantity is not None:
+                logger.warning(f"Ignoring quantity update on multiple strategy")
+        
+        if not changes_made:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid fields provided for update"
+            )
+        
+        # Update the updated_at timestamp
+        from datetime import datetime
+        strategy.updated_at = datetime.utcnow()
+        
+        # Commit changes
+        db.commit()
+        db.refresh(strategy)
+        
+        logger.info(f"Successfully updated strategy {strategy_id}")
+        
+        # Prepare response data similar to list_strategies
+        strategy_data = {
+            "id": strategy.id,
+            "strategy_type": strategy.strategy_type,
+            "webhook_id": strategy.webhook_id,
+            "ticker": strategy.ticker,
+            "is_active": strategy.is_active,
+            "created_at": strategy.created_at,
+            "last_triggered": strategy.last_triggered,
+            "webhook": {
+                "name": strategy.webhook.name if strategy.webhook else None,
+                "source_type": strategy.webhook.source_type if strategy.webhook else "custom"
+            }
+        }
+
+        if strategy.strategy_type == "single":
+            strategy_data.update({
+                "account_id": strategy.account_id,
+                "quantity": strategy.quantity,
+                "broker_account": {
+                    "account_id": strategy.broker_account.account_id,
+                    "name": strategy.broker_account.name,
+                    "broker_id": strategy.broker_account.broker_id
+                } if strategy.broker_account else None,
+                "leader_account_id": None,
+                "leader_quantity": None,
+                "leader_broker_account": None,
+                "follower_accounts": [],
+                "group_name": None
+            })
+        else:
+            strategy_data.update({
+                "group_name": strategy.group_name,
+                "leader_account_id": strategy.leader_account_id,
+                "leader_quantity": strategy.leader_quantity,
+                "leader_broker_account": {
+                    "account_id": strategy.leader_broker_account.account_id,
+                    "name": strategy.leader_broker_account.name,
+                    "broker_id": strategy.leader_broker_account.broker_id
+                } if strategy.leader_broker_account else None,
+                "follower_accounts": strategy.get_follower_accounts(),
+                "account_id": None,
+                "quantity": None
+            })
+
+        # Add stats
+        strategy_data["stats"] = {
+            "total_trades": strategy.total_trades,
+            "successful_trades": strategy.successful_trades,
+            "failed_trades": strategy.failed_trades,
+            "total_pnl": float(strategy.total_pnl) if strategy.total_pnl else 0,
+            "win_rate": float(strategy.win_rate) if strategy.win_rate else None,
+            "average_trade_pnl": None
+        }
+
+        return StrategyResponse(**strategy_data)
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating strategy {strategy_id}: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update strategy: {str(e)}"
         )
 
 @router.delete("/{strategy_id}")
