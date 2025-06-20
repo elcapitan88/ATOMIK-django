@@ -9,6 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Create SQLAlchemy engine
+logger.info(f"[BASE.PY] Using DATABASE_URL: {settings.DATABASE_URL[:50]}...")
 engine = create_engine(
     settings.DATABASE_URL,
     poolclass=QueuePool,
