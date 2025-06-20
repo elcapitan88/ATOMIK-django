@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 
 # Configure database engine with proper error handling
 try:
+    # Debug: Log the actual database URL being used
+    logger.info(f"Connecting to database: {settings.DATABASE_URL[:50]}...")
     engine = create_engine(
         settings.DATABASE_URL,
         connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {},
