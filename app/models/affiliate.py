@@ -12,8 +12,6 @@ class Affiliate(Base):
     
     # Rewardful integration fields  
     rewardful_id = Column(String, unique=True, nullable=True, index=True)
-    # Legacy field - keeping for migration compatibility
-    firstpromoter_id = Column(String, unique=True, nullable=True, index=True)
     referral_link = Column(String, nullable=True)
     referral_code = Column(String, unique=True, nullable=True, index=True)
     
@@ -46,8 +44,6 @@ class AffiliateReferral(Base):
     
     # Rewardful integration fields
     rewardful_referral_id = Column(String, unique=True, nullable=True, index=True)
-    # Legacy field - keeping for migration compatibility  
-    firstpromoter_referral_id = Column(String, unique=True, nullable=True, index=True)
     
     # Customer information
     customer_email = Column(String, nullable=False, index=True)
