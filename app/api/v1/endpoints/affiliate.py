@@ -1,12 +1,13 @@
 # app/api/v1/endpoints/affiliate.py
-from typing import Dict, Any, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Dict, Any, List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from datetime import datetime
+from pydantic import BaseModel
 
 from ....db.session import get_db
 from ....models.user import User
-from ....models.affiliate import Affiliate, AffiliateReferral
+from ....models.affiliate import Affiliate, AffiliateReferral, AffiliateClick
 from ....services.rewardful_service import rewardful_service
 from ....api.deps import get_current_user
 import logging
@@ -14,6 +15,83 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Pydantic models for request validation
+class ClickTrackingRequest(BaseModel):
+    referral_code: str
+    page_url: Optional[str] = None
+    referrer: Optional[str] = None
+    user_agent: Optional[str] = None
+
+@router.post("/track-click", response_model=Dict[str, Any])
+async def track_referral_click(
+    click_data: ClickTrackingRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Track a referral link click (public endpoint - no auth required).
+    
+    Args:
+        click_data: Click tracking data including referral code
+        request: FastAPI request object for IP address
+        db: Database session
+    
+    Returns:
+        Dict containing success status
+    """
+    try:
+        # Find the affiliate by referral code
+        affiliate = db.query(Affiliate).filter(
+            Affiliate.referral_code == click_data.referral_code,
+            Affiliate.is_active == True
+        ).first()
+        
+        if not affiliate:
+            # Still return success to avoid revealing valid codes
+            logger.warning(f"Click tracked for invalid referral code: {click_data.referral_code}")
+            return {
+                "success": True,
+                "message": "Click tracked"
+            }
+        
+        # Get client IP address
+        client_ip = request.client.host
+        if hasattr(request, 'headers'):
+            # Check for forwarded IP in case of proxy/load balancer
+            forwarded_for = request.headers.get('X-Forwarded-For')
+            if forwarded_for:
+                client_ip = forwarded_for.split(',')[0].strip()
+        
+        # Create click record
+        click_record = AffiliateClick(
+            affiliate_id=affiliate.id,
+            referral_code=click_data.referral_code,
+            ip_address=client_ip,
+            user_agent=click_data.user_agent or request.headers.get('User-Agent'),
+            page_url=click_data.page_url,
+            referrer=click_data.referrer or request.headers.get('Referer'),
+            clicked_at=datetime.utcnow()
+        )
+        
+        db.add(click_record)
+        db.commit()
+        
+        logger.info(f"Tracked click for affiliate {affiliate.id} with code {click_data.referral_code}")
+        
+        return {
+            "success": True,
+            "message": "Click tracked successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error tracking referral click: {str(e)}")
+        db.rollback()
+        # Return success to avoid revealing system errors to potential attackers
+        return {
+            "success": True,
+            "message": "Click tracked"
+        }
 
 @router.post("/become-affiliate", response_model=Dict[str, Any])
 async def become_affiliate(
