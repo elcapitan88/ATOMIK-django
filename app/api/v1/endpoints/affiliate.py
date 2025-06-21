@@ -7,7 +7,7 @@ from datetime import datetime
 from ....db.session import get_db
 from ....models.user import User
 from ....models.affiliate import Affiliate, AffiliateReferral
-from ....services.firstpromoter_service import firstpromoter_service
+from ....services.rewardful_service import rewardful_service
 from ....api.deps import get_current_user
 import logging
 
@@ -34,7 +34,7 @@ async def become_affiliate(
         
         if existing_affiliate and existing_affiliate.is_active:
             # Return existing affiliate data
-            stats = await firstpromoter_service.get_affiliate_stats(existing_affiliate, db)
+            stats = await rewardful_service.get_affiliate_stats(existing_affiliate, db)
             return {
                 "success": True,
                 "message": "You are already an affiliate",
@@ -42,10 +42,10 @@ async def become_affiliate(
             }
         
         # Create new affiliate record
-        affiliate = await firstpromoter_service.create_affiliate_record(current_user, db)
+        affiliate = await rewardful_service.create_affiliate_record(current_user, db)
         
         # Get initial stats (will be mostly zeros)
-        stats = await firstpromoter_service.get_affiliate_stats(affiliate, db)
+        stats = await rewardful_service.get_affiliate_stats(affiliate, db)
         
         logger.info(f"User {current_user.id} became an affiliate with code {affiliate.referral_code}")
         
@@ -89,7 +89,7 @@ async def get_affiliate_dashboard(
             )
         
         # Get comprehensive stats
-        stats = await firstpromoter_service.get_affiliate_stats(affiliate, db)
+        stats = await rewardful_service.get_affiliate_stats(affiliate, db)
         
         # Get recent referrals (last 10)
         recent_referrals = db.query(AffiliateReferral).filter(
@@ -267,7 +267,7 @@ async def get_affiliate_stats(
             )
         
         # Get comprehensive stats
-        stats = await firstpromoter_service.get_affiliate_stats(affiliate, db)
+        stats = await rewardful_service.get_affiliate_stats(affiliate, db)
         
         return {
             "success": True,

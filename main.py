@@ -21,7 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # Local imports
 from app.api.v1.api import api_router, tradovate_callback_router
-from app.webhooks import firstpromoter
+from app.webhooks import rewardful
 from app.core.config import settings
 from app.db.base import init_db, get_db
 from app.db.session import engine, get_db, SessionLocal
@@ -277,7 +277,7 @@ class Config:
 # Include routers
 app.include_router(tradovate_callback_router, prefix="/api")
 app.include_router(api_router, prefix="/api/v1")
-app.include_router(firstpromoter.router)
+app.include_router(rewardful.router)
 
 
 

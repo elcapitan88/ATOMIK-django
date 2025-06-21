@@ -10,7 +10,9 @@ class Affiliate(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     
-    # FirstPromoter integration fields
+    # Rewardful integration fields  
+    rewardful_id = Column(String, unique=True, nullable=True, index=True)
+    # Legacy field - keeping for migration compatibility
     firstpromoter_id = Column(String, unique=True, nullable=True, index=True)
     referral_link = Column(String, nullable=True)
     referral_code = Column(String, unique=True, nullable=True, index=True)
@@ -42,7 +44,9 @@ class AffiliateReferral(Base):
     affiliate_id = Column(Integer, ForeignKey("affiliates.id", ondelete="CASCADE"), nullable=False)
     referred_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     
-    # FirstPromoter integration fields
+    # Rewardful integration fields
+    rewardful_referral_id = Column(String, unique=True, nullable=True, index=True)
+    # Legacy field - keeping for migration compatibility  
     firstpromoter_referral_id = Column(String, unique=True, nullable=True, index=True)
     
     # Customer information

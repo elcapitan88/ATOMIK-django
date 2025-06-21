@@ -1,8 +1,7 @@
-# app/services/firstpromoter_service.py
-import hmac
-import hashlib
+# app/services/rewardful_service.py
 import json
 import logging
+import requests
 from typing import Dict, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -15,46 +14,21 @@ from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
-class FirstPromoterService:
+class RewardfulService:
     """
-    FirstPromoter v2 service for handling webhook-only integration.
-    Note: v2 no longer uses API keys, all data flows via webhooks.
+    Rewardful service for handling affiliate program integration.
+    Rewardful automatically handles Stripe integration via webhooks.
     """
     
     def __init__(self):
-        self.webhook_secret = settings.FIRSTPROMOTER_WEBHOOK_SECRET
-        self.tracking_domain = settings.FIRSTPROMOTER_TRACKING_DOMAIN
+        self.api_secret = settings.REWARDFUL_API_SECRET
+        self.api_key = settings.REWARDFUL_API_KEY
+        self.base_url = "https://api.getrewardful.com/v1"
+        self.headers = {
+            "Authorization": f"Bearer {self.api_secret}",
+            "Content-Type": "application/json"
+        }
         self.logger = logging.getLogger(__name__)
-    
-    def verify_webhook_signature(self, payload: bytes, signature: str) -> bool:
-        """
-        Verify FirstPromoter webhook signature.
-        
-        Args:
-            payload: Raw webhook payload bytes
-            signature: FirstPromoter signature header
-            
-        Returns:
-            bool: True if signature is valid
-        """
-        try:
-            if not self.webhook_secret:
-                self.logger.error("FirstPromoter webhook secret not configured")
-                return False
-            
-            # FirstPromoter uses HMAC SHA256
-            expected_signature = hmac.new(
-                self.webhook_secret.encode('utf-8'),
-                payload,
-                hashlib.sha256
-            ).hexdigest()
-            
-            # Compare signatures (constant time comparison)
-            return hmac.compare_digest(signature, expected_signature)
-            
-        except Exception as e:
-            self.logger.error(f"Error verifying FirstPromoter webhook signature: {str(e)}")
-            return False
     
     def generate_referral_link(self, referral_code: str) -> str:
         """
@@ -66,12 +40,11 @@ class FirstPromoterService:
         Returns:
             str: Complete referral URL
         """
-        base_url = f"https://{self.tracking_domain}"
-        return f"{base_url}?ref={referral_code}"
+        return f"https://www.atomiktrading.io?ref={referral_code}"
     
     async def create_affiliate_record(self, user: User, db: Session) -> Affiliate:
         """
-        Create a new affiliate record for a user.
+        Create a new affiliate record for a user and register with Rewardful.
         
         Args:
             user: User model instance
@@ -99,9 +72,33 @@ class FirstPromoterService:
             # Generate unique referral code
             referral_code = self._generate_unique_referral_code(user, db)
             
-            # Create new affiliate record
+            # Create affiliate in Rewardful
+            rewardful_affiliate_data = {
+                "email": user.email,
+                "first_name": user.full_name.split()[0] if user.full_name else user.username,
+                "last_name": " ".join(user.full_name.split()[1:]) if user.full_name and len(user.full_name.split()) > 1 else "",
+                "referral_code": referral_code
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/affiliates",
+                headers=self.headers,
+                json=rewardful_affiliate_data
+            )
+            
+            if response.status_code != 201:
+                self.logger.error(f"Failed to create Rewardful affiliate: {response.text}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to create affiliate in Rewardful"
+                )
+            
+            rewardful_data = response.json()
+            
+            # Create new affiliate record in our database
             affiliate = Affiliate(
                 user_id=user.id,
+                rewardful_id=rewardful_data.get("id"),
                 referral_code=referral_code,
                 referral_link=self.generate_referral_link(referral_code),
                 is_active=True,
@@ -174,9 +171,9 @@ class FirstPromoterService:
         # Fallback to completely random code
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
     
-    async def process_referral_webhook(self, event_data: Dict[str, Any], db: Session) -> None:
+    async def process_rewardful_webhook(self, event_data: Dict[str, Any], db: Session) -> None:
         """
-        Process a referral-related webhook from FirstPromoter.
+        Process a webhook from Rewardful.
         
         Args:
             event_data: Webhook event data
@@ -190,13 +187,13 @@ class FirstPromoterService:
                 await self._handle_referral_created(data, db)
             elif event_type == 'referral.converted':
                 await self._handle_referral_converted(data, db)
-            elif event_type == 'commission.paid':
-                await self._handle_commission_paid(data, db)
+            elif event_type == 'commission.earned':
+                await self._handle_commission_earned(data, db)
             else:
-                self.logger.warning(f"Unknown FirstPromoter event type: {event_type}")
+                self.logger.warning(f"Unknown Rewardful event type: {event_type}")
                 
         except Exception as e:
-            self.logger.error(f"Error processing FirstPromoter webhook: {str(e)}")
+            self.logger.error(f"Error processing Rewardful webhook: {str(e)}")
             raise
     
     async def _handle_referral_created(self, data: Dict[str, Any], db: Session) -> None:
@@ -204,22 +201,22 @@ class FirstPromoterService:
         try:
             # Extract referral data
             referral_id = data.get('id')
-            promoter_id = data.get('promoter_id')
+            affiliate_id = data.get('affiliate_id')
             customer_email = data.get('customer_email')
             customer_name = data.get('customer_name')
             
             # Find the affiliate
             affiliate = db.query(Affiliate).filter(
-                Affiliate.firstpromoter_id == str(promoter_id)
+                Affiliate.rewardful_id == str(affiliate_id)
             ).first()
             
             if not affiliate:
-                self.logger.warning(f"No affiliate found for FirstPromoter ID: {promoter_id}")
+                self.logger.warning(f"No affiliate found for Rewardful ID: {affiliate_id}")
                 return
             
             # Check if referral already exists
             existing_referral = db.query(AffiliateReferral).filter(
-                AffiliateReferral.firstpromoter_referral_id == str(referral_id)
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
             ).first()
             
             if existing_referral:
@@ -229,7 +226,7 @@ class FirstPromoterService:
             # Create new referral record
             referral = AffiliateReferral(
                 affiliate_id=affiliate.id,
-                firstpromoter_referral_id=str(referral_id),
+                rewardful_referral_id=str(referral_id),
                 customer_email=customer_email,
                 customer_name=customer_name,
                 status='pending',
@@ -255,13 +252,12 @@ class FirstPromoterService:
         """Handle referral.converted webhook event."""
         try:
             referral_id = data.get('id')
-            amount = data.get('amount', 0)
+            amount = data.get('sale_amount', 0)
             commission_amount = data.get('commission_amount', 0)
-            commission_rate = data.get('commission_rate', 0)
             
             # Find the referral
             referral = db.query(AffiliateReferral).filter(
-                AffiliateReferral.firstpromoter_referral_id == str(referral_id)
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
             ).first()
             
             if not referral:
@@ -271,7 +267,7 @@ class FirstPromoterService:
             # Update referral with conversion data
             referral.conversion_amount = float(amount)
             referral.commission_amount = float(commission_amount)
-            referral.commission_rate = float(commission_rate) / 100  # Convert percentage
+            referral.commission_rate = (float(commission_amount) / float(amount)) if amount > 0 else 0
             referral.status = 'confirmed'
             referral.conversion_date = datetime.utcnow()
             referral.updated_at = datetime.utcnow()
@@ -290,29 +286,29 @@ class FirstPromoterService:
             self.logger.error(f"Error handling referral.converted: {str(e)}")
             raise
     
-    async def _handle_commission_paid(self, data: Dict[str, Any], db: Session) -> None:
-        """Handle commission.paid webhook event."""
+    async def _handle_commission_earned(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle commission.earned webhook event."""
         try:
             referral_id = data.get('referral_id')
-            amount_paid = data.get('amount', 0)
+            amount_earned = data.get('amount', 0)
             
             # Find the referral
             referral = db.query(AffiliateReferral).filter(
-                AffiliateReferral.firstpromoter_referral_id == str(referral_id)
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
             ).first()
             
             if not referral:
                 self.logger.warning(f"No referral found for ID: {referral_id}")
                 return
             
-            # Update referral with payment data
+            # Update referral with earning data
             referral.status = 'paid'
             referral.commission_paid_date = datetime.utcnow()
             referral.updated_at = datetime.utcnow()
             
             # Update affiliate stats
             affiliate = referral.affiliate
-            affiliate.total_commissions_paid += float(amount_paid)
+            affiliate.total_commissions_paid += float(amount_earned)
             affiliate.updated_at = datetime.utcnow()
             
             db.commit()
@@ -321,7 +317,7 @@ class FirstPromoterService:
             
         except Exception as e:
             db.rollback()
-            self.logger.error(f"Error handling commission.paid: {str(e)}")
+            self.logger.error(f"Error handling commission.earned: {str(e)}")
             raise
     
     async def get_affiliate_stats(self, affiliate: Affiliate, db: Session) -> Dict[str, Any]:
@@ -406,4 +402,4 @@ class FirstPromoterService:
 
 
 # Create service instance
-firstpromoter_service = FirstPromoterService()
+rewardful_service = RewardfulService()
