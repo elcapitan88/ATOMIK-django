@@ -64,22 +64,32 @@ class Settings(BaseSettings):
     def active_database_url(self) -> str:
         """Get the optimal database URL based on where we're running"""
         
+        # First check environment to get the correct database URL
+        target_url = None
+        if self.ENVIRONMENT == "production" and self.PROD_DATABASE_URL:
+            target_url = self.PROD_DATABASE_URL
+        elif self.ENVIRONMENT == "development" and self.DEV_DATABASE_URL:
+            target_url = self.DEV_DATABASE_URL
+        else:
+            target_url = self.DATABASE_URL
+        
         # Check if we're running ON Railway
         is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
         
-        if is_on_railway:
-            # Check for Railway's template variable (internal connection)
-            railway_private_url = os.getenv("DATABASE_PRIVATE_URL")
-            if railway_private_url:
-                logger.info(f"Using Railway private network database URL")
-                return railway_private_url
+        if is_on_railway and target_url:
+            # Use Railway's internal network but with correct credentials for environment
+            # Extract credentials from the environment-appropriate URL
+            import urllib.parse
+            parsed = urllib.parse.urlparse(target_url)
+            
+            # Build Railway internal URL with correct credentials
+            railway_internal_url = f"postgresql://{parsed.username}:{parsed.password}@postgres.railway.internal:5432{parsed.path}"
+            logger.info(f"Using Railway private network with {self.ENVIRONMENT} database credentials")
+            return railway_internal_url
         
-        # Fallback to standard URL logic (works for both local and Railway)
-        if self.ENVIRONMENT == "production" and self.PROD_DATABASE_URL:
-            return self.PROD_DATABASE_URL
-        elif self.ENVIRONMENT == "development" and self.DEV_DATABASE_URL:
-            return self.DEV_DATABASE_URL
-        return self.DATABASE_URL
+        # Fallback to the environment-appropriate URL
+        logger.info(f"Using external database URL for {self.ENVIRONMENT}")
+        return target_url
     
     def _get_railway_internal_url(self) -> Optional[str]:
         """Build Railway internal database URL if environment variables are available"""
