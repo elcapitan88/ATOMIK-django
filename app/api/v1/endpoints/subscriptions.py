@@ -371,6 +371,51 @@ async def stripe_webhook(
                     pending_reg.status = 'completed'
                     pending_reg.stripe_session_id = session.get('id')
                     
+                    # Process affiliate referral if present
+                    referral_code = metadata.get('fp_referral_code')
+                    if referral_code:
+                        try:
+                            from app.models.affiliate import Affiliate, AffiliateReferral
+                            
+                            # Find the affiliate by referral code
+                            affiliate = db.query(Affiliate).filter(
+                                Affiliate.referral_code == referral_code,
+                                Affiliate.is_active == True
+                            ).first()
+                            
+                            if affiliate:
+                                # Calculate commission (20% of subscription amount)
+                                subscription_amount = session.get('amount_total', 0) / 100  # Convert from cents
+                                commission_amount = subscription_amount * 0.20
+                                
+                                # Create referral record
+                                referral = AffiliateReferral(
+                                    affiliate_id=affiliate.id,
+                                    referred_user_id=user.id,
+                                    customer_email=user.email,
+                                    customer_name=user.username or user.full_name,
+                                    conversion_amount=subscription_amount,
+                                    commission_amount=commission_amount,
+                                    commission_rate=0.20,
+                                    status='confirmed',
+                                    subscription_type=pending_reg.plan_interval,
+                                    subscription_tier=pending_reg.plan_tier,
+                                    conversion_date=datetime.utcnow()
+                                )
+                                db.add(referral)
+                                
+                                # Update affiliate stats
+                                affiliate.total_referrals += 1
+                                affiliate.total_commissions_earned += commission_amount
+                                affiliate.updated_at = datetime.utcnow()
+                                
+                                logger.info(f"Created affiliate referral: {commission_amount} commission for affiliate {affiliate.id}")
+                            else:
+                                logger.warning(f"Affiliate not found for referral code: {referral_code}")
+                        except Exception as e:
+                            logger.error(f"Error processing affiliate referral: {str(e)}")
+                            # Don't fail the subscription creation if affiliate tracking fails
+                    
                     db.commit()
                     logger.info(f"Successfully created account and subscription for {user.email}")
                     

@@ -1,6 +1,6 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, subscriptions, webhooks, strategy, tradovate, support, interactivebrokers, chat, feature_flags, futures_contracts
+from .endpoints import auth, broker, subscriptions, webhooks, strategy, tradovate, support, interactivebrokers, chat, feature_flags, futures_contracts, affiliate
 from .endpoints.admin import admin
 from .endpoints import chat_sse
 # Temporarily disabled strategy_ai endpoints to fix startup issues
@@ -27,6 +27,7 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(chat_sse.router, prefix="/chat", tags=["chat-sse"])
 api_router.include_router(feature_flags.router, prefix="/beta", tags=["feature-flags"])
 api_router.include_router(futures_contracts.router, prefix="/futures-contracts", tags=["futures-contracts"])
+api_router.include_router(affiliate.router, prefix="/affiliate", tags=["affiliate"])
 # api_router.include_router(sentiment.router, prefix="/sentiment", tags=["sentiment"])
 # api_router.include_router(monitoring.router, prefix="/monitoring", tags=["monitoring"])
 

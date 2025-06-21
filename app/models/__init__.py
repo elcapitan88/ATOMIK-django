@@ -8,6 +8,7 @@ from .order import Order
 from .support import SupportTicketLog
 from .promo_code import PromoCode
 from .password_reset import PasswordReset
+from .affiliate import Affiliate, AffiliateReferral, AffiliateClick
 from .chat import (
     ChatChannel,
     ChatMessage,
@@ -39,6 +40,9 @@ __all__ = [
     "SupportTicketLog",
     "PromoCode",
     "PasswordReset",
+    "Affiliate",
+    "AffiliateReferral",
+    "AffiliateClick",
     "ChatChannel",
     "ChatMessage",
     "ChatReaction",

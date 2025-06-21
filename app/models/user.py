@@ -35,6 +35,9 @@ class User(Base):
     # Add relationship to used promo code
     used_promo_code = relationship("PromoCode", foreign_keys=[promo_code_id])
     
+    # Affiliate relationship
+    affiliate = relationship("Affiliate", back_populates="user", uselist=False)
+    
     # Strategy AI relationships - temporarily commented out
     # strategy_interpretations = relationship("StrategyInterpretation", back_populates="user", cascade="all, delete-orphan")
     # strategy_customizations = relationship("StrategyCustomization", back_populates="user", cascade="all, delete-orphan")

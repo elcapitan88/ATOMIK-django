@@ -206,6 +206,10 @@ class Settings(BaseSettings):
     STRIPE_PRICE_ELITE_YEARLY: str = ""
     STRIPE_PRICE_ELITE_LIFETIME: str = ""
 
+    # FirstPromoter Configuration (v2)
+    FIRSTPROMOTER_WEBHOOK_SECRET: str = ""
+    FIRSTPROMOTER_TRACKING_DOMAIN: str = ""
+
     def get_stripe_price_id(self, tier: str, interval: str) -> str:
         """Get the Stripe Price ID for a specific tier and interval with validation"""
         if tier not in ['pro', 'elite']:

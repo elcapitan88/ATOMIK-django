@@ -161,6 +161,12 @@ class StripeService:
             # Merge with custom metadata
             if metadata:
                 base_metadata.update(metadata)
+                
+            # Include referral tracking if present
+            if metadata and 'referral_code' in metadata:
+                base_metadata['fp_referral_code'] = metadata['referral_code']
+            if metadata and 'referral_token' in metadata:
+                base_metadata['fp_referral_token'] = metadata['referral_token']
             
             # Create checkout session parameters
             session_params = {
