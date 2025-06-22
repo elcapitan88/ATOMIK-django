@@ -1,5 +1,5 @@
 # app/models/affiliate.py
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Float, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Float, Text, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from ..db.base_class import Base
@@ -21,6 +21,10 @@ class Affiliate(Base):
     total_clicks = Column(Integer, default=0)
     total_commissions_earned = Column(Float, default=0.0)
     total_commissions_paid = Column(Float, default=0.0)
+    
+    # Payout configuration
+    payout_method = Column(String, nullable=True)  # 'paypal', 'wise', or None
+    payout_details = Column(JSON, nullable=True)  # Store PayPal email, Wise details, etc.
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -106,3 +110,39 @@ class AffiliateClick(Base):
     
     def __str__(self):
         return f"AffiliateClick(affiliate_id={self.affiliate_id}, converted={self.converted})"
+
+
+class AffiliatePayout(Base):
+    __tablename__ = "affiliate_payouts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    affiliate_id = Column(Integer, ForeignKey("affiliates.id", ondelete="CASCADE"), nullable=False)
+    
+    # Payout details
+    payout_amount = Column(Float, nullable=False)
+    payout_method = Column(String, nullable=False)  # 'paypal', 'wise'
+    payout_details = Column(JSON, nullable=True)  # Method-specific details
+    
+    # Period covered by this payout
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    
+    # Status tracking
+    status = Column(String, default="pending")  # pending, processing, completed, failed
+    payout_date = Column(DateTime, nullable=True)
+    transaction_id = Column(String, nullable=True)  # PayPal/Wise transaction ID
+    
+    # Metadata
+    currency = Column(String, default="USD")
+    commission_count = Column(Integer, default=0)  # Number of commissions included
+    notes = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    affiliate = relationship("Affiliate", backref="payouts")
+    
+    def __str__(self):
+        return f"AffiliatePayout(affiliate_id={self.affiliate_id}, amount=${self.payout_amount}, status={self.status})"

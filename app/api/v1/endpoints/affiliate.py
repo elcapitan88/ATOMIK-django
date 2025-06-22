@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from ....db.session import get_db
 from ....models.user import User
-from ....models.affiliate import Affiliate, AffiliateReferral, AffiliateClick
+from ....models.affiliate import Affiliate, AffiliateReferral, AffiliateClick, AffiliatePayout
 from ....services.rewardful_service import rewardful_service
 from ....api.deps import get_current_user
 import logging
@@ -22,6 +22,10 @@ class ClickTrackingRequest(BaseModel):
     page_url: Optional[str] = None
     referrer: Optional[str] = None
     user_agent: Optional[str] = None
+
+class PayoutMethodRequest(BaseModel):
+    payout_method: str  # 'paypal' or 'wise'
+    payout_details: Dict[str, Any]  # PayPal email, Wise details, etc.
 
 @router.post("/track-click", response_model=Dict[str, Any])
 async def track_referral_click(
@@ -201,9 +205,10 @@ async def get_affiliate_dashboard(
         
         # Add payout information
         payout_info = {
-            "next_payout_date": "1st of next month",  # FirstPromoter pays monthly
+            "next_payout_date": "By the 7th of next month",
             "minimum_payout": 50.0,  # $50 minimum
-            "payout_method": "Stripe (connected to your account)",
+            "payout_method": affiliate.payout_method or "Not configured",
+            "payout_details": affiliate.payout_details or {},
             "currency": "USD"
         }
         
@@ -215,8 +220,9 @@ async def get_affiliate_dashboard(
             "program_info": {
                 "commission_rate": "20%",
                 "commission_type": "Lifetime recurring",
-                "tracking_period": "90 days",
-                "payment_schedule": "Monthly"
+                "tracking_period": "15 days",
+                "payment_schedule": "Monthly (by 7th)",
+                "terms_url": "/affiliate-terms"
             }
         }
         
@@ -415,4 +421,184 @@ async def deactivate_affiliate(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while deactivating your affiliate account"
+        )
+
+@router.put("/payout-method", response_model=Dict[str, Any])
+async def update_payout_method(
+    payout_data: PayoutMethodRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update affiliate payout method (PayPal or Wise).
+    
+    Args:
+        payout_data: Payout method and details
+    
+    Returns:
+        Dict containing success message
+    """
+    try:
+        # Check if user is an affiliate
+        affiliate = db.query(Affiliate).filter(
+            Affiliate.user_id == current_user.id,
+            Affiliate.is_active == True
+        ).first()
+        
+        if not affiliate:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="You are not an active affiliate"
+            )
+        
+        # Validate payout method
+        if payout_data.payout_method not in ['paypal', 'wise']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid payout method. Must be 'paypal' or 'wise'"
+            )
+        
+        # Validate required fields based on method
+        if payout_data.payout_method == 'paypal':
+            if not payout_data.payout_details.get('email'):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PayPal email is required"
+                )
+        elif payout_data.payout_method == 'wise':
+            required_fields = ['email', 'recipient_type']
+            for field in required_fields:
+                if not payout_data.payout_details.get(field):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Wise {field} is required"
+                    )
+        
+        # Update payout method
+        affiliate.payout_method = payout_data.payout_method
+        affiliate.payout_details = payout_data.payout_details
+        affiliate.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        logger.info(f"Updated payout method for affiliate {affiliate.id} to {payout_data.payout_method}")
+        
+        return {
+            "success": True,
+            "message": f"Payout method updated to {payout_data.payout_method.title()}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating payout method: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while updating your payout method"
+        )
+
+@router.get("/payout-history", response_model=Dict[str, Any])
+async def get_payout_history(
+    page: int = 1,
+    limit: int = 12,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get paginated payout history for the current affiliate.
+    
+    Args:
+        page: Page number (1-indexed)
+        limit: Number of payouts per page (default 12 for monthly view)
+    
+    Returns:
+        Dict containing paginated payout history
+    """
+    try:
+        # Check if user is an affiliate
+        affiliate = db.query(Affiliate).filter(
+            Affiliate.user_id == current_user.id,
+            Affiliate.is_active == True
+        ).first()
+        
+        if not affiliate:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="You are not an active affiliate"
+            )
+        
+        # Get total count
+        total_count = db.query(AffiliatePayout).filter(
+            AffiliatePayout.affiliate_id == affiliate.id
+        ).count()
+        
+        # Apply pagination
+        offset = (page - 1) * limit
+        payouts = db.query(AffiliatePayout).filter(
+            AffiliatePayout.affiliate_id == affiliate.id
+        ).order_by(
+            AffiliatePayout.period_end.desc()
+        ).offset(offset).limit(limit).all()
+        
+        # Format payouts
+        payouts_data = []
+        for payout in payouts:
+            payouts_data.append({
+                "id": payout.id,
+                "payout_amount": payout.payout_amount,
+                "payout_method": payout.payout_method,
+                "status": payout.status,
+                "period_start": payout.period_start.isoformat(),
+                "period_end": payout.period_end.isoformat(),
+                "payout_date": payout.payout_date.isoformat() if payout.payout_date else None,
+                "transaction_id": payout.transaction_id,
+                "currency": payout.currency,
+                "commission_count": payout.commission_count,
+                "created_at": payout.created_at.isoformat()
+            })
+        
+        # Calculate pagination metadata
+        total_pages = (total_count + limit - 1) // limit
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        # Calculate summary stats
+        from sqlalchemy import func
+        
+        total_paid = db.query(func.sum(AffiliatePayout.payout_amount)).filter(
+            AffiliatePayout.affiliate_id == affiliate.id,
+            AffiliatePayout.status == "completed"
+        ).scalar() or 0
+        
+        pending_amount = db.query(func.sum(AffiliatePayout.payout_amount)).filter(
+            AffiliatePayout.affiliate_id == affiliate.id,
+            AffiliatePayout.status.in_(["pending", "processing"])
+        ).scalar() or 0
+        
+        return {
+            "success": True,
+            "payouts": payouts_data,
+            "pagination": {
+                "current_page": page,
+                "total_pages": total_pages,
+                "total_count": total_count,
+                "limit": limit,
+                "has_next": has_next,
+                "has_prev": has_prev
+            },
+            "summary": {
+                "total_paid": total_paid,
+                "pending_amount": pending_amount,
+                "payout_method": affiliate.payout_method or "Not configured"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting payout history: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while loading your payout history"
         )
