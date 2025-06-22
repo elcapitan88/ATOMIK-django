@@ -229,14 +229,50 @@ class RewardfulService:
             event_type = event_data.get('type')
             data = event_data.get('data', {})
             
+            # Handle different event types
             if event_type == 'referral.created':
                 await self._handle_referral_created(data, db)
             elif event_type == 'referral.converted':
                 await self._handle_referral_converted(data, db)
-            elif event_type == 'commission.earned':
-                await self._handle_commission_earned(data, db)
+            elif event_type == 'referral.lead':
+                await self._handle_referral_lead(data, db)
+            elif event_type == 'referral.deleted':
+                await self._handle_referral_deleted(data, db)
+                
+            elif event_type == 'commission.created':
+                await self._handle_commission_created(data, db)
+            elif event_type == 'commission.paid':
+                await self._handle_commission_paid(data, db)
+            elif event_type == 'commission.updated':
+                await self._handle_commission_updated(data, db)
+            elif event_type == 'commission.voided':
+                await self._handle_commission_voided(data, db)
+            elif event_type == 'commission.deleted':
+                await self._handle_commission_deleted(data, db)
+                
+            elif event_type == 'affiliate.created':
+                await self._handle_affiliate_created(data, db)
+            elif event_type == 'affiliate.updated':
+                await self._handle_affiliate_updated(data, db)
+            elif event_type == 'affiliate.confirmed':
+                await self._handle_affiliate_confirmed(data, db)
+            elif event_type == 'affiliate.deleted':
+                await self._handle_affiliate_deleted(data, db)
+                
+            elif event_type in ['sale.created', 'sale.updated', 'sale.refunded', 'sale.deleted']:
+                await self._handle_sale_event(event_type, data, db)
+                
+            elif event_type in ['payout.created', 'payout.updated', 'payout.due', 'payout.paid', 'payout.failed', 'payout.deleted']:
+                await self._handle_payout_event(event_type, data, db)
+                
+            elif event_type in ['affiliate_link.created', 'affiliate_link.updated', 'affiliate_link.deleted']:
+                await self._handle_affiliate_link_event(event_type, data, db)
+                
+            elif event_type in ['affiliate_coupon.created', 'affiliate_coupon.activated', 'affiliate_coupon.deactivated', 'affiliate_coupon.deleted', 'affiliate_coupon.updated']:
+                await self._handle_affiliate_coupon_event(event_type, data, db)
+                
             else:
-                self.logger.warning(f"Unknown Rewardful event type: {event_type}")
+                self.logger.info(f"Received Rewardful event type: {event_type} (logged but not processed)")
                 
         except Exception as e:
             self.logger.error(f"Error processing Rewardful webhook: {str(e)}")
@@ -365,6 +401,282 @@ class RewardfulService:
             db.rollback()
             self.logger.error(f"Error handling commission.earned: {str(e)}")
             raise
+    
+    # Additional webhook handlers for comprehensive event coverage
+    
+    async def _handle_referral_lead(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle referral.lead webhook event."""
+        try:
+            # Similar to referral.created but marks as lead
+            referral_id = data.get('id')
+            affiliate_id = data.get('affiliate_id')
+            customer_email = data.get('customer_email')
+            
+            affiliate = db.query(Affiliate).filter(
+                Affiliate.rewardful_id == str(affiliate_id)
+            ).first()
+            
+            if affiliate:
+                # Update referral status if exists
+                referral = db.query(AffiliateReferral).filter(
+                    AffiliateReferral.rewardful_referral_id == str(referral_id)
+                ).first()
+                
+                if referral:
+                    referral.status = 'lead'
+                    referral.updated_at = datetime.utcnow()
+                    db.commit()
+                    
+            self.logger.info(f"Processed referral.lead for {referral_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling referral.lead: {str(e)}")
+    
+    async def _handle_referral_deleted(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle referral.deleted webhook event."""
+        try:
+            referral_id = data.get('id')
+            
+            referral = db.query(AffiliateReferral).filter(
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
+            ).first()
+            
+            if referral:
+                # Mark as cancelled instead of deleting
+                referral.status = 'cancelled'
+                referral.updated_at = datetime.utcnow()
+                db.commit()
+                
+            self.logger.info(f"Processed referral.deleted for {referral_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling referral.deleted: {str(e)}")
+    
+    async def _handle_commission_created(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle commission.created webhook event."""
+        try:
+            # Update referral with commission data
+            referral_id = data.get('referral_id')
+            commission_amount = data.get('amount', 0)
+            
+            referral = db.query(AffiliateReferral).filter(
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
+            ).first()
+            
+            if referral:
+                referral.commission_amount = float(commission_amount)
+                referral.status = 'confirmed'
+                referral.updated_at = datetime.utcnow()
+                
+                # Update affiliate stats
+                affiliate = referral.affiliate
+                affiliate.total_commissions_earned = (affiliate.total_commissions_earned or 0) + float(commission_amount)
+                affiliate.updated_at = datetime.utcnow()
+                
+                db.commit()
+                
+            self.logger.info(f"Processed commission.created for {referral_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling commission.created: {str(e)}")
+    
+    async def _handle_commission_paid(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle commission.paid webhook event."""
+        try:
+            referral_id = data.get('referral_id')
+            
+            referral = db.query(AffiliateReferral).filter(
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
+            ).first()
+            
+            if referral:
+                referral.status = 'paid'
+                referral.commission_paid_date = datetime.utcnow()
+                referral.updated_at = datetime.utcnow()
+                
+                # Update affiliate paid stats
+                affiliate = referral.affiliate
+                commission_amount = referral.commission_amount or 0
+                affiliate.total_commissions_paid = (affiliate.total_commissions_paid or 0) + commission_amount
+                affiliate.updated_at = datetime.utcnow()
+                
+                db.commit()
+                
+            self.logger.info(f"Processed commission.paid for {referral_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling commission.paid: {str(e)}")
+    
+    async def _handle_commission_updated(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle commission.updated webhook event."""
+        try:
+            referral_id = data.get('referral_id')
+            new_amount = data.get('amount', 0)
+            
+            referral = db.query(AffiliateReferral).filter(
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
+            ).first()
+            
+            if referral:
+                old_amount = referral.commission_amount or 0
+                referral.commission_amount = float(new_amount)
+                referral.updated_at = datetime.utcnow()
+                
+                # Update affiliate stats with difference
+                affiliate = referral.affiliate
+                difference = float(new_amount) - old_amount
+                affiliate.total_commissions_earned = (affiliate.total_commissions_earned or 0) + difference
+                affiliate.updated_at = datetime.utcnow()
+                
+                db.commit()
+                
+            self.logger.info(f"Processed commission.updated for {referral_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling commission.updated: {str(e)}")
+    
+    async def _handle_commission_voided(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle commission.voided webhook event."""
+        try:
+            referral_id = data.get('referral_id')
+            
+            referral = db.query(AffiliateReferral).filter(
+                AffiliateReferral.rewardful_referral_id == str(referral_id)
+            ).first()
+            
+            if referral:
+                # Reverse commission from affiliate stats
+                affiliate = referral.affiliate
+                commission_amount = referral.commission_amount or 0
+                affiliate.total_commissions_earned = max(0, (affiliate.total_commissions_earned or 0) - commission_amount)
+                affiliate.updated_at = datetime.utcnow()
+                
+                referral.status = 'cancelled'
+                referral.commission_amount = 0
+                referral.updated_at = datetime.utcnow()
+                
+                db.commit()
+                
+            self.logger.info(f"Processed commission.voided for {referral_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling commission.voided: {str(e)}")
+    
+    async def _handle_commission_deleted(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle commission.deleted webhook event."""
+        try:
+            # Similar to voided - remove commission
+            await self._handle_commission_voided(data, db)
+            self.logger.info(f"Processed commission.deleted")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling commission.deleted: {str(e)}")
+    
+    async def _handle_affiliate_created(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle affiliate.created webhook event."""
+        try:
+            # This is handled by our app when users become affiliates
+            # Just log the event for tracking
+            affiliate_id = data.get('id')
+            self.logger.info(f"Rewardful created affiliate {affiliate_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling affiliate.created: {str(e)}")
+    
+    async def _handle_affiliate_updated(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle affiliate.updated webhook event."""
+        try:
+            affiliate_id = data.get('id')
+            self.logger.info(f"Rewardful updated affiliate {affiliate_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling affiliate.updated: {str(e)}")
+    
+    async def _handle_affiliate_confirmed(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle affiliate.confirmed webhook event."""
+        try:
+            affiliate_id = data.get('id')
+            
+            # Find and update affiliate status
+            affiliate = db.query(Affiliate).filter(
+                Affiliate.rewardful_id == str(affiliate_id)
+            ).first()
+            
+            if affiliate:
+                affiliate.is_active = True
+                affiliate.updated_at = datetime.utcnow()
+                db.commit()
+                
+            self.logger.info(f"Confirmed affiliate {affiliate_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling affiliate.confirmed: {str(e)}")
+    
+    async def _handle_affiliate_deleted(self, data: Dict[str, Any], db: Session) -> None:
+        """Handle affiliate.deleted webhook event."""
+        try:
+            affiliate_id = data.get('id')
+            
+            affiliate = db.query(Affiliate).filter(
+                Affiliate.rewardful_id == str(affiliate_id)
+            ).first()
+            
+            if affiliate:
+                affiliate.is_active = False
+                affiliate.updated_at = datetime.utcnow()
+                db.commit()
+                
+            self.logger.info(f"Deactivated affiliate {affiliate_id}")
+            
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error handling affiliate.deleted: {str(e)}")
+    
+    async def _handle_sale_event(self, event_type: str, data: Dict[str, Any], db: Session) -> None:
+        """Handle sale-related webhook events."""
+        try:
+            sale_id = data.get('id')
+            self.logger.info(f"Processed {event_type} for sale {sale_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling {event_type}: {str(e)}")
+    
+    async def _handle_payout_event(self, event_type: str, data: Dict[str, Any], db: Session) -> None:
+        """Handle payout-related webhook events."""
+        try:
+            payout_id = data.get('id')
+            affiliate_id = data.get('affiliate_id')
+            
+            # Update local payout records if needed
+            self.logger.info(f"Processed {event_type} for payout {payout_id} (affiliate {affiliate_id})")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling {event_type}: {str(e)}")
+    
+    async def _handle_affiliate_link_event(self, event_type: str, data: Dict[str, Any], db: Session) -> None:
+        """Handle affiliate link events."""
+        try:
+            link_id = data.get('id')
+            self.logger.info(f"Processed {event_type} for link {link_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling {event_type}: {str(e)}")
+    
+    async def _handle_affiliate_coupon_event(self, event_type: str, data: Dict[str, Any], db: Session) -> None:
+        """Handle affiliate coupon events."""
+        try:
+            coupon_id = data.get('id')
+            self.logger.info(f"Processed {event_type} for coupon {coupon_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling {event_type}: {str(e)}")
     
     async def get_affiliate_stats(self, affiliate: Affiliate, db: Session) -> Dict[str, Any]:
         """

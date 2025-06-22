@@ -41,13 +41,61 @@ async def handle_rewardful_webhook(
         event_type = event_data.get('type', 'unknown')
         logger.info(f"Received Rewardful webhook: {event_type}")
         
-        # Process known event types
-        if event_type in ['referral.created', 'referral.converted', 'commission.earned']:
+        # Define all supported event types
+        supported_events = {
+            # Affiliate events
+            'affiliate.confirmed',
+            'affiliate.created', 
+            'affiliate.deleted',
+            'affiliate.updated',
+            
+            # Affiliate link events
+            'affiliate_link.created',
+            'affiliate_link.updated',
+            'affiliate_link.deleted',
+            
+            # Commission events
+            'commission.created',
+            'commission.deleted',
+            'commission.paid',
+            'commission.updated',
+            'commission.voided',
+            
+            # Referral events
+            'referral.converted',
+            'referral.created',
+            'referral.deleted',
+            'referral.lead',
+            
+            # Sale events
+            'sale.created',
+            'sale.deleted',
+            'sale.refunded',
+            'sale.updated',
+            
+            # Payout events
+            'payout.created',
+            'payout.updated',
+            'payout.due',
+            'payout.paid',
+            'payout.deleted',
+            'payout.failed',
+            
+            # Affiliate coupon events
+            'affiliate_coupon.created',
+            'affiliate_coupon.activated',
+            'affiliate_coupon.deactivated',
+            'affiliate_coupon.deleted',
+            'affiliate_coupon.updated'
+        }
+        
+        # Process all supported event types
+        if event_type in supported_events:
             await rewardful_service.process_rewardful_webhook(event_data, db)
             return {"status": "success", "message": f"Processed {event_type} webhook"}
         else:
-            logger.info(f"Unhandled Rewardful webhook type: {event_type}")
-            return {"status": "ignored", "message": f"Webhook type {event_type} not handled"}
+            logger.warning(f"Unsupported Rewardful webhook type: {event_type}")
+            return {"status": "ignored", "message": f"Webhook type {event_type} not supported"}
         
     except HTTPException:
         raise
