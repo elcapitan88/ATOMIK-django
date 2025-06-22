@@ -11,8 +11,7 @@ from fastapi import WebSocketException, status
 from jose import JWTError, jwt
 
 from app.core.config import settings
-from app.crud.crud_user import user as user_crud
-from app.db.session import get_db
+from app.db.base import get_db
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -41,12 +40,12 @@ async def get_current_user_websocket(token: str) -> Optional[User]:
             algorithms=[settings.ALGORITHM]
         )
         
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            logger.warning("🔒 WebSocket auth failed: No user ID in token")
+        email: str = payload.get("sub")
+        if email is None:
+            logger.warning("🔒 WebSocket auth failed: No email in token")
             raise WebSocketException(
                 code=status.WS_1008_POLICY_VIOLATION,
-                reason="Invalid token: no user ID"
+                reason="Invalid token: no email"
             )
             
     except JWTError as e:
@@ -59,10 +58,10 @@ async def get_current_user_websocket(token: str) -> Optional[User]:
     # Get database session
     db = next(get_db())
     try:
-        # Get user from database
-        user = user_crud.get(db, id=user_id)
+        # Get user from database using email (matching core/security.py pattern)
+        user = db.query(User).filter(User.email == email).first()
         if user is None:
-            logger.warning(f"🔒 WebSocket auth failed: User {user_id} not found")
+            logger.warning(f"🔒 WebSocket auth failed: User {email} not found")
             raise WebSocketException(
                 code=status.WS_1008_POLICY_VIOLATION,
                 reason="Invalid token: user not found"
@@ -70,13 +69,13 @@ async def get_current_user_websocket(token: str) -> Optional[User]:
         
         # Check if user is active
         if not user.is_active:
-            logger.warning(f"🔒 WebSocket auth failed: User {user_id} is inactive")
+            logger.warning(f"🔒 WebSocket auth failed: User {user.email} is inactive")
             raise WebSocketException(
                 code=status.WS_1008_POLICY_VIOLATION,
                 reason="Invalid token: user inactive"
             )
         
-        logger.debug(f"✅ WebSocket auth successful for user {user_id} ({user.email})")
+        logger.debug(f"✅ WebSocket auth successful for user {user.id} ({user.email})")
         return user
         
     except Exception as e:
@@ -148,8 +147,8 @@ async def get_user_chat_channels(user: User) -> list:
             default_channels = ["general"]  # All users get general channel
             
             # Add channels based on user role
-            if user.app_role in ["admin", "moderator"]:
-                default_channels.extend(["announcements", "mod-only"])
+            if user.is_superuser:
+                default_channels.extend(["announcements", "admin-only"])
             
             # Add channels based on subscription tier (future enhancement)
             # if user.subscription_tier in ["pro", "premium"]:
