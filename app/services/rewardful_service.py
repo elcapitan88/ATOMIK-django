@@ -32,7 +32,7 @@ class RewardfulService:
     
     def generate_referral_link(self, referral_code: str) -> str:
         """
-        Generate a referral link for an affiliate.
+        Generate a referral link for an affiliate using Rewardful's format.
         
         Args:
             referral_code: Affiliate's referral code
@@ -40,7 +40,7 @@ class RewardfulService:
         Returns:
             str: Complete referral URL
         """
-        return f"https://www.atomiktrading.io?ref={referral_code}"
+        return f"https://www.atomiktrading.io?via={referral_code}"
     
     async def create_affiliate_record(self, user: User, db: Session) -> Affiliate:
         """
@@ -86,21 +86,67 @@ class RewardfulService:
                 json=rewardful_affiliate_data
             )
             
-            if response.status_code != 201:
+            if response.status_code == 422:
+                # Handle case where affiliate already exists in Rewardful
+                error_data = response.json()
+                if "Email has already been taken" in str(error_data):
+                    self.logger.info(f"Affiliate already exists in Rewardful for email: {user.email}")
+                    # Try to get existing affiliate data from Rewardful
+                    get_response = requests.get(
+                        f"{self.base_url}/affiliates",
+                        headers=self.headers,
+                        params={"email": user.email}
+                    )
+                    if get_response.status_code == 200:
+                        affiliates_data = get_response.json()
+                        if affiliates_data and len(affiliates_data) > 0:
+                            rewardful_data = affiliates_data[0]  # Get first match
+                        else:
+                            raise HTTPException(
+                                status_code=500,
+                                detail="Affiliate exists in Rewardful but could not be retrieved"
+                            )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Affiliate exists in Rewardful but could not be retrieved"
+                        )
+                else:
+                    self.logger.error(f"Failed to create Rewardful affiliate: {response.text}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to create affiliate in Rewardful"
+                    )
+            elif response.status_code not in [200, 201]:
                 self.logger.error(f"Failed to create Rewardful affiliate: {response.text}")
                 raise HTTPException(
                     status_code=500,
                     detail="Failed to create affiliate in Rewardful"
                 )
+            else:
+                rewardful_data = response.json()
             
-            rewardful_data = response.json()
+            # Extract referral code and link from Rewardful response
+            rewardful_referral_code = None
+            rewardful_referral_link = None
+            
+            if rewardful_data.get("links") and len(rewardful_data["links"]) > 0:
+                link_data = rewardful_data["links"][0]
+                rewardful_referral_code = link_data.get("token")
+                rewardful_referral_link = link_data.get("url")
+            
+            if not rewardful_referral_code:
+                rewardful_referral_code = referral_code  # Fallback to our generated code
+            
+            if not rewardful_referral_link:
+                rewardful_referral_link = self.generate_referral_link(rewardful_referral_code)
             
             # Create new affiliate record in our database
             affiliate = Affiliate(
                 user_id=user.id,
                 rewardful_id=rewardful_data.get("id"),
-                referral_code=referral_code,
-                referral_link=self.generate_referral_link(referral_code),
+                referral_code=rewardful_referral_code,
+                referral_link=rewardful_referral_link,
                 is_active=True,
                 total_referrals=0,
                 total_clicks=0,
@@ -112,7 +158,7 @@ class RewardfulService:
             db.commit()
             db.refresh(affiliate)
             
-            self.logger.info(f"Created affiliate record for user {user.id} with code {referral_code}")
+            self.logger.info(f"Created affiliate record for user {user.id} with code {rewardful_referral_code}")
             return affiliate
             
         except Exception as e:
