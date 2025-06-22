@@ -160,6 +160,44 @@ async def lifespan(app: FastAPI):
         except Exception as memory_error:
             logger.warning(f"Memory monitoring initialization failed: {str(memory_error)}")
 
+        # Refresh SQLAlchemy metadata to detect new columns
+        try:
+            logger.info("🔄 Refreshing SQLAlchemy metadata...")
+            from sqlalchemy import inspect, MetaData
+            from app.db.session import engine
+            from app.db.base_class import Base
+            
+            # Force refresh the Base metadata to pick up new columns
+            Base.metadata.clear()
+            Base.metadata.reflect(bind=engine)
+            logger.info("🔄 Cleared and refreshed Base metadata")
+            
+            # Create a fresh metadata object and inspect the database
+            metadata = MetaData()
+            metadata.reflect(bind=engine)
+            
+            # Log database information
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            logger.info(f"📊 Metadata refreshed successfully. Found {len(tables)} tables.")
+            
+            # Check affiliates table for payout columns
+            if 'affiliates' in tables:
+                affiliate_cols = [col['name'] for col in inspector.get_columns('affiliates')]
+                logger.info(f"🔍 AFFILIATES COLUMNS: {', '.join(affiliate_cols)}")
+                
+                has_payout_method = 'payout_method' in affiliate_cols
+                has_payout_details = 'payout_details' in affiliate_cols
+                logger.info(f"🎯 PAYOUT COLUMNS PRESENT - payout_method: {has_payout_method}, payout_details: {has_payout_details}")
+                
+                if not has_payout_method or not has_payout_details:
+                    logger.error("🚨 CRITICAL: Payout columns are missing from affiliates table!")
+            else:
+                logger.error("🚨 AFFILIATES TABLE NOT FOUND!")
+                
+        except Exception as metadata_error:
+            logger.error(f"❌ Error refreshing metadata: {str(metadata_error)}")
+
         logger.info("Application startup completed successfully")
         yield
 
