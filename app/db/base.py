@@ -35,6 +35,7 @@ from app.models.broker import BrokerAccount, BrokerCredentials  # noqa
 from app.models.subscription import Subscription
 from app.models.order import Order
 from app.models.promo_code import PromoCode
+from app.models.affiliate import Affiliate, AffiliateReferral, AffiliateClick, AffiliatePayout  # noqa
 
 # Create a dependency for FastAPI endpoints
 def get_db():
@@ -67,6 +68,7 @@ def init_db():
         import app.models.broker
         import app.models.subscription
         import app.models.order
+        import app.models.affiliate
         
         # Create all tables
         Base.metadata.create_all(bind=engine)
@@ -94,5 +96,9 @@ __all__ = [
     "BrokerAccount",
     "BrokerCredentials",
     "Subscription",
-    "Order"
+    "Order",
+    "Affiliate",
+    "AffiliateReferral",
+    "AffiliateClick",
+    "AffiliatePayout"
 ]
