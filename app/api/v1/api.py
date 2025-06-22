@@ -1,8 +1,7 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, subscriptions, webhooks, strategy, tradovate, support, interactivebrokers, chat, feature_flags, futures_contracts, affiliate
+from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, futures_contracts, websocket, chat_app_websocket
 from .endpoints.admin import admin
-from .endpoints import chat_sse, chat_app_websocket
 # Temporarily disabled strategy_ai endpoints to fix startup issues
 # from .endpoints.strategy_ai import interpret_router, generate_router, templates_router, context_router
 from typing import Optional
@@ -19,14 +18,10 @@ api_router.include_router(broker.router, prefix="/brokers", tags=["brokers"])
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])
-api_router.include_router(subscriptions.router, prefix="/subscriptions", tags=["subscriptions"])
-api_router.include_router(support.router, prefix="/support", tags=["support"])
-api_router.include_router(interactivebrokers.router, prefix="/brokers/interactivebrokers", tags=["interactivebrokers"])
+api_router.include_router(subscription.router, prefix="/subscriptions", tags=["subscriptions"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
-api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
-api_router.include_router(chat_sse.router, prefix="/chat", tags=["chat-sse"])
+api_router.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 api_router.include_router(chat_app_websocket.router, prefix="/chat", tags=["chat-websocket"])
-api_router.include_router(feature_flags.router, prefix="/beta", tags=["feature-flags"])
 api_router.include_router(futures_contracts.router, prefix="/futures-contracts", tags=["futures-contracts"])
 
 # Define the callback route - Notice the change in the path
