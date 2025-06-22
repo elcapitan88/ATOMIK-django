@@ -203,13 +203,9 @@ async def get_affiliate_dashboard(
                 "subscription_tier": referral.subscription_tier
             })
         
-        # Add payout information (with fallback for missing columns)
-        try:
-            payout_method = getattr(affiliate, 'payout_method', None) or "Not configured"
-            payout_details = getattr(affiliate, 'payout_details', None) or {}
-        except Exception:
-            payout_method = "Not configured"
-            payout_details = {}
+        # Add payout information
+        payout_method = affiliate.payout_method or "Not configured"
+        payout_details = affiliate.payout_details or {}
             
         payout_info = {
             "next_payout_date": "By the 7th of next month",
@@ -482,9 +478,8 @@ async def update_payout_method(
                     )
         
         # Update payout method
-        # TEMPORARY: Disable until database migration is applied
-        # affiliate.payout_method = payout_data.payout_method
-        # affiliate.payout_details = payout_data.payout_details
+        affiliate.payout_method = payout_data.payout_method
+        affiliate.payout_details = payout_data.payout_details
         affiliate.updated_at = datetime.utcnow()
         
         db.commit()
@@ -598,7 +593,7 @@ async def get_payout_history(
             "summary": {
                 "total_paid": total_paid,
                 "pending_amount": pending_amount,
-                "payout_method": getattr(affiliate, 'payout_method', None) or "Not configured"
+                "payout_method": affiliate.payout_method or "Not configured"
             }
         }
         
