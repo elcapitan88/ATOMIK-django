@@ -48,8 +48,17 @@ async def track_referral_click(
         ).first()
         
         if not affiliate:
+            # Log the actual issue for debugging
+            logger.error(f"AFFILIATE NOT FOUND for referral code: {click_data.referral_code}")
+            # Check if affiliate exists but is inactive
+            inactive_affiliate = db.query(Affiliate).filter(
+                Affiliate.referral_code == click_data.referral_code
+            ).first()
+            if inactive_affiliate:
+                logger.error(f"Affiliate exists but is inactive: {inactive_affiliate.id}, active: {inactive_affiliate.is_active}")
+            else:
+                logger.error("No affiliate found with this referral code at all")
             # Still return success to avoid revealing valid codes
-            logger.warning(f"Click tracked for invalid referral code: {click_data.referral_code}")
             return {
                 "success": True,
                 "message": "Click tracked"
@@ -77,7 +86,8 @@ async def track_referral_click(
         db.add(click_record)
         db.commit()
         
-        logger.info(f"Tracked click for affiliate {affiliate.id} with code {click_data.referral_code}")
+        logger.info(f"CLICK RECORDED SUCCESSFULLY for affiliate {affiliate.id} with code {click_data.referral_code}")
+        logger.info(f"Click record ID: {click_record.id if hasattr(click_record, 'id') else 'pending'}")
         
         return {
             "success": True,
