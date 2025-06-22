@@ -23,10 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.websocket.auth import get_current_user_websocket, get_user_chat_channels
 from app.websocket.manager import app_websocket_manager
-from app.db.session import get_db
-from app.crud.crud_chat import message as message_crud
-from app.crud.crud_chat import reaction as reaction_crud
-from app.schemas.chat import ChatMessageCreate, ChatReactionCreate
+from app.db.base import get_db
 from app.models.user import User
 
 router = APIRouter()
@@ -210,49 +207,36 @@ async def handle_send_message(message_data: Dict[str, Any], user: User) -> None:
         if not channel_id or not content:
             raise ValueError("Missing channel_id or content")
         
-        # Create message in database
-        db = next(get_db())
-        try:
-            message_create = ChatMessageCreate(
-                content=content.strip(),
-                reply_to_id=reply_to_id
-            )
-            
-            # Save to database
-            db_message = message_crud.create_with_user_and_channel(
-                db=db,
-                obj_in=message_create,
-                user_id=user.id,
-                channel_id=channel_id
-            )
-            
-            # Prepare message for broadcast
-            broadcast_message = {
-                "type": "new_message",
-                "data": {
-                    "id": str(db_message.id),
-                    "channel_id": str(db_message.channel_id),
-                    "user_id": str(db_message.user_id),
-                    "username": user.username or user.email,
-                    "content": db_message.content,
-                    "created_at": db_message.created_at.isoformat(),
-                    "reply_to_id": str(db_message.reply_to_id) if db_message.reply_to_id else None,
-                    "is_edited": False,
-                    "reactions": []
-                },
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            # Broadcast to channel
-            await app_websocket_manager.broadcast_to_channel(
-                channel_id=channel_id,
-                message=broadcast_message
-            )
-            
-            logger.debug(f"💬 Message sent by {user.email} to channel {channel_id}")
-            
-        finally:
-            db.close()
+        # TODO: For full implementation, add chat message database models and CRUD operations
+        # For now, we'll just broadcast the message for real-time communication
+        
+        # Generate a temporary message ID (in future, this would come from database)
+        message_id = f"msg_{datetime.utcnow().timestamp()}"
+        
+        # Prepare message for broadcast
+        broadcast_message = {
+            "type": "new_message",
+            "data": {
+                "id": message_id,
+                "channel_id": channel_id,
+                "user_id": str(user.id),
+                "username": user.username or user.email,
+                "content": content.strip(),
+                "created_at": datetime.utcnow().isoformat(),
+                "reply_to_id": reply_to_id,
+                "is_edited": False,
+                "reactions": []
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Broadcast to channel
+        await app_websocket_manager.broadcast_to_channel(
+            channel_id=channel_id,
+            message=broadcast_message
+        )
+        
+        logger.debug(f"💬 Message sent by {user.email} to channel {channel_id}")
             
     except Exception as e:
         logger.error(f"❌ Error sending message: {e}")
@@ -278,46 +262,29 @@ async def handle_add_reaction(message_data: Dict[str, Any], user: User) -> None:
         if not message_id or not emoji:
             raise ValueError("Missing message_id or emoji")
         
-        # Add reaction to database
-        db = next(get_db())
-        try:
-            reaction_create = ChatReactionCreate(emoji=emoji)
-            
-            db_reaction = reaction_crud.create_with_user_and_message(
-                db=db,
-                obj_in=reaction_create,
-                user_id=user.id,
-                message_id=message_id
-            )
-            
-            # Get message to find channel
-            db_message = message_crud.get(db, id=message_id)
-            if not db_message:
-                raise ValueError("Message not found")
-            
-            # Prepare reaction for broadcast
-            broadcast_message = {
-                "type": "reaction_added",
-                "data": {
-                    "message_id": str(message_id),
-                    "channel_id": str(db_message.channel_id),
-                    "emoji": emoji,
-                    "user_id": str(user.id),
-                    "username": user.username or user.email
-                },
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            # Broadcast to channel
-            await app_websocket_manager.broadcast_to_channel(
-                channel_id=str(db_message.channel_id),
-                message=broadcast_message
-            )
-            
-            logger.debug(f"👍 Reaction {emoji} added by {user.email} to message {message_id}")
-            
-        finally:
-            db.close()
+        # TODO: For full implementation, add reaction database models and CRUD operations
+        # For now, we'll just broadcast the reaction for real-time communication
+        
+        # Prepare reaction for broadcast (assuming general channel for now)
+        broadcast_message = {
+            "type": "reaction_added",
+            "data": {
+                "message_id": str(message_id),
+                "channel_id": "general",  # TODO: Get actual channel from message in database
+                "emoji": emoji,
+                "user_id": str(user.id),
+                "username": user.username or user.email
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Broadcast to channel
+        await app_websocket_manager.broadcast_to_channel(
+            channel_id="general",
+            message=broadcast_message
+        )
+        
+        logger.debug(f"👍 Reaction {emoji} added by {user.email} to message {message_id}")
             
     except Exception as e:
         logger.error(f"❌ Error adding reaction: {e}")
@@ -343,44 +310,29 @@ async def handle_remove_reaction(message_data: Dict[str, Any], user: User) -> No
         if not message_id or not emoji:
             raise ValueError("Missing message_id or emoji")
         
-        # Remove reaction from database
-        db = next(get_db())
-        try:
-            # Find and remove the reaction
-            removed = reaction_crud.remove_by_user_message_emoji(
-                db=db,
-                user_id=user.id,
-                message_id=message_id,
-                emoji=emoji
-            )
-            
-            if removed:
-                # Get message to find channel
-                db_message = message_crud.get(db, id=message_id)
-                if db_message:
-                    # Prepare removal for broadcast
-                    broadcast_message = {
-                        "type": "reaction_removed",
-                        "data": {
-                            "message_id": str(message_id),
-                            "channel_id": str(db_message.channel_id),
-                            "emoji": emoji,
-                            "user_id": str(user.id),
-                            "username": user.username or user.email
-                        },
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    
-                    # Broadcast to channel
-                    await app_websocket_manager.broadcast_to_channel(
-                        channel_id=str(db_message.channel_id),
-                        message=broadcast_message
-                    )
-                    
-                    logger.debug(f"👎 Reaction {emoji} removed by {user.email} from message {message_id}")
-            
-        finally:
-            db.close()
+        # TODO: For full implementation, add reaction database models and CRUD operations
+        # For now, we'll just broadcast the reaction removal for real-time communication
+        
+        # Prepare removal for broadcast (assuming general channel for now)
+        broadcast_message = {
+            "type": "reaction_removed",
+            "data": {
+                "message_id": str(message_id),
+                "channel_id": "general",  # TODO: Get actual channel from message in database
+                "emoji": emoji,
+                "user_id": str(user.id),
+                "username": user.username or user.email
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Broadcast to channel
+        await app_websocket_manager.broadcast_to_channel(
+            channel_id="general",
+            message=broadcast_message
+        )
+        
+        logger.debug(f"👎 Reaction {emoji} removed by {user.email} from message {message_id}")
             
     except Exception as e:
         logger.error(f"❌ Error removing reaction: {e}")
