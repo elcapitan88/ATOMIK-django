@@ -23,9 +23,8 @@ class Affiliate(Base):
     total_commissions_paid = Column(Float, default=0.0)
     
     # Payout configuration
-    # TEMPORARY: Comment out until metadata refresh is deployed
-    # payout_method = Column(String, nullable=True)  # 'paypal', 'wise', or None
-    # payout_details = Column(JSON, nullable=True)  # Store PayPal email, Wise details, etc.
+    payout_method = Column(String, nullable=True)  # 'paypal', 'wise', or None
+    payout_details = Column(JSON, nullable=True)  # Store PayPal email, Wise details, etc.
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
