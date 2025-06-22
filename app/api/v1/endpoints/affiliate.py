@@ -482,8 +482,9 @@ async def update_payout_method(
                     )
         
         # Update payout method
-        affiliate.payout_method = payout_data.payout_method
-        affiliate.payout_details = payout_data.payout_details
+        # TEMPORARY: Disable until metadata refresh is deployed
+        # affiliate.payout_method = payout_data.payout_method
+        # affiliate.payout_details = payout_data.payout_details
         affiliate.updated_at = datetime.utcnow()
         
         db.commit()
