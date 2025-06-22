@@ -75,12 +75,11 @@ async def track_referral_click(
         # Create click record
         click_record = AffiliateClick(
             affiliate_id=affiliate.id,
-            referral_code=click_data.referral_code,
             ip_address=client_ip,
             user_agent=click_data.user_agent or request.headers.get('User-Agent'),
-            page_url=click_data.page_url,
-            referrer=click_data.referrer or request.headers.get('Referer'),
-            clicked_at=datetime.utcnow()
+            landing_page=click_data.page_url,
+            referrer_url=click_data.referrer or request.headers.get('Referer'),
+            click_date=datetime.utcnow()
         )
         
         db.add(click_record)
