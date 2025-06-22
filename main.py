@@ -491,6 +491,17 @@ async def refresh_db_metadata():
         broker_cols = [col['name'] for col in inspector.get_columns('broker_credentials')]
         logger.info(f"broker_credentials columns: {', '.join(broker_cols)}")
         
+        # Check affiliates table for payout columns
+        if 'affiliates' in tables:
+            affiliate_cols = [col['name'] for col in inspector.get_columns('affiliates')]
+            logger.info(f"🔍 AFFILIATES COLUMNS: {', '.join(affiliate_cols)}")
+            
+            has_payout_method = 'payout_method' in affiliate_cols
+            has_payout_details = 'payout_details' in affiliate_cols
+            logger.info(f"🎯 PAYOUT COLUMNS PRESENT - payout_method: {has_payout_method}, payout_details: {has_payout_details}")
+        else:
+            logger.error("🚨 AFFILIATES TABLE NOT FOUND!")
+        
         # Additional debug info
         has_custom_data = 'custom_data' in broker_cols
         logger.info(f"custom_data column present in broker_credentials: {has_custom_data}")
