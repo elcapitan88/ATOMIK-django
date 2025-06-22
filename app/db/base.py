@@ -8,6 +8,8 @@ import logging
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Force refresh of affiliate models - timestamp: 2025-06-22T04:30:00Z
+
 # Create SQLAlchemy engine
 engine = create_engine(
     settings.DATABASE_URL,
