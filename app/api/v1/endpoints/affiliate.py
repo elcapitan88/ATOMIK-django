@@ -598,7 +598,7 @@ async def get_payout_history(
             "summary": {
                 "total_paid": total_paid,
                 "pending_amount": pending_amount,
-                "payout_method": affiliate.payout_method or "Not configured"
+                "payout_method": getattr(affiliate, 'payout_method', None) or "Not configured"
             }
         }
         
