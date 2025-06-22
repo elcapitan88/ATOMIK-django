@@ -203,12 +203,19 @@ async def get_affiliate_dashboard(
                 "subscription_tier": referral.subscription_tier
             })
         
-        # Add payout information
+        # Add payout information (with fallback for missing columns)
+        try:
+            payout_method = getattr(affiliate, 'payout_method', None) or "Not configured"
+            payout_details = getattr(affiliate, 'payout_details', None) or {}
+        except Exception:
+            payout_method = "Not configured"
+            payout_details = {}
+            
         payout_info = {
             "next_payout_date": "By the 7th of next month",
             "minimum_payout": 50.0,  # $50 minimum
-            "payout_method": affiliate.payout_method or "Not configured",
-            "payout_details": affiliate.payout_details or {},
+            "payout_method": payout_method,
+            "payout_details": payout_details,
             "currency": "USD"
         }
         
