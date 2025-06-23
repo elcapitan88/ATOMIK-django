@@ -15,6 +15,7 @@ from typing import Dict, Set, List, Optional, Any
 from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,129 @@ class AppWebSocketManager:
         # Message acknowledgment tracking
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         
+        # State management
+        self._initialized = False
+        self._lock = asyncio.Lock()
+        self._cleanup_task: Optional[asyncio.Task] = None
+        
+        # Connection health tracking
+        self.last_heartbeat: Dict[str, datetime] = {}
+        self.connection_stats = {
+            "total_connections": 0,
+            "active_connections": 0,
+            "messages_sent": 0,
+            "messages_received": 0,
+            "errors": 0
+        }
+        
         logger.info("🗨️ Application WebSocket Manager initialized")
+
+    async def initialize(self) -> bool:
+        """
+        Initialize the Application WebSocket manager.
+        
+        Returns:
+            bool: True if initialization successful
+        """
+        if self._initialized:
+            return True
+
+        try:
+            async with self._lock:
+                logger.info("Initializing Application WebSocket manager...")
+                
+                # Initialize collections
+                self.active_connections = {}
+                self.channel_subscriptions = {}
+                self.user_channels = {}
+                self.connection_metadata = {}
+                self.pending_acks = {}
+                self.last_heartbeat = {}
+                
+                # Start cleanup task for stale connections
+                self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+                logger.info("Application WebSocket cleanup task started")
+                
+                self._initialized = True
+                logger.info("✅ Application WebSocket manager initialized successfully")
+                return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Application WebSocket manager: {e}")
+            return False
+
+    async def cleanup(self):
+        """Clean up the Application WebSocket manager"""
+        try:
+            logger.info("Cleaning up Application WebSocket manager...")
+            
+            # Close all active connections
+            for user_id, websocket in self.active_connections.copy().items():
+                try:
+                    if websocket.client_state == WebSocketState.CONNECTED:
+                        await websocket.close(code=1001, reason="Server shutdown")
+                except Exception as e:
+                    logger.warning(f"Error closing connection for user {user_id}: {e}")
+            
+            # Cancel cleanup task
+            if self._cleanup_task and not self._cleanup_task.done():
+                self._cleanup_task.cancel()
+                try:
+                    await self._cleanup_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Clear all collections
+            self.active_connections.clear()
+            self.channel_subscriptions.clear()
+            self.user_channels.clear()
+            self.connection_metadata.clear()
+            self.pending_acks.clear()
+            self.last_heartbeat.clear()
+            
+            self._initialized = False
+            logger.info("✅ Application WebSocket manager cleanup complete")
+            
+        except Exception as e:
+            logger.error(f"❌ Error during Application WebSocket manager cleanup: {e}")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current status of the Application WebSocket manager"""
+        return {
+            "status": "healthy" if self._initialized else "not_initialized",
+            "active_connections": len(self.active_connections),
+            "total_channels": len(self.channel_subscriptions),
+            "stats": self.connection_stats.copy(),
+            "initialized": self._initialized
+        }
+
+    async def _cleanup_loop(self):
+        """Background task to clean up stale connections"""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Run every 30 seconds
+                await self._cleanup_stale_connections()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Error in cleanup loop: {e}")
+
+    async def _cleanup_stale_connections(self):
+        """Remove stale/closed connections"""
+        stale_users = []
+        
+        for user_id, websocket in self.active_connections.items():
+            try:
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    stale_users.append(user_id)
+            except Exception:
+                stale_users.append(user_id)
+        
+        for user_id in stale_users:
+            await self.disconnect(user_id, "Stale connection cleanup")
+            
+        if stale_users:
+            logger.info(f"🧹 Cleaned up {len(stale_users)} stale connections")
     
     async def connect(self, websocket: WebSocket, user_id: str, user_channels: List[str] = None) -> bool:
         """

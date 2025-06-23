@@ -19,23 +19,14 @@ from sqlalchemy.exc import SQLAlchemyError
 # Local imports
 from app.api.v1.api import api_router, tradovate_callback_router
 from app.core.config import settings
-# Temporarily disabled trading WebSocket to fix deployment
-# from app.websockets.manager import websocket_manager
+from app.websocket.manager import app_websocket_manager
 from app.db.base import init_db, get_db
 from app.db.session import engine, get_db
 from app.core.db_health import check_database_health
 from app.core.tasks.token_refresh import start_token_refresh_task, stop_token_refresh_task
-from app.api.v1.endpoints import websocket
+# Old trading websocket import removed
 
-# Temporarily disabled trading WebSocket imports to fix deployment
-# from app.websockets.handlers.endpoint_handlers import TradovateEndpointHandler
-# from app.websockets.handlers.event_handlers import TradovateEventHandler
-# from app.websockets.handlers.webhook_handlers import TradovateWebhookHandler
-# from app.websockets.handlers.order_executor import TradovateOrderExecutor
-# from app.websockets.monitoring.monitor import MonitoringService
-# from app.websockets.scaling.resource_manager import ResourceManager
-# from app.websockets.errors import WebSocketError, handle_websocket_error
-# from app.websockets.websocket_config import WebSocketConfig
+# Trading WebSocket functionality moved to separate Websocket-Proxy service
 
 # Configure logging
 logging.basicConfig(
@@ -73,11 +64,10 @@ class CSPMiddleware:
 async def lifespan(app: FastAPI):
     """Application lifespan manager for handling startup and shutdown events"""
     try:
-        # Temporarily disabled trading WebSocket initialization
-        # # Temporarily disabled for deployment
-# app.state.websocket_manager = websocket_manager
-        # await websocket_manager.initialize()
-        logger.info("Trading WebSocket manager temporarily disabled for deployment")
+        # Initialize Application WebSocket manager (chat/UI events)  
+        app.state.app_websocket_manager = app_websocket_manager
+        await app_websocket_manager.initialize()
+        logger.info("Application WebSocket manager initialized successfully")
 
         # Initialize database
         try:
@@ -126,9 +116,9 @@ async def lifespan(app: FastAPI):
                     except asyncio.CancelledError:
                         pass
             
-            # Temporarily disabled trading WebSocket cleanup
-            # if hasattr(app.state, 'websocket_manager'):
-            #     await websocket_manager.cleanup()
+            # Cleanup Application WebSocket manager
+            if hasattr(app.state, 'app_websocket_manager'):
+                await app_websocket_manager.cleanup()
             
             # Close database connections - synchronous version
             from app.db.session import engine
@@ -154,9 +144,9 @@ async def cleanup_on_failed_startup():
                 except asyncio.CancelledError:
                     pass
         
-        # Temporarily disabled trading WebSocket cleanup
-        # if hasattr(app.state, 'websocket_manager'):
-        #     await websocket_manager.cleanup()
+        # Cleanup Application WebSocket manager
+        if hasattr(app.state, 'app_websocket_manager'):
+            await app_websocket_manager.cleanup()
             
         # Close database connections
         await engine.dispose()
@@ -211,11 +201,10 @@ class Config:
 # Include routers
 app.include_router(tradovate_callback_router, prefix="/api")
 app.include_router(api_router, prefix="/api/v1")
-app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
+# Old trading websocket router removed - now handled by separate Websocket-Proxy service
 
 
-# Temporarily disabled for deployment
-# app.state.websocket_manager = websocket_manager
+# Application WebSocket manager assigned in lifespan
 
 
 
@@ -248,16 +237,13 @@ async def startup_event():
     try:
         # Step 1: Initialize WebSocket manager
         try:
-            logger.info("Initializing WebSocket manager...")
-            # Temporarily disabled for deployment
-# app.state.websocket_manager = websocket_manager
-            # Temporarily disabled trading WebSocket
-            # initialized = await websocket_manager.initialize()
-            # if not initialized:
-            #     raise Exception("WebSocket manager initialization failed")
-            initialized = True  # Placeholder for deployment
+            logger.info("Initializing Application WebSocket manager...")
+            app.state.app_websocket_manager = app_websocket_manager
+            initialized = await app_websocket_manager.initialize()
+            if not initialized:
+                raise Exception("Application WebSocket manager initialization failed")
             startup_status["websocket_manager"] = True
-            logger.info("WebSocket manager initialized successfully")
+            logger.info("Application WebSocket manager initialized successfully")
         except Exception as ws_error:
             logger.error(f"WebSocket manager initialization failed: {str(ws_error)}")
             raise
@@ -305,8 +291,7 @@ async def cleanup_on_failed_startup(startup_status: dict):
         logger.info("Performing cleanup after failed startup...")
         
         if startup_status["websocket_manager"]:
-            # await websocket_manager.cleanup()
-            pass  # Temporarily disabled
+            await app_websocket_manager.cleanup()
             
         if startup_status["background_tasks"]:
             for task in background_tasks:
@@ -376,14 +361,14 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Check API and database health"""
-    # websocket_manager = app.state.websocket_manager
+    app_websocket_manager = getattr(app.state, 'app_websocket_manager', None)
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version": "1.0.0",
         "components": {
             "database": check_database_health(),
-            "websocket": {"status": "disabled", "message": "Trading WebSocket temporarily disabled"},
+            "app_websocket": app_websocket_manager.get_status() if app_websocket_manager else {"status": "not_initialized"},
             "background_tasks": {
                 "total": len(background_tasks),
                 "active": len([t for t in background_tasks if not t.done()]),
