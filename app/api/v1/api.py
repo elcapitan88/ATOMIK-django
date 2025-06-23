@@ -1,6 +1,6 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, futures_contracts, websocket, chat_app_websocket
+from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, futures_contracts, chat_app_websocket
 # Temporarily disabled strategy_ai endpoints to fix startup issues
 # from .endpoints.strategy_ai import interpret_router, generate_router, templates_router, context_router
 from typing import Optional

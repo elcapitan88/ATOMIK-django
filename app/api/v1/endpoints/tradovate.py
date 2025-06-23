@@ -28,8 +28,7 @@ from ....models.subscription import SubscriptionTier, SubscriptionStatus
 from ....core.brokers.base import BaseBroker
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from ....core.config import settings
-# Update WebSocket related imports
-from app.websockets.manager import websocket_manager
+# Trading WebSocket functionality moved to separate Websocket-Proxy service
 
 
 __all__ = ['router', 'tradovate_callback'] 
