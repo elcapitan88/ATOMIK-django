@@ -17,6 +17,10 @@ from uuid import UUID
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
+from .config import AppWebSocketConfig
+from .metrics import AppWebSocketMetrics, ConnectionMetrics
+from .monitoring.monitor import app_websocket_monitor, EventType
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,13 +59,10 @@ class AppWebSocketManager:
         
         # Connection health tracking
         self.last_heartbeat: Dict[str, datetime] = {}
-        self.connection_stats = {
-            "total_connections": 0,
-            "active_connections": 0,
-            "messages_sent": 0,
-            "messages_received": 0,
-            "errors": 0
-        }
+        
+        # Metrics and monitoring
+        self.metrics = AppWebSocketMetrics()
+        self.config = AppWebSocketConfig()
         
         logger.info("🗨️ Application WebSocket Manager initialized")
 
@@ -86,6 +87,10 @@ class AppWebSocketManager:
                 self.connection_metadata = {}
                 self.pending_acks = {}
                 self.last_heartbeat = {}
+                
+                # Start monitoring
+                await app_websocket_monitor.start()
+                logger.info("Application WebSocket monitoring started")
                 
                 # Start cleanup task for stale connections
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
@@ -112,6 +117,12 @@ class AppWebSocketManager:
                 except Exception as e:
                     logger.warning(f"Error closing connection for user {user_id}: {e}")
             
+            # Stop monitoring
+            await app_websocket_monitor.stop()
+            
+            # Stop metrics collection
+            await self.metrics.shutdown()
+            
             # Cancel cleanup task
             if self._cleanup_task and not self._cleanup_task.done():
                 self._cleanup_task.cancel()
@@ -136,13 +147,25 @@ class AppWebSocketManager:
 
     def get_status(self) -> Dict[str, Any]:
         """Get current status of the Application WebSocket manager"""
-        return {
+        base_status = {
             "status": "healthy" if self._initialized else "not_initialized",
             "active_connections": len(self.active_connections),
             "total_channels": len(self.channel_subscriptions),
-            "stats": self.connection_stats.copy(),
             "initialized": self._initialized
         }
+        
+        # Add monitoring data if available
+        if self._initialized:
+            try:
+                health_data = app_websocket_monitor.get_system_health()
+                base_status.update({
+                    "monitoring": health_data,
+                    "channel_stats": app_websocket_monitor.get_channel_stats()
+                })
+            except Exception as e:
+                logger.warning(f"Error getting monitoring data: {e}")
+                
+        return base_status
 
     async def _cleanup_loop(self):
         """Background task to clean up stale connections"""
