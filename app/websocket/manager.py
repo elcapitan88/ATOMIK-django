@@ -92,6 +92,10 @@ class AppWebSocketManager:
                 await app_websocket_monitor.start()
                 logger.info("Application WebSocket monitoring started")
                 
+                # Start metrics rate tracking
+                await self.metrics.start_rate_tracking()
+                logger.info("Application WebSocket metrics rate tracking started")
+                
                 # Start cleanup task for stale connections
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
                 logger.info("Application WebSocket cleanup task started")

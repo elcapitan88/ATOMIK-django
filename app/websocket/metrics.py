@@ -148,8 +148,13 @@ class AppWebSocketMetrics:
         self.message_rate_history = deque(maxlen=60)  # Last 60 minutes
         self._lock = asyncio.Lock()
         
-        # Start rate tracking task
-        self._rate_task = asyncio.create_task(self._track_rates())
+        # Rate tracking task will be started during initialization
+        self._rate_task: Optional[asyncio.Task] = None
+
+    async def start_rate_tracking(self):
+        """Start the rate tracking background task"""
+        if self._rate_task is None:
+            self._rate_task = asyncio.create_task(self._track_rates())
 
     async def record_connection(self, user_id: str):
         """Record a new connection"""
@@ -257,7 +262,7 @@ class AppWebSocketMetrics:
 
     async def shutdown(self):
         """Shutdown metrics collection"""
-        if hasattr(self, '_rate_task') and not self._rate_task.done():
+        if self._rate_task and not self._rate_task.done():
             self._rate_task.cancel()
             try:
                 await self._rate_task
