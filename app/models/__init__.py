@@ -6,6 +6,7 @@ from .broker import BrokerAccount, BrokerCredentials
 from .websocket import WebSocketConnection
 from .subscription import Subscription
 from .order import Order
+from .trade import Trade, TradeExecution
 
 # This ensures all models are registered
 __all__ = [
@@ -17,5 +18,7 @@ __all__ = [
     "BrokerCredentials",
     "WebSocketConnection",
     "Subscription",
-    "Order"
+    "Order",
+    "Trade",
+    "TradeExecution"
 ]
