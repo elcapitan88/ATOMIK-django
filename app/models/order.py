@@ -68,7 +68,7 @@ class Order(Base):
     
     # Relationships
     user = relationship("User", back_populates="orders")
-    strategy = relationship("ActivatedStrategy", back_populates="trades")
+    strategy = relationship("ActivatedStrategy", back_populates="orders")
     broker_account = relationship("BrokerAccount", back_populates="orders")
 
     def __str__(self):

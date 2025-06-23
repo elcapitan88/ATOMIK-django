@@ -99,7 +99,8 @@ class ActivatedStrategy(Base):
         lazy="joined"  # This ensures quantities are loaded with the query
     )
     
-    trades = relationship("Order", back_populates="strategy", cascade="all, delete-orphan")
+    orders = relationship("Order", back_populates="strategy", cascade="all, delete-orphan")
+    trades = relationship("Trade", back_populates="strategy", cascade="all, delete-orphan")
     broker_account = relationship(
         "BrokerAccount",
         foreign_keys=[account_id],
