@@ -164,10 +164,11 @@ background_tasks: Set[asyncio.Task] = set()
 # Add CSP middleware first
 app.middleware("http")(CSPMiddleware(app))
 
-# Configure CORS
+# Configure CORS - Debug: Allow all origins temporarily
+cors_origins = ["*"] if settings.ENVIRONMENT == "development" else settings.cors_origins_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,  # Convert string to list
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
