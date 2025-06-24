@@ -23,7 +23,7 @@ from app.websocket.manager import app_websocket_manager
 from app.db.base import init_db, get_db
 from app.db.session import engine, get_db
 from app.core.db_health import check_database_health
-from app.core.tasks.token_refresh import start_token_refresh_task, stop_token_refresh_task
+# Token refresh now handled by separate token-refresh-service
 # Old trading websocket import removed
 
 # Trading WebSocket functionality moved to separate Websocket-Proxy service
@@ -81,15 +81,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"Database initialization failed: {str(db_error)}")
             raise
 
-        # Start token refresh task
-        try:
-            logger.info("Starting token refresh task...")
-            token_refresh_task = asyncio.create_task(start_token_refresh_task())
-            background_tasks.add(token_refresh_task)
-            logger.info("Token refresh task started successfully")
-        except Exception as task_error:
-            logger.error(f"Token refresh task initialization failed: {str(task_error)}")
-            raise
+        # Token refresh now handled by separate token-refresh-service
 
         logger.info("Application startup completed successfully")
         yield
@@ -104,8 +96,7 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("Initiating application shutdown...")
             
-            # Stop token refresh task
-            await stop_token_refresh_task()
+            # Token refresh stopped by separate token-refresh-service
             
             # Cancel all background tasks
             for task in background_tasks:
@@ -261,16 +252,9 @@ async def startup_event():
             logger.error(f"Database initialization failed: {str(db_error)}")
             raise
 
-        # Step 3: Start background tasks (existing functionality)
-        try:
-            logger.info("Starting background tasks...")
-            token_refresh_task = asyncio.create_task(start_token_refresh_task())
-            background_tasks.add(token_refresh_task)
-            startup_status["background_tasks"] = True
-            logger.info("Background tasks started successfully")
-        except Exception as task_error:
-            logger.error(f"Background task initialization failed: {str(task_error)}")
-            raise
+        # Step 3: Background tasks now handled by separate services
+        startup_status["background_tasks"] = True
+        logger.info("Background tasks handled by separate services")
 
         if all(startup_status.values()):
             logger.info("Trading API Service started successfully")
@@ -312,9 +296,7 @@ async def shutdown_event():
     logger.info("Initiating Trading API Service shutdown")
     
     try:
-        # Step 1: Stop token refresh task
-        logger.info("Stopping token refresh task...")
-        await stop_token_refresh_task()
+        # Step 1: Token refresh handled by separate service
 
         # Step 2: Stop all background tasks
         logger.info(f"Stopping {len(background_tasks)} background tasks...")
