@@ -167,7 +167,7 @@ app.middleware("http")(CSPMiddleware(app))
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,  # Changed from ALLOWED_ORIGINS to CORS_ORIGINS
+    allow_origins=settings.cors_origins_list,  # Convert string to list
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

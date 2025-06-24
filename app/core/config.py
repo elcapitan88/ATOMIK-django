@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     WEBSOCKET_RECONNECT_DELAY: int = 5
 
     # CORS Settings
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,https://atomik-dev-frontend.up.railway.app"
 
     # Redis Settings
     REDIS_URL: Optional[str] = "redis://localhost:6379"
