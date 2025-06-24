@@ -122,16 +122,6 @@ async def get_current_active_user(
         )
     return current_user
 
-async def get_current_superuser(
-    current_user: User = Depends(get_current_user),
-) -> User:
-    """Get current superuser"""
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough privileges"
-        )
-    return current_user
 
 def validate_password_strength(password: str) -> bool:
     """

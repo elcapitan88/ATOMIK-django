@@ -146,9 +146,7 @@ async def get_user_chat_channels(user: User) -> list:
             
             default_channels = ["general"]  # All users get general channel
             
-            # Add channels based on user role
-            if user.is_superuser:
-                default_channels.extend(["announcements", "admin-only"])
+            # Add channels based on user role (superuser functionality removed)
             
             # Add channels based on subscription tier (future enhancement)
             # if user.subscription_tier in ["pro", "premium"]:
