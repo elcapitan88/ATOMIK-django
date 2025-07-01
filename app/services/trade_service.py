@@ -291,7 +291,8 @@ class TradeService:
                     "average_loss": 0,
                     "profit_factor": 0,
                     "max_win": 0,
-                    "max_loss": 0
+                    "max_loss": 0,
+                    "period_days": days_back
                 }
             
             # Calculate metrics
