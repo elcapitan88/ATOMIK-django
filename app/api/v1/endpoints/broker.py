@@ -99,18 +99,47 @@ async def list_broker_accounts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Get all broker accounts for the current user with token validation"""
     try:
+        token_service = BrokerTokenService(db)
+        
         accounts = db.query(BrokerAccount).filter(
             BrokerAccount.user_id == current_user.id,
             BrokerAccount.is_active == True
         ).all()
 
-        return [account.to_dict() for account in accounts]
+        account_list = []
+        for account in accounts:
+            # Get base account data
+            account_data = account.to_dict()
+            
+            # Add token validation status
+            is_valid = False
+            if account.credentials:
+                # Try to refresh token if needed
+                await token_service.refresh_token_if_needed(account.credentials)
+                is_valid = await token_service.validate_token(account.credentials)
+            
+            # Ensure consistent field names for frontend
+            account_data.update({
+                "broker_id": account.broker_id,  # Ensure broker_id is included
+                "is_active": account.is_active,  # Use is_active consistently
+                "is_token_expired": not is_valid,
+                "status": "active" if is_valid else "token_expired",
+                # Add fields that frontend might expect
+                "nickname": account.name,  # Use name as nickname fallback
+                "display_name": account.name,  # Use name as display_name fallback
+            })
+            
+            account_list.append(account_data)
+
+        return account_list
+        
     except Exception as e:
         logger.error(f"Error fetching accounts: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=f"Failed to fetch accounts: {str(e)}"
         )
 
 @router.delete("/accounts/{account_id}")
@@ -231,46 +260,49 @@ async def get_positions(
             detail=f"Failed to get positions: {str(e)}"
         )
 
-@router.get("/accounts")
-async def list_broker_accounts(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    try:
-        token_service = BrokerTokenService(db)
-        
-        accounts = db.query(BrokerAccount).filter(
-            BrokerAccount.user_id == current_user.id,
-            BrokerAccount.is_active == True
-        ).all()
-
-        account_list = []
-        for account in accounts:
-            is_valid = False
-            if account.credentials:
-                # Try to refresh token if needed
-                await token_service.refresh_token_if_needed(account.credentials)
-                is_valid = await token_service.validate_token(account.credentials)
-
-            account_list.append({
-                "account_id": account.account_id,
-                "name": account.name,
-                "environment": account.environment,
-                "status": "active" if is_valid else "token_expired",
-                "balance": 0.0,  # This would come from broker API when token is valid
-                "active": account.is_active,
-                "is_token_expired": not is_valid,
-                "last_connected": account.last_connected
-            })
-
-        return account_list
-
-    except Exception as e:
-        logger.error(f"Error fetching accounts: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch accounts: {str(e)}"
-        )
+# DUPLICATE ENDPOINT - Commented out to avoid conflicts
+# This was causing issues with the positions display
+# The first /accounts endpoint above now includes token validation
+# @router.get("/accounts")
+# async def list_broker_accounts(
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     try:
+#         token_service = BrokerTokenService(db)
+#         
+#         accounts = db.query(BrokerAccount).filter(
+#             BrokerAccount.user_id == current_user.id,
+#             BrokerAccount.is_active == True
+#         ).all()
+#
+#         account_list = []
+#         for account in accounts:
+#             is_valid = False
+#             if account.credentials:
+#                 # Try to refresh token if needed
+#                 await token_service.refresh_token_if_needed(account.credentials)
+#                 is_valid = await token_service.validate_token(account.credentials)
+#
+#             account_list.append({
+#                 "account_id": account.account_id,
+#                 "name": account.name,
+#                 "environment": account.environment,
+#                 "status": "active" if is_valid else "token_expired",
+#                 "balance": 0.0,  # This would come from broker API when token is valid
+#                 "active": account.is_active,
+#                 "is_token_expired": not is_valid,
+#                 "last_connected": account.last_connected
+#             })
+#
+#         return account_list
+#
+#     except Exception as e:
+#         logger.error(f"Error fetching accounts: {str(e)}")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Failed to fetch accounts: {str(e)}"
+#         )
     
 async def validate_account_token(account: BrokerAccount, db: Session):
     """Validate account token before trading operations"""
@@ -328,14 +360,14 @@ async def place_order(
             detail=f"Failed to place order: {str(e)}"
         )
 
-@router.get("/{broker_id}/accounts")
+@router.get("/{broker_id}/accounts/simple")
 @check_subscription_feature(SubscriptionTier.STARTED)
-async def get_broker_accounts(
+async def get_broker_accounts_simple(
     broker_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get all accounts for a specific broker"""
+    """Get all accounts for a specific broker (simple database query)"""
     try:
         accounts = db.query(BrokerAccount).filter(
             BrokerAccount.user_id == current_user.id,
@@ -350,7 +382,7 @@ async def get_broker_accounts(
                 "environment": account.environment,
                 "status": account.status,
                 "balance": 0.0,  # You'll need to fetch this from broker API
-                "active": account.is_active,
+                "is_active": account.is_active,  # Changed from 'active' to 'is_active'
                 "is_token_expired": not account.credentials.is_valid if account.credentials else True,
                 "last_connected": account.last_connected
             }
