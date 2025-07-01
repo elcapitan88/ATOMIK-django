@@ -310,7 +310,7 @@ class TradeService:
                 "total_pnl": total_pnl,
                 "average_win": (total_wins / len(winning_trades)) if winning_trades else 0,
                 "average_loss": (total_losses / len(losing_trades)) if losing_trades else 0,
-                "profit_factor": (total_wins / total_losses) if total_losses > 0 else float('inf') if total_wins > 0 else 0,
+                "profit_factor": (total_wins / total_losses) if total_losses > 0 else 999.99 if total_wins > 0 else 0,
                 "max_win": max((float(t.realized_pnl or 0) for t in winning_trades), default=0),
                 "max_loss": min((float(t.realized_pnl or 0) for t in losing_trades), default=0),
                 "period_days": days_back
