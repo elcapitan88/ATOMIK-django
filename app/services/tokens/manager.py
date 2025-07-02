@@ -171,6 +171,25 @@ class TokenManager:
             logger.error(f"Unexpected error in token refresh: {str(e)}")
             return False
 
+    async def validate_token(self, credential: BrokerCredentials) -> bool:
+        """Validate if a token is still valid"""
+        try:
+            # Check if credential is marked as valid
+            if not credential.is_valid:
+                return False
+                
+            # Check if token has expired
+            if credential.expires_at:
+                if datetime.utcnow() >= credential.expires_at:
+                    logger.debug(f"Token for credential {credential.id} has expired")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating token for credential {credential.id}: {str(e)}")
+            return False
+
     async def _handle_max_retries_exceeded(self, credential: BrokerCredentials, db: Session):
         """Handle case when max refresh retries are exceeded"""
         logger.error(f"Max refresh attempts exceeded for credential {credential.id}")
