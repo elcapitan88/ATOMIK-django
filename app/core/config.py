@@ -159,6 +159,7 @@ class Settings(BaseSettings):
         # Fallback to configured Redis URL (for local development)
         return self.REDIS_URL or "redis://localhost:6379"
 
+    # Digital Ocean Settings
     DIGITAL_OCEAN_API_KEY: Optional[str] = None
     DIGITAL_OCEAN_REGION: str = "nyc1"
     DIGITAL_OCEAN_SIZE: str = "s-1vcpu-1gb" 
@@ -186,7 +187,6 @@ class Settings(BaseSettings):
     TRADOVATE_LIVE_RENEW_TOKEN_URL: Optional[str] = None
     TRADOVATE_DEMO_RENEW_TOKEN_URL: Optional[str] = None
 
-<<<<<<< HEAD
     STRIPE_SECRET_KEY: str
     STRIPE_WEBHOOK_SECRET: str  
     STRIPE_PUBLIC_KEY: str
@@ -238,16 +238,6 @@ class Settings(BaseSettings):
         return self.STRIPE_CANCEL_URL
 
     SKIP_SUBSCRIPTION_CHECK: bool = False
-
-=======
-    # Digital Ocean Settings
-    DIGITAL_OCEAN_API_KEY: Optional[str] = None
-    DIGITAL_OCEAN_REGION: Optional[str] = "nyc1"
-    DIGITAL_OCEAN_SIZE: Optional[str] = "s-1vcpu-1gb"
-    DIGITAL_OCEAN_IMAGE_ID: Optional[str] = None
-
-    # Optional Settings
->>>>>>> 175aded (Restore Interactive Brokers Digital Ocean integration)
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
     

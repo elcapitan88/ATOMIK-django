@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # app/services/digital_ocean_server_manager.py
 import os
 import json
@@ -1199,5 +1198,4 @@ sed -i "s/IBEAM_PASSWORD=.*/IBEAM_PASSWORD={ib_password}/" /root/ibeam_files/env
 digital_ocean_server_manager = DigitalOceanServerManager()
 
 # Export the instance
->>>>>>> 175aded (Restore Interactive Brokers Digital Ocean integration)
 __all__ = ["digital_ocean_server_manager"]
