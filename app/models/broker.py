@@ -91,6 +91,17 @@ class BrokerCredentials(Base):
     refresh_fail_count = Column(Integer, default=0)
     last_refresh_attempt = Column(DateTime, nullable=True)
     last_refresh_error = Column(String, nullable=True)
+    
+    # Keep existing custom_data field
+    custom_data = Column(Text, nullable=True)
+    
+    # Add new fields for Digital Ocean servers
+    do_droplet_id = Column(Integer, nullable=True)
+    do_droplet_name = Column(String, nullable=True)
+    do_server_status = Column(String, nullable=True)
+    do_ip_address = Column(String, nullable=True)
+    do_region = Column(String, nullable=True)
+    do_last_status_check = Column(DateTime, nullable=True)
 
     # Relationship to broker account
     account = relationship("BrokerAccount", back_populates="credentials")

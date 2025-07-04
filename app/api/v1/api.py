@@ -1,6 +1,6 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, futures_contracts, chat_app_websocket, trades
+from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, futures_contracts, chat_app_websocket, trades, interactivebrokers
 # Temporarily disabled strategy_ai endpoints to fix startup issues
 # from .endpoints.strategy_ai import interpret_router, generate_router, templates_router, context_router
 from typing import Optional
@@ -13,6 +13,7 @@ tradovate_callback_router = APIRouter()
 
 # Include all standard routes under /api/v1
 api_router.include_router(tradovate.router, prefix="/brokers/tradovate", tags=["tradovate"])
+api_router.include_router(interactivebrokers.router, prefix="/brokers/interactivebrokers", tags=["interactivebrokers"])
 api_router.include_router(broker.router, prefix="/brokers", tags=["brokers"])
 api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
