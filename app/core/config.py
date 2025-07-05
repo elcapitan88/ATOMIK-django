@@ -162,8 +162,8 @@ class Settings(BaseSettings):
     # Digital Ocean Settings
     DIGITAL_OCEAN_API_KEY: Optional[str] = None
     DIGITAL_OCEAN_REGION: str = "nyc1"
-    DIGITAL_OCEAN_SIZE: str = "s-1vcpu-1gb" 
-    DIGITAL_OCEAN_IMAGE_ID: str = "182556282" 
+    DIGITAL_OCEAN_SIZE: str = "s-1vcpu-2gb"  # Increased from 1GB to 2GB for snapshot compatibility
+    DIGITAL_OCEAN_IMAGE_ID: str = "192351793"  # Updated to correct IBeam image ID 
 
     #Railway
     RAILWAY_API_KEY: Optional[str] = None
