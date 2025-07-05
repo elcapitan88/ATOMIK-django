@@ -51,7 +51,7 @@ class DigitalOceanServerManager:
         user: User,
         ib_username: str,
         ib_password: str,
-        environment: str = "demo"
+        environment: str = "paper"
     ) -> Dict[str, Any]:
         """
         Provision a new IBEam server on Digital Ocean.
@@ -102,7 +102,8 @@ class DigitalOceanServerManager:
             # Create user data script to update credentials
             user_data = self._generate_user_data(
                 ib_username=ib_username,
-                ib_password=ib_password
+                ib_password=ib_password,
+                environment=environment
             )
             
             # Prepare tags for the droplet
@@ -582,7 +583,8 @@ class DigitalOceanServerManager:
     def _generate_user_data(
         self,
         ib_username: str,
-        ib_password: str
+        ib_password: str,
+        environment: str = "paper"
     ) -> str:
         """
         Generate user data script for configuring IBeam credentials.
@@ -590,15 +592,22 @@ class DigitalOceanServerManager:
         Args:
             ib_username: Interactive Brokers username
             ib_password: Interactive Brokers password
+            environment: Trading environment (demo/paper/live)
             
         Returns:
             str: User data script
         """
-        # Create a simple bash script to update credentials and start IBeam
+        # Determine if paper trading should be enabled
+        use_paper = "true" if environment == "paper" else "false"
+        
+        # Create a bash script to update credentials and start IBeam
         user_data = f"""#!/bin/bash
 # Update IBeam credentials
 sed -i "s/IBEAM_ACCOUNT=.*/IBEAM_ACCOUNT={ib_username}/" /root/ibeam_files/env.list
 sed -i "s/IBEAM_PASSWORD=.*/IBEAM_PASSWORD={ib_password}/" /root/ibeam_files/env.list
+
+# Set paper trading mode
+echo "IBEAM_USE_PAPER_ACCOUNT={use_paper}" >> /root/ibeam_files/env.list
 
 # Start IBeam
 . /root/starter.sh
