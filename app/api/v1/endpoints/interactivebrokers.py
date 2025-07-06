@@ -12,6 +12,7 @@ from app.models.user import User
 from app.models.broker import BrokerAccount
 from app.core.brokers.base import BaseBroker
 from app.services.digital_ocean_server_manager import digital_ocean_server_manager
+from app.services.ib_proxy_client import ib_proxy_client
 from app.core.permissions import check_subscription, check_resource_limit
 
 router = APIRouter()
@@ -350,41 +351,21 @@ async def check_ibeam_health(
             
         ip_address = account.credentials.do_ip_address
         
-        # Check IBeam health via tickle endpoint
+        # Check IBeam health through proxy
         try:
-            import httpx
-            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-                response = await client.get(f"https://{ip_address}:5000/v1/api/tickle")
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    authenticated = data.get("iserver", {}).get("authStatus", {}).get("authenticated", False)
-                    return {
-                        "authenticated": authenticated,
-                        "message": "IBeam is running" if authenticated else "IBeam is not authenticated",
-                        "raw_response": data
-                    }
-                else:
-                    return {
-                        "authenticated": False,
-                        "message": f"IBeam returned status code {response.status_code}"
-                    }
-                    
-        except httpx.ConnectError:
+            logger.info(f"Checking IBeam health via proxy for IP: {ip_address}")
+            authenticated = await ib_proxy_client.check_health(ip_address)
             return {
-                "authenticated": False,
-                "message": "Cannot connect to IBeam service"
-            }
-        except httpx.TimeoutException:
-            return {
-                "authenticated": False,
-                "message": "IBeam service timeout"
+                "authenticated": authenticated,
+                "message": "IBeam is running and authenticated" if authenticated else "IBeam is not authenticated",
+                "proxy_used": True
             }
         except Exception as e:
             logger.error(f"IBeam health check error: {str(e)}")
             return {
                 "authenticated": False,
-                "message": f"IBeam health check failed: {str(e)}"
+                "message": f"IBeam health check failed: {str(e)}",
+                "proxy_used": True
             }
             
     except HTTPException as e:

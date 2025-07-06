@@ -11,6 +11,7 @@ from ....models.user import User
 from ..base import BaseBroker, AuthenticationError, ConnectionError, OrderError
 from ..config import BrokerEnvironment
 from ....services.digital_ocean_server_manager import digital_ocean_server_manager  # Updated import
+from ....services.ib_proxy_client import ib_proxy_client
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,10 @@ class InteractiveBrokersBroker(BaseBroker):
         super().__init__(broker_id, db)
         self.broker_id = broker_id
         self.db = db
-        # HTTP client for IBEam communication
-        self.http_client = httpx.AsyncClient(verify=False, timeout=30.0)
+        # Note: HTTP client replaced with proxy client for IBEam communication
 
-    async def _get_ibeam_url(self, account: BrokerAccount) -> Optional[str]:
-        """Get the IBEam server URL from account credentials"""
+    async def _get_ibeam_ip(self, account: BrokerAccount) -> Optional[str]:
+        """Get the IBEam server IP address from account credentials"""
         if not account.credentials or not account.credentials.custom_data:
             return None
             
@@ -50,47 +50,44 @@ class InteractiveBrokersBroker(BaseBroker):
                         account.credentials.custom_data = json.dumps(service_data)
                         self.db.commit()
             
-            if ip_address:
-                return f"https://{ip_address}:5000/v1/api"
+            return ip_address
                 
         except Exception as e:
-            logger.error(f"Error getting IBEam URL: {str(e)}")
+            logger.error(f"Error getting IBEam IP: {str(e)}")
             
         return None
 
-    async def _check_ibeam_auth(self, base_url: str) -> bool:
-        """Check if IBEam server is authenticated"""
+    async def _check_ibeam_auth(self, ip_address: str) -> bool:
+        """Check if IBEam server is authenticated via proxy"""
         try:
-            response = await self.http_client.get(f"{base_url}/tickle")
-            data = response.json()
-            return data.get("iserver", {}).get("authStatus", {}).get("authenticated", False)
+            return await ib_proxy_client.check_health(ip_address)
         except Exception as e:
             logger.error(f"Error checking IBEam auth: {str(e)}")
             return False
 
-    async def _search_contract(self, base_url: str, symbol: str) -> Optional[int]:
-        """Search for contract ID by symbol"""
+    async def _search_contract(self, ip_address: str, symbol: str) -> Optional[int]:
+        """Search for contract ID by symbol via proxy"""
         try:
             # For futures, we need to parse the symbol
             # Example: ESZ24 -> ES (root) + Z24 (month/year)
             if len(symbol) >= 4:
                 root = symbol[:2]
                 
-                # Search for the contract
-                response = await self.http_client.get(
-                    f"{base_url}/iserver/secdef/search",
-                    params={"symbol": root, "secType": "FUT"}
+                # Search for the contract via proxy
+                result = await ib_proxy_client.call_ibeam(
+                    droplet_ip=ip_address,
+                    method="GET",
+                    path=f"/v1/api/iserver/secdef/search?symbol={root}&secType=FUT"
                 )
                 
-                contracts = response.json()
-                if contracts and len(contracts) > 0:
+                if result and len(result) > 0:
                     # Find the specific contract by matching the full symbol
-                    for contract in contracts:
+                    for contract in result:
                         if contract.get("symbol") == symbol:
                             return contract.get("conid")
                     
                     # If exact match not found, return first contract
-                    return contracts[0].get("conid")
+                    return result[0].get("conid")
                     
         except Exception as e:
             logger.error(f"Error searching contract: {str(e)}")
@@ -315,21 +312,21 @@ class InteractiveBrokersBroker(BaseBroker):
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            base_url = await self._get_ibeam_url(account)
-            if not base_url:
+            ip_address = await self._get_ibeam_ip(account)
+            if not ip_address:
                 return []
             
-            # Get positions from IBEam
-            response = await self.http_client.get(
-                f"{base_url}/portfolio/{account.account_id}/positions/0"
+            # Get positions from IBEam via proxy
+            result = await ib_proxy_client.call_ibeam(
+                droplet_ip=ip_address,
+                method="GET",
+                path=f"/v1/api/portfolio/{account.account_id}/positions/0"
             )
             
-            if response.status_code == 200:
-                positions = response.json()
-                
+            if result:
                 # Normalize positions
                 normalized = []
-                for pos in positions:
+                for pos in result:
                     normalized.append({
                         "symbol": pos.get("contractDesc", ""),
                         "quantity": pos.get("position", 0),
