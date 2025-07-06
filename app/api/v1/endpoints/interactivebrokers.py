@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional
 import logging
 import json
+import httpx
 from datetime import datetime
 
 from app.core.security import get_current_user
@@ -12,7 +13,6 @@ from app.models.user import User
 from app.models.broker import BrokerAccount
 from app.core.brokers.base import BaseBroker
 from app.services.digital_ocean_server_manager import digital_ocean_server_manager
-from app.services.ib_proxy_client import ib_proxy_client
 from app.core.permissions import check_subscription, check_resource_limit
 
 router = APIRouter()
@@ -351,21 +351,25 @@ async def check_ibeam_health(
             
         ip_address = account.credentials.do_ip_address
         
-        # Check IBeam health through proxy
+        # Check IBeam health directly
         try:
-            logger.info(f"Checking IBeam health via proxy for IP: {ip_address}")
-            authenticated = await ib_proxy_client.check_health(ip_address)
+            logger.info(f"Checking IBeam health directly for IP: {ip_address}")
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                response = await client.get(f"https://{ip_address}:5000/v1/api/tickle")
+                data = response.json()
+                authenticated = data.get("iserver", {}).get("authStatus", {}).get("authenticated", False)
+            
             return {
                 "authenticated": authenticated,
                 "message": "IBeam is running and authenticated" if authenticated else "IBeam is not authenticated",
-                "proxy_used": True
+                "proxy_used": False
             }
         except Exception as e:
             logger.error(f"IBeam health check error: {str(e)}")
             return {
                 "authenticated": False,
                 "message": f"IBeam health check failed: {str(e)}",
-                "proxy_used": True
+                "proxy_used": False
             }
             
     except HTTPException as e:
