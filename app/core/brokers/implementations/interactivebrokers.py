@@ -11,7 +11,6 @@ from ....models.user import User
 from ..base import BaseBroker, AuthenticationError, ConnectionError, OrderError
 from ..config import BrokerEnvironment
 from ....services.digital_ocean_server_manager import digital_ocean_server_manager  # Updated import
-from ....services.ib_proxy_client import ib_proxy_client
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,8 @@ class InteractiveBrokersBroker(BaseBroker):
         super().__init__(broker_id, db)
         self.broker_id = broker_id
         self.db = db
-        # Note: HTTP client replaced with proxy client for IBEam communication
+        # HTTP client for direct IBEam communication
+        self.http_client = httpx.AsyncClient(verify=False, timeout=30.0)
 
     async def _get_ibeam_ip(self, account: BrokerAccount) -> Optional[str]:
         """Get the IBEam server IP address from account credentials"""
@@ -58,27 +58,28 @@ class InteractiveBrokersBroker(BaseBroker):
         return None
 
     async def _check_ibeam_auth(self, ip_address: str) -> bool:
-        """Check if IBEam server is authenticated via proxy"""
+        """Check if IBEam server is authenticated"""
         try:
-            return await ib_proxy_client.check_health(ip_address)
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                response = await client.get(f"https://{ip_address}:5000/v1/api/tickle")
+                data = response.json()
+                return data.get("iserver", {}).get("authStatus", {}).get("authenticated", False)
         except Exception as e:
             logger.error(f"Error checking IBEam auth: {str(e)}")
             return False
 
     async def _search_contract(self, ip_address: str, symbol: str) -> Optional[int]:
-        """Search for contract ID by symbol via proxy"""
+        """Search for contract ID by symbol"""
         try:
             # For futures, we need to parse the symbol
             # Example: ESZ24 -> ES (root) + Z24 (month/year)
             if len(symbol) >= 4:
                 root = symbol[:2]
                 
-                # Search for the contract via proxy
-                result = await ib_proxy_client.call_ibeam(
-                    droplet_ip=ip_address,
-                    method="GET",
-                    path=f"/v1/api/iserver/secdef/search?symbol={root}&secType=FUT"
-                )
+                # Search for the contract directly
+                async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                    response = await client.get(f"https://{ip_address}:5000/v1/api/iserver/secdef/search?symbol={root}&secType=FUT")
+                    result = response.json()
                 
                 if result and len(result) > 0:
                     # Find the specific contract by matching the full symbol
@@ -316,12 +317,10 @@ class InteractiveBrokersBroker(BaseBroker):
             if not ip_address:
                 return []
             
-            # Get positions from IBEam via proxy
-            result = await ib_proxy_client.call_ibeam(
-                droplet_ip=ip_address,
-                method="GET",
-                path=f"/v1/api/portfolio/{account.account_id}/positions/0"
-            )
+            # Get positions from IBEam directly
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                response = await client.get(f"https://{ip_address}:5000/v1/api/portfolio/{account.account_id}/positions/0")
+                result = response.json()
             
             if result:
                 # Normalize positions
@@ -351,13 +350,13 @@ class InteractiveBrokersBroker(BaseBroker):
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            base_url = await self._get_ibeam_url(account)
-            if not base_url:
+            ip_address = await self._get_ibeam_ip(account)
+            if not ip_address:
                 return []
             
             # Get live orders
             response = await self.http_client.get(
-                f"{base_url}/iserver/account/orders"
+                f"https://{ip_address}:5000/v1/api/iserver/account/orders"
             )
             
             if response.status_code == 200:
@@ -395,17 +394,17 @@ class InteractiveBrokersBroker(BaseBroker):
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            # Get IBEam server URL
-            base_url = await self._get_ibeam_url(account)
-            if not base_url:
+            # Get IBEam server IP
+            ip_address = await self._get_ibeam_ip(account)
+            if not ip_address:
                 raise OrderError("IBEam server not configured or not ready")
             
             # Check if authenticated
-            if not await self._check_ibeam_auth(base_url):
+            if not await self._check_ibeam_auth(ip_address):
                 raise OrderError("IBEam server not authenticated")
             
             # Get contract ID for the symbol
-            contract_id = await self._search_contract(base_url, order_data["symbol"])
+            contract_id = await self._search_contract(ip_address, order_data["symbol"])
             if not contract_id:
                 raise OrderError(f"Could not find contract for symbol: {order_data['symbol']}")
             
@@ -425,7 +424,7 @@ class InteractiveBrokersBroker(BaseBroker):
             
             # Place the order
             response = await self.http_client.post(
-                f"{base_url}/iserver/account/{account.account_id}/orders",
+                f"https://{ip_address}:5000/v1/api/iserver/account/{account.account_id}/orders",
                 json={"orders": [ib_order]}
             )
             
@@ -440,7 +439,7 @@ class InteractiveBrokersBroker(BaseBroker):
                 # Confirm the order
                 reply_id = result[0]["id"]
                 confirm_response = await self.http_client.post(
-                    f"{base_url}/iserver/reply/{reply_id}",
+                    f"https://{ip_address}:5000/v1/api/iserver/reply/{reply_id}",
                     json={"confirmed": True}
                 )
                 
@@ -475,13 +474,13 @@ class InteractiveBrokersBroker(BaseBroker):
             if not account or account.broker_id != self.broker_id:
                 raise ValueError("Invalid account")
             
-            base_url = await self._get_ibeam_url(account)
-            if not base_url:
+            ip_address = await self._get_ibeam_ip(account)
+            if not ip_address:
                 raise OrderError("IBEam server not configured or not ready")
             
             # Cancel the order
             response = await self.http_client.delete(
-                f"{base_url}/iserver/account/{account.account_id}/order/{order_id}"
+                f"https://{ip_address}:5000/v1/api/iserver/account/{account.account_id}/order/{order_id}"
             )
             
             if response.status_code == 200:
@@ -491,7 +490,7 @@ class InteractiveBrokersBroker(BaseBroker):
                     # Confirm the cancellation
                     reply_id = result["id"]
                     confirm_response = await self.http_client.post(
-                        f"{base_url}/iserver/reply/{reply_id}",
+                        f"https://{ip_address}:5000/v1/api/iserver/reply/{reply_id}",
                         json={"confirmed": True}
                     )
                     return confirm_response.status_code == 200
