@@ -600,7 +600,7 @@ class DigitalOceanServerManager:
         # Determine if paper trading should be enabled
         use_paper = "true" if environment == "paper" else "false"
         
-        # Create a bash script to update credentials and start IBeam
+        # Create a bash script to update credentials, whitelist proxy IPs, and start IBeam
         user_data = f"""#!/bin/bash
 # Update IBeam credentials
 sed -i "s/IBEAM_ACCOUNT=.*/IBEAM_ACCOUNT={ib_username}/" /root/ibeam_files/env.list
@@ -608,6 +608,14 @@ sed -i "s/IBEAM_PASSWORD=.*/IBEAM_PASSWORD={ib_password}/" /root/ibeam_files/env
 
 # Set paper trading mode
 echo "IBEAM_USE_PAPER_ACCOUNT={use_paper}" >> /root/ibeam_files/env.list
+
+# Whitelist Digital Ocean App Platform dedicated egress IPs
+ufw allow from 64.227.24.136 to any port 5000
+ufw allow from 192.241.152.93 to any port 5000
+
+# Reload firewall rules
+ufw --force enable
+ufw reload
 
 # Start IBeam
 . /root/starter.sh

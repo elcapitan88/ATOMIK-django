@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     DIGITAL_OCEAN_API_KEY: Optional[str] = None
     DIGITAL_OCEAN_REGION: str = "nyc1"
     DIGITAL_OCEAN_SIZE: str = "s-2vcpu-2gb"  # 2 vCPU, 2GB RAM, 50GB SSD - sufficient for 3.33GB snapshot
-    DIGITAL_OCEAN_IMAGE_ID: str = "192351793"  # Updated to correct IBeam image ID
+    DIGITAL_OCEAN_IMAGE_ID: str = "192482147"  # Updated snapshot with proxy IP whitelist
     
     # Interactive Brokers Proxy Settings
     IB_PROXY_URL: str = ""
