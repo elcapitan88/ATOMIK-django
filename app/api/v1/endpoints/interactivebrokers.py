@@ -377,3 +377,58 @@ async def check_ibeam_health(
     except Exception as e:
         logger.error(f"Error checking IBeam health: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to check IBeam health: {str(e)}")
+
+@router.get("/accounts/{account_id}/portfolio/accounts")
+@check_subscription
+async def get_portfolio_accounts(
+    account_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get portfolio accounts from IBeam - proxies the /portfolio/accounts endpoint"""
+    try:
+        # Get the account
+        account = db.query(BrokerAccount).filter(
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.account_id == account_id,
+            BrokerAccount.broker_id == "interactivebrokers",
+            BrokerAccount.is_active == True
+        ).first()
+        
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+            
+        # Get IP address from credentials
+        if not account.credentials or not account.credentials.do_ip_address:
+            raise HTTPException(status_code=400, detail="No server IP address found")
+            
+        ip_address = account.credentials.do_ip_address
+        
+        # Call IBeam portfolio/accounts endpoint
+        try:
+            logger.info(f"Calling IBeam portfolio/accounts for IP: {ip_address}")
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                response = await client.get(f"https://{ip_address}:5000/v1/api/portfolio/accounts")
+                response.raise_for_status()
+                
+                # Return the raw IBeam response
+                return response.json()
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"IBeam portfolio/accounts HTTP error: {e.response.status_code} - {e.response.text}")
+            raise HTTPException(
+                status_code=e.response.status_code, 
+                detail=f"IBeam API error: {e.response.text}"
+            )
+        except Exception as e:
+            logger.error(f"IBeam portfolio/accounts error: {str(e)}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to get portfolio accounts: {str(e)}"
+            )
+            
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting portfolio accounts: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get portfolio accounts: {str(e)}")
