@@ -427,15 +427,30 @@ class InteractiveBrokersBroker(BaseBroker):
             if not real_ib_account_id:
                 raise OrderError("Real IB account ID not found. Please ensure account is properly authenticated.")
             
-            # Prepare IB order format
-            ib_order = {
-                "acctId": real_ib_account_id,  # Use real IB account ID, not placeholder
-                "conid": contract_id,
-                "orderType": order_data.get("type", "MKT").upper(),
-                "side": order_data["side"].upper(),  # BUY or SELL
-                "quantity": order_data["quantity"],
-                "tif": order_data.get("time_in_force", "GTC")
+            # Map order types to IB format
+            order_type_map = {
+                "MARKET": "MKT",
+                "MKT": "MKT", 
+                "LIMIT": "LMT",
+                "LMT": "LMT",
+                "STOP": "STP",
+                "STP": "STP"
             }
+            
+            order_type = order_data.get("type", "MARKET").upper()
+            ib_order_type = order_type_map.get(order_type, "MKT")
+            
+            # Prepare IB order format with correct data types
+            ib_order = {
+                "acctId": real_ib_account_id,  # String
+                "conid": int(contract_id),     # Integer (required by IB)
+                "orderType": ib_order_type,   # String - use IB format
+                "side": order_data["side"].upper(),  # String: BUY or SELL
+                "quantity": int(order_data["quantity"]),  # Integer (required by IB)
+                "tif": order_data.get("time_in_force", "GTC").upper()  # String
+            }
+            
+            logger.info(f"Placing IB order: {ib_order}")
             
             # Add price for limit orders
             if order_data.get("type") == "LIMIT" and order_data.get("price"):
