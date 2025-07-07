@@ -72,23 +72,37 @@ class InteractiveBrokersBroker(BaseBroker):
         """Search for contract ID by symbol"""
         try:
             # For futures, we need to parse the symbol
-            # Example: ESZ24 -> ES (root) + Z24 (month/year)
+            # Examples: 
+            # ESZ24 -> ES (2 chars) + Z24 (month/year)
+            # MESU5 -> MES (3 chars) + U5 (month/year)
             if len(symbol) >= 4:
-                root = symbol[:2]
+                # Handle 3-character roots (MES, NKD, etc.)
+                if symbol.startswith(('MES', 'NKD', 'RTY', 'YMM')):
+                    root = symbol[:3]
+                else:
+                    # Handle 2-character roots (ES, NQ, CL, etc.)
+                    root = symbol[:2]
+                
+                logger.info(f"Searching for futures contract: symbol={symbol}, root={root}")
                 
                 # Search for the contract directly
                 async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
                     response = await client.get(f"https://{ip_address}:5000/v1/api/iserver/secdef/search?symbol={root}&secType=FUT")
                     result = response.json()
                 
+                logger.info(f"Contract search result for {root}: {len(result) if result else 0} contracts found")
+                
                 if result and len(result) > 0:
                     # Find the specific contract by matching the full symbol
                     for contract in result:
                         if contract.get("symbol") == symbol:
+                            logger.info(f"Found exact match: {symbol} -> conid {contract.get('conid')}")
                             return contract.get("conid")
                     
                     # If exact match not found, return first contract
-                    return result[0].get("conid")
+                    first_conid = result[0].get("conid")
+                    logger.warning(f"No exact match for {symbol}, using first contract: conid {first_conid}")
+                    return first_conid
                     
         except Exception as e:
             logger.error(f"Error searching contract: {str(e)}")
