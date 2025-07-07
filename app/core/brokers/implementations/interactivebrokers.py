@@ -408,9 +408,14 @@ class InteractiveBrokersBroker(BaseBroker):
             if not contract_id:
                 raise OrderError(f"Could not find contract for symbol: {order_data['symbol']}")
             
+            # Get real IB account ID from custom_data
+            real_ib_account_id = self._get_real_ib_account_id(account)
+            if not real_ib_account_id:
+                raise OrderError("Real IB account ID not found. Please ensure account is properly authenticated.")
+            
             # Prepare IB order format
             ib_order = {
-                "acctId": account.account_id,
+                "acctId": real_ib_account_id,  # Use real IB account ID, not placeholder
                 "conid": contract_id,
                 "orderType": order_data.get("type", "MKT").upper(),
                 "side": order_data["side"].upper(),  # BUY or SELL
@@ -424,7 +429,7 @@ class InteractiveBrokersBroker(BaseBroker):
             
             # Place the order
             response = await self.http_client.post(
-                f"https://{ip_address}:5000/v1/api/iserver/account/{account.account_id}/orders",
+                f"https://{ip_address}:5000/v1/api/iserver/account/{real_ib_account_id}/orders",
                 json={"orders": [ib_order]}
             )
             
@@ -525,6 +530,27 @@ class InteractiveBrokersBroker(BaseBroker):
         For IBEam servers, this is not used as we provision a dedicated server.
         """
         raise NotImplementedError("Interactive Brokers does not use API keys")
+
+    def _get_real_ib_account_id(self, account: BrokerAccount) -> str:
+        """Extract the real IB account ID from custom_data"""
+        try:
+            if account.credentials and account.credentials.custom_data:
+                import json
+                service_data = json.loads(account.credentials.custom_data)
+                real_ib_account_id = service_data.get("ib_account_id")
+                
+                if real_ib_account_id:
+                    logger.info(f"Using real IB account ID: {real_ib_account_id} for account {account.account_id}")
+                    return real_ib_account_id
+                else:
+                    logger.warning(f"No real IB account ID found in custom_data for account {account.account_id}")
+            else:
+                logger.warning(f"No credentials or custom_data found for account {account.account_id}")
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting real IB account ID: {str(e)}")
+            return None
 
     async def __del__(self):
         """Cleanup HTTP client on deletion"""

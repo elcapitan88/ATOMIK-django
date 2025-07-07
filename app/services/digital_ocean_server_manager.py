@@ -517,6 +517,14 @@ class DigitalOceanServerManager:
                         logger.error(f"Error updating server status: {str(e)}")
                         db_session.rollback()
                 
+                # If server is running, check IBeam authentication and fetch account info
+                if status == "running" and ip_address:
+                    # Check if we haven't already fetched IB account info
+                    service_data = json.loads(broker_account.credentials.custom_data) if broker_account.credentials.custom_data else {}
+                    if not service_data.get("ib_account_id"):
+                        logger.info(f"Server {droplet_id} is running, checking IBeam authentication and fetching account info")
+                        await self._check_ibearmy_running(ip_address, broker_account, db_session)
+                
                 # Break the loop if server is running or in an error state
                 if status in ("running", "error", "deleted"):
                     logger.info(f"Server {droplet_id} reached final state: {status}")
@@ -558,8 +566,8 @@ class DigitalOceanServerManager:
                 logger.error(f"Error updating account status: {str(db_error)}")
                 db_session.rollback()
     
-    async def _check_ibearmy_running(self, ip_address: str) -> bool:
-        """Check if the IBEam service is running on the droplet."""
+    async def _check_ibearmy_running(self, ip_address: str, broker_account=None, db_session=None) -> bool:
+        """Check if the IBEam service is running on the droplet and fetch account info if authenticated."""
         try:
             # Create a custom httpx client that doesn't verify SSL certificates
             # This is safe because we're only connecting to our own internal services
@@ -572,6 +580,11 @@ class DigitalOceanServerManager:
                     # Look for authentication status in the response
                     if response_data.get("iserver", {}).get("authStatus", {}).get("authenticated") is True:
                         logger.info(f"IBEam service running at {ip_address}: authenticated=true")
+                        
+                        # Fetch and store real IB account information
+                        if broker_account and db_session:
+                            await self._fetch_and_store_ib_account_info(ip_address, broker_account, db_session, client)
+                        
                         return True
                     
                 logger.warning(f"IBEam service at {ip_address} responded but not authenticated")
@@ -579,6 +592,59 @@ class DigitalOceanServerManager:
         except Exception as e:
             logger.debug(f"IBEam service check failed at {ip_address}: {str(e)}")
             return False
+    
+    async def _fetch_and_store_ib_account_info(self, ip_address: str, broker_account, db_session, client):
+        """Fetch real IB account information and store it in custom_data."""
+        try:
+            # Call IBeam's /portfolio/accounts endpoint to get real account info
+            portfolio_url = f"https://{ip_address}:5000/v1/api/portfolio/accounts"
+            portfolio_response = await client.get(portfolio_url)
+            
+            if portfolio_response.status_code == 200:
+                ib_accounts = portfolio_response.json()
+                logger.info(f"Retrieved IB accounts from {ip_address}: {len(ib_accounts)} accounts found")
+                
+                if ib_accounts and len(ib_accounts) > 0:
+                    # Get the primary account (first one)
+                    primary_account = ib_accounts[0]
+                    real_ib_account_id = primary_account.get("accountId") or primary_account.get("id")
+                    
+                    if real_ib_account_id:
+                        # Update custom_data with real IB account information
+                        if broker_account.credentials and broker_account.credentials.custom_data:
+                            try:
+                                service_data = json.loads(broker_account.credentials.custom_data)
+                                
+                                # Add IB account information
+                                service_data["ib_account_id"] = real_ib_account_id
+                                service_data["ib_accounts"] = ib_accounts
+                                service_data["ib_account_fetched_at"] = datetime.utcnow().isoformat()
+                                
+                                # Update the custom_data
+                                broker_account.credentials.custom_data = json.dumps(service_data)
+                                broker_account.credentials.updated_at = datetime.utcnow()
+                                
+                                # Commit the changes
+                                db_session.commit()
+                                
+                                logger.info(f"Successfully stored real IB account ID: {real_ib_account_id} for account {broker_account.account_id}")
+                                
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse custom_data JSON: {e}")
+                            except Exception as e:
+                                logger.error(f"Failed to update custom_data with IB account info: {e}")
+                                db_session.rollback()
+                        else:
+                            logger.warning("No credentials or custom_data found for broker account")
+                    else:
+                        logger.warning("No accountId found in IB portfolio accounts response")
+                else:
+                    logger.warning("No IB accounts returned from portfolio/accounts endpoint")
+            else:
+                logger.warning(f"Failed to fetch IB accounts: HTTP {portfolio_response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Error fetching IB account information from {ip_address}: {str(e)}")
     
     def _generate_user_data(
         self,
