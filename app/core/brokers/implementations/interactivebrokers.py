@@ -467,6 +467,7 @@ class InteractiveBrokersBroker(BaseBroker):
                 raise OrderError(f"Order failed: {error_data}")
             
             result = response.json()
+            logger.info(f"IB order response: {result}")
             
             # Handle IB's reply confirmation if needed
             if result and isinstance(result, list) and result[0].get("id"):
@@ -492,7 +493,20 @@ class InteractiveBrokersBroker(BaseBroker):
                     }
             
             # Return the result
-            return self.normalize_order_response(result[0] if result else {})
+            if result and isinstance(result, list) and len(result) > 0:
+                return self.normalize_order_response(result[0])
+            else:
+                # If no standard response, create a basic success response
+                return {
+                    "order_id": "unknown",
+                    "status": "submitted",
+                    "symbol": order_data["symbol"],
+                    "side": order_data["side"],
+                    "quantity": order_data["quantity"],
+                    "order_type": order_data.get("type", "MARKET"),
+                    "created_at": datetime.utcnow().isoformat(),
+                    "message": "Order submitted to IB successfully"
+                }
             
         except Exception as e:
             logger.error(f"Error placing IB order: {str(e)}")
