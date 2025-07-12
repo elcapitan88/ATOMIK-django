@@ -35,10 +35,6 @@ class BaseBroker(ABC):
     """
     Base class for all broker implementations.
     Each broker must implement these methods to ensure consistent behavior.
-    
-    Note: Token refresh is now handled by the standalone token-refresh-service.
-    This class focuses only on broker-specific operations like authentication,
-    account management, and trading operations.
     """
 
     def __init__(self, broker_id: str, db: Session):
@@ -60,34 +56,15 @@ class BaseBroker(ABC):
         """Authenticate with the broker"""
         pass
 
+    @abstractmethod
     async def validate_credentials(self, credentials: BrokerCredentials) -> bool:
-        """
-        Validate if stored credentials are valid
-        
-        This method only checks if the credentials are marked as valid in the database.
-        Actual token refresh is handled by the token-refresh-service.
-        
-        Args:
-            credentials: The credentials to validate
-            
-        Returns:
-            bool: True if credentials are valid, False otherwise
-        """
-        try:
-            if not credentials or not credentials.is_valid:
-                return False
+        """Validate stored credentials"""
+        pass
 
-            # Check if token is expired
-            if credentials.expires_at and credentials.expires_at <= datetime.utcnow():
-                logger.info(f"Token expired for credential {credentials.id}")
-                return False
-                
-            # If has access token and isn't expired, it's valid
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error validating token: {str(e)}")
-            return False
+    @abstractmethod
+    async def refresh_credentials(self, credentials: BrokerCredentials) -> BrokerCredentials:
+        """Refresh authentication credentials"""
+        pass
 
     @abstractmethod
     async def connect_account(
@@ -294,11 +271,12 @@ class BaseBroker(ABC):
         """Factory method to get broker implementation"""
         try:
             from .implementations.tradovate import TradovateBroker
-            from .implementations.interactivebrokers import InteractiveBrokersBroker
+            from .implementations.binance import BinanceBroker
             
             broker_implementations = {
                 "tradovate": TradovateBroker,
-                "interactivebrokers": InteractiveBrokersBroker,
+                "binance": BinanceBroker,
+                "binanceus": BinanceBroker,
             }
 
             broker_class = broker_implementations.get(broker_id)
