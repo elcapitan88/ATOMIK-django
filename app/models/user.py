@@ -38,6 +38,9 @@ class User(Base):
     # Affiliate relationship
     affiliate = relationship("Affiliate", back_populates="user", uselist=False)
     
+    # ARIA Assistant relationships
+    trading_profile = relationship("UserTradingProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    
     # Strategy AI relationships - temporarily commented out
     # strategy_interpretations = relationship("StrategyInterpretation", back_populates="user", cascade="all, delete-orphan")
     # strategy_customizations = relationship("StrategyCustomization", back_populates="user", cascade="all, delete-orphan")

@@ -17,6 +17,12 @@ from .chat import (
     UserChatSettings,
     ChatChannelMember
 )
+from .aria_context import (
+    UserTradingProfile,
+    UserTradingSession,
+    ARIAInteraction,
+    ARIAContextCache
+)
 # Temporarily commented out to fix database schema issues
 # from .strategy_ai import (
 #     StrategyTemplate,
@@ -49,6 +55,10 @@ __all__ = [
     "UserChatRole",
     "UserChatSettings",
     "ChatChannelMember",
+    "UserTradingProfile",
+    "UserTradingSession", 
+    "ARIAInteraction",
+    "ARIAContextCache",
     # "StrategyTemplate",
     # "StrategyInterpretation", 
     # "StrategyCustomization",
