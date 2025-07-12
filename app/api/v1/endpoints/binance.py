@@ -4,7 +4,7 @@ from typing import Dict, List, Any, Optional
 import logging
 from datetime import datetime
 
-from ....core.database import get_db
+from ....db.session import get_db
 from ....core.security import get_current_user
 from ....models.user import User
 from ....models.broker import BrokerAccount
