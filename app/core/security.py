@@ -1,6 +1,6 @@
 # app/core/security.py
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status, Query, Request
