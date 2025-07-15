@@ -8,13 +8,10 @@ import logging
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Force refresh of affiliate models - timestamp: 2025-06-22T04:30:00Z
-
 # Create SQLAlchemy engine
-active_db_url = settings.active_database_url
-logger.info(f"🔍 CONNECTING TO DATABASE: {active_db_url[:50]}...")
+logger.info(f"[BASE.PY] Using DATABASE_URL: {settings.DATABASE_URL[:50]}...")
 engine = create_engine(
-    active_db_url,
+    settings.DATABASE_URL,
     poolclass=QueuePool,
     pool_size=5,
     max_overflow=10,
@@ -38,8 +35,7 @@ from app.models.strategy import ActivatedStrategy  # noqa
 from app.models.broker import BrokerAccount, BrokerCredentials  # noqa
 from app.models.subscription import Subscription
 from app.models.order import Order
-from app.models.promo_code import PromoCode
-from app.models.affiliate import Affiliate, AffiliateReferral, AffiliateClick, AffiliatePayout  # noqa
+from app.models.trade import Trade, TradeExecution  # noqa
 
 # Create a dependency for FastAPI endpoints
 def get_db():
@@ -72,7 +68,7 @@ def init_db():
         import app.models.broker
         import app.models.subscription
         import app.models.order
-        import app.models.affiliate
+        import app.models.trade
         
         # Create all tables
         Base.metadata.create_all(bind=engine)
@@ -101,8 +97,6 @@ __all__ = [
     "BrokerCredentials",
     "Subscription",
     "Order",
-    "Affiliate",
-    "AffiliateReferral",
-    "AffiliateClick",
-    "AffiliatePayout"
+    "Trade",
+    "TradeExecution"
 ]

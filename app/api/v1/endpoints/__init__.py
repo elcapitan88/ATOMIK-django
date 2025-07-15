@@ -6,7 +6,7 @@ from . import binance
 from . import broker
 from . import futures_contracts
 from . import strategy
-from . import subscriptions
+from . import subscription
 from . import tradovate
 from . import webhooks
 
@@ -16,7 +16,7 @@ __all__ = [
     "broker",
     "futures_contracts",
     "strategy",
-    "subscriptions",
+    "subscription",
     "tradovate",
     "webhooks"
 ]

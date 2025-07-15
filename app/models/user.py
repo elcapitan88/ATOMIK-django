@@ -30,23 +30,7 @@ class User(Base):
     strategies = relationship("ActivatedStrategy", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("Subscription", back_populates="user", uselist=False)
     orders = relationship("Order", back_populates="user", cascade="all, delete-orphan")
-    support_tickets = relationship("SupportTicketLog", back_populates="user")
-    
-    # Add relationship to used promo code
-    used_promo_code = relationship("PromoCode", foreign_keys=[promo_code_id])
-    
-    # Affiliate relationship
-    affiliate = relationship("Affiliate", back_populates="user", uselist=False)
-    
-    # ARIA Assistant relationships
-    trading_profile = relationship("UserTradingProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    
-    # Strategy AI relationships - temporarily commented out
-    # strategy_interpretations = relationship("StrategyInterpretation", back_populates="user", cascade="all, delete-orphan")
-    # strategy_customizations = relationship("StrategyCustomization", back_populates="user", cascade="all, delete-orphan")
-    # generated_codes = relationship("GeneratedCode", back_populates="user", cascade="all, delete-orphan")
-    # ai_usage_tracking = relationship("AIUsageTracking", back_populates="user", cascade="all, delete-orphan")
-    # component_interpretations = relationship("ComponentInterpretation", back_populates="user", cascade="all, delete-orphan")
+    trades = relationship("Trade", back_populates="user", cascade="all, delete-orphan")
     
     def __str__(self):
         return f"User(email={self.email})"

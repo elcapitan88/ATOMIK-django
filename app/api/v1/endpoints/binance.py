@@ -455,4 +455,8 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "supported_exchanges": ["binance", "binanceus"],
         "supported_markets": ["spot", "futures"]
+<<<<<<< HEAD
     }
+=======
+    }
+>>>>>>> Development

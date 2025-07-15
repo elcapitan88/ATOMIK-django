@@ -26,6 +26,10 @@ from ....models.broker import BrokerAccount, BrokerCredentials
 from ....core.brokers.base import BaseBroker
 from ....core.brokers.config import BrokerEnvironment, BROKER_CONFIGS
 from ....core.config import settings
+<<<<<<< HEAD
+=======
+# Trading WebSocket functionality moved to separate Websocket-Proxy service
+>>>>>>> Development
 
 
 __all__ = ['router', 'tradovate_callback'] 

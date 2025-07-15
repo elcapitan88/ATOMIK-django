@@ -3,35 +3,11 @@ from .user import User
 from .webhook import Webhook, WebhookLog
 from .strategy import ActivatedStrategy
 from .broker import BrokerAccount, BrokerCredentials
+from .websocket import WebSocketConnection
 from .subscription import Subscription
 from .order import Order
-from .support import SupportTicketLog
-from .promo_code import PromoCode
-from .password_reset import PasswordReset
-from .affiliate import Affiliate, AffiliateReferral, AffiliateClick
-from .chat import (
-    ChatChannel,
-    ChatMessage,
-    ChatReaction,
-    UserChatRole,
-    UserChatSettings,
-    ChatChannelMember
-)
-from .aria_context import (
-    UserTradingProfile,
-    UserTradingSession,
-    ARIAInteraction,
-    ARIAContextCache
-)
-# Temporarily commented out to fix database schema issues
-# from .strategy_ai import (
-#     StrategyTemplate,
-#     StrategyInterpretation,
-#     StrategyCustomization,
-#     GeneratedCode,
-#     AIUsageTracking,
-#     ComponentInterpretation
-# )
+from .trade import Trade, TradeExecution
+from .maintenance import MaintenanceSettings
 
 # This ensures all models are registered
 __all__ = [
@@ -41,28 +17,10 @@ __all__ = [
     "ActivatedStrategy",
     "BrokerAccount",
     "BrokerCredentials",
+    "WebSocketConnection",
     "Subscription",
     "Order",
-    "SupportTicketLog",
-    "PromoCode",
-    "PasswordReset",
-    "Affiliate",
-    "AffiliateReferral",
-    "AffiliateClick",
-    "ChatChannel",
-    "ChatMessage",
-    "ChatReaction",
-    "UserChatRole",
-    "UserChatSettings",
-    "ChatChannelMember",
-    "UserTradingProfile",
-    "UserTradingSession", 
-    "ARIAInteraction",
-    "ARIAContextCache",
-    # "StrategyTemplate",
-    # "StrategyInterpretation", 
-    # "StrategyCustomization",
-    # "GeneratedCode",
-    # "AIUsageTracking",
-    # "ComponentInterpretation"
+    "Trade",
+    "TradeExecution",
+    "MaintenanceSettings"
 ]

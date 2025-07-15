@@ -137,8 +137,12 @@ class Settings(BaseSettings):
     # Webhook Settings
     WEBHOOK_SECRET_KEY: str = secrets.token_urlsafe(32)
 
+    # Maintenance Mode Settings
+    MAINTENANCE_MODE_ENABLED: bool = False
+    MAINTENANCE_MODE_MESSAGE: str = "The application is currently under maintenance. Please try again later."
+
     # CORS Settings
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,https://atomik-frontend-development.up.railway.app"
 
     # Redis Settings
     REDIS_URL: Optional[str] = "redis://localhost:6379"
@@ -238,6 +242,7 @@ class Settings(BaseSettings):
         return self.STRIPE_CANCEL_URL
 
     SKIP_SUBSCRIPTION_CHECK: bool = False
+    
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
     
@@ -312,6 +317,11 @@ def get_settings() -> Settings:
 
 # Create settings instance
 settings = get_settings()
+
+# Debug: Log the DATABASE_URL at config initialization
+import logging
+logger = logging.getLogger(__name__)
+logger.info(f"[CONFIG] DATABASE_URL: {settings.DATABASE_URL[:50] if settings.DATABASE_URL else 'NONE'}...")
 
 # Validate critical settings on import
 assert settings.SECRET_KEY, "SECRET_KEY environment variable is required"
