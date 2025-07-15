@@ -6,6 +6,8 @@ from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status, Query, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 import logging
 
 from ..db.base import get_db
