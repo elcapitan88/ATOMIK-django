@@ -3,6 +3,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 from app.core.config import settings
 import logging
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +73,27 @@ async def test_db_connection():
         logger.error(f"Error during connection test: {str(e)}")
         return False
 
+@asynccontextmanager
+async def get_db_context():
+    """
+    Async context manager for database sessions.
+    Useful for async with statements outside of FastAPI dependency injection.
+    """
+    if SessionLocal is None:
+        logger.error("Cannot create database session - SessionLocal is None")
+        raise Exception("Database session factory not initialized")
+        
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # Export everything needed by other modules
 __all__ = [
     "engine",
     "SessionLocal",
     "get_db",
-    "test_db_connection"
+    "test_db_connection",
+    "get_db_context"
 ]
