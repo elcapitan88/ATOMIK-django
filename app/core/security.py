@@ -122,6 +122,29 @@ async def get_current_active_user(
         )
     return current_user
 
+async def get_current_user_optional(
+    db: Session = Depends(get_db),
+    token: Optional[str] = Depends(oauth2_scheme)
+) -> Optional[User]:
+    """Get current user if token is valid, otherwise return None"""
+    if not token:
+        return None
+    
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
+        )
+        email: str = payload.get("sub")
+        if email is None:
+            return None
+        
+        user = db.query(User).filter(User.email == email).first()
+        return user
+    except JWTError:
+        return None
+
 
 def validate_password_strength(password: str) -> bool:
     """

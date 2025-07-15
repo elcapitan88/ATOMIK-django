@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     WEBSOCKET_RECONNECT_ATTEMPTS: int = 3
     WEBSOCKET_RECONNECT_DELAY: int = 5
 
+    # Maintenance Mode Settings
+    MAINTENANCE_MODE_ENABLED: bool = False
+    MAINTENANCE_MODE_MESSAGE: str = "The application is currently under maintenance. Please try again later."
+
     # CORS Settings
     CORS_ORIGINS: str = "http://localhost:3000,https://atomik-frontend-development.up.railway.app"
 

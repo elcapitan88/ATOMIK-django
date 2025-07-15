@@ -23,6 +23,8 @@ from app.websocket.manager import app_websocket_manager
 from app.db.base import init_db, get_db
 from app.db.session import engine, get_db
 from app.core.db_health import check_database_health
+from app.models.maintenance import MaintenanceSettings
+from app.core.security import get_current_user_optional
 # Token refresh now handled by separate token-refresh-service
 # Old trading websocket import removed
 
@@ -58,6 +60,84 @@ class CSPMiddleware:
         
         response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
         return response
+
+# Define Maintenance Mode Middleware
+class MaintenanceModeMiddleware:
+    def __init__(self, app: FastAPI):
+        self.app = app
+
+    async def __call__(self, request: Request, call_next: Callable):
+        # Skip maintenance check for certain paths
+        excluded_paths = [
+            "/api/v1/admin/maintenance",         # Allow admin to toggle maintenance
+            "/api/v1/admin/maintenance/status",  # Allow public maintenance status check
+            "/api/v1/auth/login",                # Allow login
+            "/health",                           # Health checks
+            "/docs",                             # API docs
+            "/openapi.json"                      # OpenAPI spec
+        ]
+        
+        # Skip maintenance check for excluded paths
+        if request.url.path in excluded_paths or request.url.path.startswith("/docs"):
+            return await call_next(request)
+        
+        try:
+            # Get database session
+            db_gen = get_db()
+            db = next(db_gen)
+            
+            try:
+                # Check maintenance status
+                maintenance = db.query(MaintenanceSettings).order_by(MaintenanceSettings.updated_at.desc()).first()
+                
+                if maintenance and maintenance.is_enabled:
+                    # Try to get current user from Authorization header
+                    auth_header = request.headers.get("Authorization")
+                    user = None
+                    
+                    if auth_header and auth_header.startswith("Bearer "):
+                        token = auth_header.split(" ")[1]
+                        try:
+                            from jose import jwt
+                            payload = jwt.decode(
+                                token,
+                                settings.SECRET_KEY,
+                                algorithms=[settings.ALGORITHM]
+                            )
+                            email = payload.get("sub")
+                            if email:
+                                from app.models.user import User
+                                user = db.query(User).filter(User.email == email).first()
+                        except Exception:
+                            pass
+                    
+                    # Check if user is admin
+                    is_admin = user and (
+                        user.username == 'admin' or 
+                        (hasattr(user, 'app_role') and user.app_role in ['admin', 'superadmin']) or
+                        (hasattr(user, 'role') and user.role in ['admin', 'superadmin'])
+                    )
+                    
+                    if not is_admin:
+                        # Return maintenance mode response
+                        message = maintenance.message or settings.MAINTENANCE_MODE_MESSAGE
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "detail": "Service temporarily unavailable",
+                                "message": message,
+                                "maintenance_mode": True
+                            }
+                        )
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            # If there's an error checking maintenance status, continue normally
+            logger.warning(f"Error checking maintenance status: {e}")
+        
+        return await call_next(request)
 
 
 @asynccontextmanager
@@ -163,6 +243,9 @@ background_tasks: Set[asyncio.Task] = set()
 
 # Add CSP middleware first
 app.middleware("http")(CSPMiddleware(app))
+
+# Add Maintenance Mode middleware
+app.middleware("http")(MaintenanceModeMiddleware(app))
 
 # Configure CORS - Debug: Allow all origins temporarily
 cors_origins = ["*"] if settings.ENVIRONMENT == "development" else settings.cors_origins_list

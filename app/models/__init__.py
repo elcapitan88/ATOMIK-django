@@ -7,6 +7,7 @@ from .websocket import WebSocketConnection
 from .subscription import Subscription
 from .order import Order
 from .trade import Trade, TradeExecution
+from .maintenance import MaintenanceSettings
 
 # This ensures all models are registered
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "Subscription",
     "Order",
     "Trade",
-    "TradeExecution"
+    "TradeExecution",
+    "MaintenanceSettings"
 ]

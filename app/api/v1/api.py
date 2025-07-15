@@ -1,6 +1,6 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, binance, futures_contracts
+from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, binance, futures_contracts, admin
 # Temporarily disabled strategy_ai endpoints to fix startup issues
 # from .endpoints.strategy_ai import interpret_router, generate_router, templates_router, context_router
 from typing import Optional
@@ -19,6 +19,7 @@ api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(subscription.router, prefix="/subscriptions", tags=["subscriptions"])
+api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 # Removed trades and chat_app_websocket routers - not available in production
 api_router.include_router(futures_contracts.router, prefix="/futures-contracts", tags=["futures-contracts"])
 
