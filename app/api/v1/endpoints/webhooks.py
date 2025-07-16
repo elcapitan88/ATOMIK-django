@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Body, Response
 from sqlalchemy.orm import Session
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional
 from pydantic import BaseModel
@@ -13,7 +12,7 @@ import os
 
 from ....models.webhook import Webhook, WebhookLog, WebhookSubscription, WebhookRating
 from ....core.security import get_current_user
-from ....db.session import get_db, get_async_db, async_engine
+from ....db.session import get_db
 from ....models.user import User
 from ....models.webhook import Webhook, WebhookLog
 from ....models.subscription import Subscription
@@ -175,7 +174,6 @@ async def webhook_endpoint(
     payload: WebhookPayload,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    async_db: AsyncSession = Depends(get_async_db),
     secret: Optional[str] = None  # Add this to get the secret from query params
 ):
     """Handle incoming webhook requests"""
@@ -213,18 +211,9 @@ async def webhook_endpoint(
                     detail="IP not allowed"
                 )
 
-        # Choose optimal webhook processor based on environment
-        is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        use_railway_optimization = is_on_railway and async_engine is not None
-        
-        if use_railway_optimization:
-            # Use Railway-optimized processor for better performance
-            webhook_processor = RailwayOptimizedWebhookProcessor(async_db)
-            logger.info("Using Railway-optimized webhook processor")
-        else:
-            # Fallback to standard processor
-            webhook_processor = WebhookProcessor(db)
-            logger.info("Using standard webhook processor")
+        # Use standard webhook processor
+        webhook_processor = WebhookProcessor(db)
+        logger.info("Using standard webhook processor")
         
         # Check rate limiting (10 requests per second for HFT support)
         # Use optimized pipeline version for Railway-optimized processing
