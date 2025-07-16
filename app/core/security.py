@@ -135,7 +135,11 @@ async def get_current_user(
         token_type: str = payload.get("type")
         
         if email is None or token_type != "access":
-            logger.warning("Invalid token claims")
+            # More specific logging for debugging
+            if email is None:
+                logger.warning("Token validation failed: missing email in sub claim")
+            elif token_type != "access":
+                logger.warning(f"Token validation failed: invalid token type '{token_type}', expected 'access'")
             raise credentials_exception
             
         # Get user from database
@@ -155,7 +159,13 @@ async def get_current_user(
         return user
         
     except JWTError as e:
-        logger.error(f"JWT validation error: {str(e)}")
+        # More specific JWT error logging
+        if "Signature has expired" in str(e):
+            logger.info("JWT token has expired")
+        elif "Invalid token" in str(e):
+            logger.warning(f"Invalid JWT token structure: {str(e)}")
+        else:
+            logger.error(f"JWT validation error: {str(e)}")
         raise credentials_exception
     except Exception as e:
         logger.error(f"Error in get_current_user: {str(e)}")
@@ -201,7 +211,11 @@ async def get_current_user_from_query(
         token_type: str = payload.get("type")
         
         if email is None or token_type != "access":
-            logger.warning("Invalid token claims in query parameter")
+            # More specific logging for debugging
+            if email is None:
+                logger.warning("Query token validation failed: missing email in sub claim")
+            elif token_type != "access":
+                logger.warning(f"Query token validation failed: invalid token type '{token_type}', expected 'access'")
             raise credentials_exception
             
         # Get user from database
@@ -222,7 +236,13 @@ async def get_current_user_from_query(
         return user
         
     except JWTError as e:
-        logger.error(f"JWT validation error from query parameter: {str(e)}")
+        # More specific JWT error logging for query parameters
+        if "Signature has expired" in str(e):
+            logger.info("Query parameter JWT token has expired")
+        elif "Invalid token" in str(e):
+            logger.warning(f"Invalid query parameter JWT token structure: {str(e)}")
+        else:
+            logger.error(f"JWT validation error from query parameter: {str(e)}")
         raise credentials_exception
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -325,13 +345,23 @@ def get_user_from_token(token: str) -> Optional[str]:
         token_type: str = payload.get("type")
         
         if email is None or token_type != "access":
-            logger.warning("Invalid token claims")
+            # More specific logging for debugging
+            if email is None:
+                logger.warning("Token extraction failed: missing email in sub claim")
+            elif token_type != "access":
+                logger.warning(f"Token extraction failed: invalid token type '{token_type}', expected 'access'")
             return None
             
         return email
         
     except JWTError as e:
-        logger.error(f"JWT validation error: {str(e)}")
+        # More specific JWT error logging for token extraction
+        if "Signature has expired" in str(e):
+            logger.debug("JWT token has expired during extraction")
+        elif "Invalid token" in str(e):
+            logger.warning(f"Invalid JWT token structure during extraction: {str(e)}")
+        else:
+            logger.error(f"JWT validation error during extraction: {str(e)}")
         return None
     except Exception as e:
         logger.error(f"Error in get_user_from_token: {str(e)}")
@@ -407,7 +437,11 @@ async def get_current_user_flexible(
         token_type: str = payload.get("type")
         
         if email is None or token_type != "access":
-            logger.warning("Invalid token claims in flexible auth")
+            # More specific logging for debugging
+            if email is None:
+                logger.warning("Flexible auth validation failed: missing email in sub claim")
+            elif token_type != "access":
+                logger.warning(f"Flexible auth validation failed: invalid token type '{token_type}', expected 'access'")
             raise credentials_exception
             
         # Get user from database
@@ -428,7 +462,13 @@ async def get_current_user_flexible(
         return user
         
     except JWTError as e:
-        logger.error(f"JWT validation error in flexible auth: {str(e)}")
+        # More specific JWT error logging for flexible auth
+        if "Signature has expired" in str(e):
+            logger.info("JWT token has expired in flexible auth")
+        elif "Invalid token" in str(e):
+            logger.warning(f"Invalid JWT token structure in flexible auth: {str(e)}")
+        else:
+            logger.error(f"JWT validation error in flexible auth: {str(e)}")
         raise credentials_exception
     except HTTPException:
         # Re-raise HTTP exceptions as-is

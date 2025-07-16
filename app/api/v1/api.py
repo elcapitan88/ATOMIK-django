@@ -12,8 +12,12 @@ try:
     
     from .endpoints import admin
     logger.info("Admin endpoint imported successfully")
+    
+    # Import missing endpoints that are expected by frontend
+    from .endpoints import chat, chat_sse, feature_flags, interactivebrokers
+    logger.info("Chat, feature flags, and Interactive Brokers endpoints imported successfully")
 except Exception as e:
-    logger.error(f"Error importing admin endpoint: {e}")
+    logger.error(f"Error importing endpoints: {e}")
     import traceback
     logger.error(traceback.format_exc())
 
@@ -46,8 +50,27 @@ try:
 except Exception as e:
     logger.error(f"Error registering admin router: {e}")
 
-# Removed trades and chat_app_websocket routers - not available in production
-api_router.include_router(futures_contracts.router, prefix="/futures-contracts", tags=["futures-contracts"])
+# Register missing routers that are expected by frontend
+try:
+    logger.info("Registering missing routers...")
+    api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+    logger.info("Chat router registered")
+    
+    api_router.include_router(chat_sse.router, prefix="/chat", tags=["chat-sse"])
+    logger.info("Chat SSE router registered")
+    
+    api_router.include_router(feature_flags.router, prefix="/beta", tags=["features"])
+    logger.info("Feature flags router registered")
+    
+    api_router.include_router(interactivebrokers.router, prefix="/brokers/interactivebrokers", tags=["interactive-brokers"])
+    logger.info("Interactive Brokers router registered")
+    
+    api_router.include_router(futures_contracts.router, prefix="/futures-contracts", tags=["futures-contracts"])
+    logger.info("All missing routers registered successfully")
+except Exception as e:
+    logger.error(f"Error registering missing routers: {e}")
+    import traceback
+    logger.error(traceback.format_exc())
 
 # Define the callback route - Notice the change in the path
 @tradovate_callback_router.get("/tradovate/callback")  # Changed from "/api/tradovate/callback"
