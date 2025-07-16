@@ -272,43 +272,9 @@ class MaintenanceModeMiddleware:
             request.url.path == "/"):
             return await call_next(request)
 
-        # Check maintenance status
-        from app.models.maintenance import MaintenanceSettings
-        from app.db.session import SessionLocal
-        
-        db = SessionLocal()
-        try:
-            maintenance = db.query(MaintenanceSettings).first()
-            
-            if maintenance and maintenance.is_enabled:
-                # Check if user is admin
-                auth_header = request.headers.get("Authorization")
-                is_admin = False
-                
-                if auth_header and auth_header.startswith("Bearer "):
-                    token = auth_header.replace("Bearer ", "")
-                    try:
-                        user_email = get_user_from_token(token)
-                        if user_email:
-                            user = db.query(User).filter(User.email == user_email).first()
-                            if user and user.is_admin():
-                                is_admin = True
-                    except Exception:
-                        pass
-                
-                # Block non-admin users during maintenance
-                if not is_admin:
-                    message = maintenance.message or settings.MAINTENANCE_MODE_MESSAGE
-                    return JSONResponse(
-                        status_code=503,
-                        content={
-                            "detail": "Service temporarily unavailable due to maintenance",
-                            "message": message,
-                            "maintenance": True
-                        }
-                    )
-        finally:
-            db.close()
+        # Maintenance mode is now informational only - all users can access the app
+        # The frontend will check maintenance status via /api/v1/admin/maintenance/status
+        # and display notifications accordingly
 
         return await call_next(request)
 
