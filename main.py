@@ -20,7 +20,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 
 # Local imports
-from app.api.v1.api import api_router, tradovate_callback_router
+print("🔍 [MAIN] About to import API router...")
+try:
+    from app.api.v1.api import api_router, tradovate_callback_router
+    print("✅ [MAIN] API router imported successfully")
+except Exception as e:
+    print(f"❌ [MAIN] Failed to import API router: {e}")
+    import traceback
+    print(f"❌ [MAIN] Traceback: {traceback.format_exc()}")
+    
 from app.webhooks import rewardful
 from app.core.config import settings
 from app.db.base import init_db, get_db
