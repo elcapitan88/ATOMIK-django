@@ -340,9 +340,25 @@ class Config:
                 return raw_val
             return raw_val
 
-# Include routers
-app.include_router(tradovate_callback_router, prefix="/api")
-app.include_router(api_router, prefix="/api/v1")
+# Include routers with error handling
+try:
+    if 'tradovate_callback_router' in locals():
+        app.include_router(tradovate_callback_router, prefix="/api")
+        print("✅ [MAIN] Tradovate callback router registered")
+    else:
+        print("⚠️ [MAIN] Tradovate callback router not available")
+except Exception as e:
+    print(f"❌ [MAIN] Error registering tradovate callback router: {e}")
+
+try:
+    if 'api_router' in locals():
+        app.include_router(api_router, prefix="/api/v1")
+        print("✅ [MAIN] API router registered")
+    else:
+        print("❌ [MAIN] API router not available")
+except Exception as e:
+    print(f"❌ [MAIN] Error registering API router: {e}")
+
 app.include_router(rewardful.router)
 
 
