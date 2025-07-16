@@ -7,6 +7,7 @@ from .subscription import Subscription
 from .order import Order
 from .trade import Trade, TradeExecution
 from .maintenance import MaintenanceSettings
+from .affiliate import Affiliate, AffiliateReferral, AffiliateClick, AffiliatePayout
 
 # This ensures all models are registered
 __all__ = [
@@ -20,5 +21,9 @@ __all__ = [
     "Order",
     "Trade",
     "TradeExecution",
-    "MaintenanceSettings"
+    "MaintenanceSettings",
+    "Affiliate",
+    "AffiliateReferral",
+    "AffiliateClick",
+    "AffiliatePayout"
 ]

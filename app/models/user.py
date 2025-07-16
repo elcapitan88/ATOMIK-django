@@ -31,6 +31,7 @@ class User(Base):
     subscription = relationship("Subscription", back_populates="user", uselist=False)
     orders = relationship("Order", back_populates="user", cascade="all, delete-orphan")
     trades = relationship("Trade", back_populates="user", cascade="all, delete-orphan")
+    affiliate = relationship("Affiliate", back_populates="user", uselist=False)
     
     def __str__(self):
         return f"User(email={self.email})"
