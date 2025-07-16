@@ -1,6 +1,22 @@
 # app/api/v1/api.py
 from fastapi import APIRouter, Depends
-from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, binance, futures_contracts, admin
+import logging
+
+# Setup logging for import debugging
+logger = logging.getLogger(__name__)
+logger.info("Starting API router imports...")
+
+try:
+    from .endpoints import auth, broker, subscription, webhooks, strategy, tradovate, binance, futures_contracts
+    logger.info("Basic endpoints imported successfully")
+    
+    from .endpoints import admin
+    logger.info("Admin endpoint imported successfully")
+except Exception as e:
+    logger.error(f"Error importing admin endpoint: {e}")
+    import traceback
+    logger.error(traceback.format_exc())
+
 # Temporarily disabled strategy_ai endpoints to fix startup issues
 # from .endpoints.strategy_ai import interpret_router, generate_router, templates_router, context_router
 from typing import Optional
@@ -19,7 +35,17 @@ api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(strategy.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(subscription.router, prefix="/subscriptions", tags=["subscriptions"])
-api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+
+# Register admin router with logging
+try:
+    logger.info("Registering admin router...")
+    api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+    logger.info(f"Admin router registered successfully with {len(admin.router.routes)} routes")
+    for route in admin.router.routes:
+        logger.info(f"Admin route: {route.methods} {route.path}")
+except Exception as e:
+    logger.error(f"Error registering admin router: {e}")
+
 # Removed trades and chat_app_websocket routers - not available in production
 api_router.include_router(futures_contracts.router, prefix="/futures-contracts", tags=["futures-contracts"])
 
