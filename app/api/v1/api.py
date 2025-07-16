@@ -14,7 +14,7 @@ try:
     logger.info("Admin endpoint imported successfully")
     
     # Import missing endpoints that are expected by frontend
-    from .endpoints import chat, chat_sse, feature_flags, interactivebrokers
+    from .endpoints import chat, feature_flags, interactivebrokers
     logger.info("Chat, feature flags, and Interactive Brokers endpoints imported successfully")
 except Exception as e:
     logger.error(f"Error importing endpoints: {e}")
@@ -56,8 +56,6 @@ try:
     api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
     logger.info("Chat router registered")
     
-    api_router.include_router(chat_sse.router, prefix="/chat", tags=["chat-sse"])
-    logger.info("Chat SSE router registered")
     
     api_router.include_router(feature_flags.router, prefix="/beta", tags=["features"])
     logger.info("Feature flags router registered")

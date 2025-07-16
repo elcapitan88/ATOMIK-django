@@ -31,13 +31,6 @@ from app.schemas.chat import (
     ChatChannelWithUnreadCount,
     UserWithRole
 )
-from .chat_sse import (
-    broadcast_new_message,
-    broadcast_message_updated,
-    broadcast_message_deleted,
-    broadcast_reaction_added,
-    broadcast_reaction_removed
-)
 from app.services.chat_role_service import (
     assign_admin_role,
     assign_moderator_role,
@@ -366,14 +359,7 @@ async def send_message(
         db.add(new_member)
         db.commit()
     
-    # Broadcast the new message to all connected users
-    await broadcast_new_message(
-        message=new_message, 
-        user_name=current_user.username, 
-        user_role_color=role_color, 
-        user_profile_picture=current_user.profile_picture, 
-        db=db
-    )
+    # Note: Real-time broadcasting now handled by Application WebSocket
     
     return ChatMessageSchema(
         id=new_message.id,
@@ -437,8 +423,7 @@ async def edit_message(
     
     role_color = user_role.role_color if user_role else '#FFFFFF'
     
-    # Broadcast the message update
-    await broadcast_message_updated(message, current_user.username, role_color, current_user.profile_picture, db)
+    # Note: Real-time broadcasting now handled by Application WebSocket
     
     return ChatMessageSchema(
         id=message.id,
@@ -485,8 +470,7 @@ async def delete_message(
     
     db.commit()
     
-    # Broadcast the message deletion
-    await broadcast_message_deleted(message_id, message.channel_id, db)
+    # Note: Real-time broadcasting now handled by Application WebSocket
     
     return {"detail": "Message deleted successfully"}
 
@@ -534,8 +518,7 @@ async def add_reaction(
     db.commit()
     db.refresh(new_reaction)
     
-    # Broadcast the reaction addition
-    await broadcast_reaction_added(new_reaction, current_user.username, db)
+    # Note: Real-time broadcasting now handled by Application WebSocket
     
     return new_reaction
 
@@ -566,8 +549,7 @@ async def remove_reaction(
     db.delete(reaction)
     db.commit()
     
-    # Broadcast the reaction removal
-    await broadcast_reaction_removed(message_id, current_user.id, emoji, current_user.username, db)
+    # Note: Real-time broadcasting now handled by Application WebSocket
     
     return {"detail": "Reaction removed successfully"}
 
