@@ -1092,3 +1092,54 @@ class TradovateBroker(BaseBroker):
     ) -> Dict[str, Any]:
         """Initialize API key connection - Not supported for Tradovate"""
         raise NotImplementedError("Tradovate does not support API key authentication")
+
+    async def refresh_credentials(self, credentials: BrokerCredentials) -> BrokerCredentials:
+        """
+        Refresh Tradovate credentials by delegating to the token-refresh-service.
+        
+        This method serves as a compatibility layer for the abstract BaseBroker interface.
+        Actual token refresh operations are handled by the dedicated token-refresh-service
+        which runs as a separate microservice and automatically refreshes tokens before expiration.
+        
+        Args:
+            credentials: The broker credentials to refresh
+            
+        Returns:
+            BrokerCredentials: The refreshed credentials
+            
+        Raises:
+            AuthenticationError: If credentials are invalid or refresh fails
+        """
+        try:
+            logger.info(f"Refresh credentials requested for Tradovate account {credentials.id}")
+            
+            # Validate current credentials first
+            if not await self.validate_credentials(credentials):
+                # Check if token is expired
+                if credentials.expires_at and credentials.expires_at <= datetime.utcnow():
+                    logger.warning(f"Token expired for Tradovate account {credentials.id}")
+                    
+                    # Update credential status to indicate refresh is needed
+                    credentials.is_valid = False
+                    credentials.last_refresh_error = "Token expired - refresh handled by token-refresh-service"
+                    self.db.commit()
+                    
+                    raise AuthenticationError(
+                        "Token has expired. The token-refresh-service will automatically refresh it. "
+                        "Please retry your request in a few moments."
+                    )
+                else:
+                    logger.error(f"Invalid credentials for Tradovate account {credentials.id}")
+                    raise AuthenticationError("Invalid credentials cannot be refreshed")
+            
+            # Token is valid, return as-is
+            # The token-refresh-service handles proactive refresh based on expiration thresholds
+            logger.info(f"Credentials are valid for Tradovate account {credentials.id}")
+            return credentials
+            
+        except AuthenticationError:
+            # Re-raise authentication errors as-is
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in refresh_credentials for Tradovate account {credentials.id}: {str(e)}")
+            raise AuthenticationError(f"Credential refresh failed: {str(e)}")
