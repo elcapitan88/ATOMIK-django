@@ -263,11 +263,12 @@ class MaintenanceModeMiddleware:
         self.app = app
 
     async def __call__(self, request: Request, call_next: Callable):
-        # Skip maintenance check for static files and admin paths
+        # Skip maintenance check for static files, docs, and auth endpoints
         if (request.url.path.startswith("/static/") or 
             request.url.path.startswith("/docs") or 
             request.url.path.startswith("/redoc") or
             request.url.path.startswith("/openapi.json") or
+            request.url.path.startswith("/api/v1/auth/") or  # Allow login/auth during maintenance
             request.url.path == "/"):
             return await call_next(request)
 
