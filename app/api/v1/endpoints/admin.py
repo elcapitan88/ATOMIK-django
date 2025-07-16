@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Test endpoint to verify admin router is working
+@router.get("/test")
+def test_admin_endpoint():
+    """Test endpoint to verify admin router is loaded"""
+    return {"message": "Admin router is working!", "status": "success"}
+
 # Pydantic schemas for maintenance endpoints
 class MaintenanceSettingsResponse(BaseModel):
     is_enabled: bool
