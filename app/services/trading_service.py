@@ -47,8 +47,8 @@ class OrderStatusMonitoringService:
             logger.warning(f"Attempted to monitor invalid order ID: {order_id}")
             return
 
-        # Use proper session context manager
-        with get_db_context() as db:
+        # Use proper async session context manager
+        async with get_db_context() as db:
             try:
                 # Check if order exists in database
                 order = db.query(Order).filter(
@@ -142,7 +142,7 @@ class OrderStatusMonitoringService:
         account = monitor_data["account"]
         
         # Use proper session context manager for each check
-        with get_db_context() as db:
+        async with get_db_context() as db:
             try:
                 # Get broker instance
                 broker = BaseBroker.get_broker_instance(account.broker_id, db)

@@ -846,6 +846,20 @@ class TradovateBroker(BaseBroker):
             # Log raw response immediately
             logger.info(f"Raw Tradovate API Response: {json.dumps(raw_response, indent=2)}")
 
+            # Check for failure response first
+            if raw_response.get('failureReason') or raw_response.get('failureText'):
+                failure_reason = raw_response.get('failureReason', 'Unknown')
+                failure_text = raw_response.get('failureText', 'No details provided')
+                error_msg = f"Order failed - {failure_reason}: {failure_text}".strip(': ')
+                
+                logger.error(f"Tradovate order placement failed: {error_msg}")
+                raise OrderError(error_msg)
+
+            # Check if orderId is present (indicates successful order placement)
+            if not raw_response.get('orderId'):
+                logger.error("No orderId in response - order may have failed")
+                raise OrderError("Order placement failed - no order ID returned")
+
             # Then transform for our normalized response
             normalized_response = {
                 "order_id": str(raw_response.get('orderId')),
