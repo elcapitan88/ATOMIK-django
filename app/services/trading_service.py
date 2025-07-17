@@ -90,7 +90,7 @@ class OrderStatusMonitoringService:
                 self._active_monitors[order_id] = {
                     "account": account,
                     "last_check": datetime.utcnow(),
-                    "next_check": datetime.utcnow(),  # Start checking right away
+                    "next_check": datetime.utcnow() + timedelta(seconds=0.5),  # Small delay for Tradovate to process
                     "check_count": 0,
                     "backoff_factor": 1.0,
                     "user_id": user_id,
@@ -154,6 +154,12 @@ class OrderStatusMonitoringService:
                 order = db.query(Order).get(monitor_data["order_db_id"])
                 if order:
                     old_status = order.status
+                    
+                    # Handle error status - don't update order status to "error"
+                    if status_result.get("status") == "error":
+                        logger.warning(f"Error checking order {order_id}: {status_result.get('error_message', 'Unknown error')}")
+                        # Continue monitoring, don't update status
+                        continue
                     
                     # Update order fields
                     order.status = status_result.get("status", order.status)

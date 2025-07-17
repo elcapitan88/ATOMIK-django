@@ -923,12 +923,26 @@ class TradovateBroker(BaseBroker):
             headers = self._get_auth_headers(account.credentials)
             
             # Make request to get order details
-            response = await self._make_request(
-                'GET',
-                f"{api_url}/order/get",
-                params={"orderId": int(order_id)},
-                headers=headers
-            )
+            # Try /order/item endpoint first (documented endpoint for single order)
+            try:
+                response = await self._make_request(
+                    'GET',
+                    f"{api_url}/order/item",
+                    params={"id": int(order_id)},
+                    headers=headers
+                )
+            except ConnectionError as e:
+                if "404" in str(e):
+                    # Fallback to /order/find if item endpoint fails
+                    logger.debug(f"Order {order_id} not found with /order/item, trying /order/find")
+                    response = await self._make_request(
+                        'GET',
+                        f"{api_url}/order/find",
+                        params={"id": int(order_id)},
+                        headers=headers
+                    )
+                else:
+                    raise
             
             if not response:
                 raise ConnectionError(f"Empty response when fetching order {order_id}")
