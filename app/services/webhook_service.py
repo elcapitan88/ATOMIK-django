@@ -448,7 +448,7 @@ class RailwayOptimizedWebhookProcessor:
     for ultra-fast response times when running on Railway infrastructure
     """
     
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: Session):
         self.db = db
         self.is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
         
@@ -490,13 +490,10 @@ class RailwayOptimizedWebhookProcessor:
                 # Find associated strategies using async database query
                 # Use options to avoid loading joined relationships that cause unique() requirement
                 from sqlalchemy.orm import selectinload, noload
-                strategies_result = await self.db.execute(
-                    select(ActivatedStrategy)
-                    .options(noload(ActivatedStrategy.follower_accounts_with_quantities))
-                    .where(ActivatedStrategy.webhook_id == webhook.token)
-                    .where(ActivatedStrategy.is_active == True)
-                )
-                strategies = strategies_result.scalars().all()
+                strategies = self.db.query(ActivatedStrategy).filter(
+                    ActivatedStrategy.webhook_id == webhook.token,
+                    ActivatedStrategy.is_active == True
+                ).all()
 
                 if not strategies:
                     # Calculate processing time even for early returns
