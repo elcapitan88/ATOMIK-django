@@ -969,9 +969,16 @@ class TradovateBroker(BaseBroker):
             }
             
             # Normalize the response with complete information
+            raw_status = response.get("orderStatus", "")
+            mapped_status = status_mapping.get(raw_status, "pending")  # Default to pending if unknown
+            
+            # Log unmapped statuses for debugging
+            if raw_status and raw_status not in status_mapping:
+                logger.warning(f"Unmapped order status '{raw_status}' for order {order_id}, defaulting to 'pending'")
+            
             normalized_response = {
                 "order_id": str(order_id),
-                "status": status_mapping.get(response.get("orderStatus", ""), "unknown"),
+                "status": mapped_status,
                 "filled_quantity": response.get("filledQuantity", 0),
                 "remaining_quantity": response.get("remainingQuantity", 0),
                 "average_price": response.get("avgFillPrice"),
