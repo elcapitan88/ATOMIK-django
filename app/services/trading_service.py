@@ -159,7 +159,7 @@ class OrderStatusMonitoringService:
                     if status_result.get("status") == "error":
                         logger.warning(f"Error checking order {order_id}: {status_result.get('error_message', 'Unknown error')}")
                         # Continue monitoring, don't update status
-                        continue
+                        return
                     
                     # Update order fields
                     order.status = status_result.get("status", order.status)
