@@ -211,6 +211,9 @@ async def webhook_endpoint(
                     detail="IP not allowed"
                 )
 
+        # Detect Railway environment for optimizations
+        use_railway_optimization = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        
         # Use standard webhook processor
         webhook_processor = WebhookProcessor(db)
         logger.info("Using standard webhook processor")
