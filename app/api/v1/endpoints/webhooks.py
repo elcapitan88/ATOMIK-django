@@ -214,9 +214,13 @@ async def webhook_endpoint(
         # Detect Railway environment for optimizations
         use_railway_optimization = os.getenv("RAILWAY_ENVIRONMENT") is not None
         
-        # Use standard webhook processor
-        webhook_processor = WebhookProcessor(db)
-        logger.info("Using standard webhook processor")
+        # Choose processor based on environment
+        if use_railway_optimization:
+            webhook_processor = RailwayOptimizedWebhookProcessor(db)
+            logger.info("Using Railway-optimized webhook processor")
+        else:
+            webhook_processor = WebhookProcessor(db)
+            logger.info("Using standard webhook processor")
         
         # Check rate limiting (10 requests per second for HFT support)
         # Use optimized pipeline version for Railway-optimized processing
