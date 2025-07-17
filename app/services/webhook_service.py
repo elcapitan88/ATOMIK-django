@@ -28,7 +28,6 @@ class WebhookProcessor:
     def __init__(self, db: Session):
         self.db = db
         self.strategy_processor = StrategyProcessor(db)
-        self.is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
     
     def _generate_idempotency_key(self, webhook_id: int, payload: Dict[str, Any]) -> str:
         """Generate idempotency key from webhook ID and payload content"""
@@ -65,29 +64,6 @@ class WebhookProcessor:
                 return None
             except Exception as e:
                 logger.error(f"Unexpected error during idempotency check: {e}")
-                return None
-
-    def _check_and_set_idempotency_pipeline(self, key: str, response_data: Dict[str, Any], ttl: int = 300) -> Optional[Dict[str, Any]]:
-        """Optimized idempotency check using Redis pipeline for Railway optimization"""
-        with get_redis_connection() as redis_client:
-            if not redis_client:
-                return None
-            
-            try:
-                # Use pipeline for atomic operations
-                pipe = redis_client.pipeline()
-                pipe.get(key)  # Check if key exists
-                pipe.setex(key, ttl, json.dumps(response_data))  # Set the key
-                results = pipe.execute()
-                
-                existing_response = results[0]
-                if existing_response:
-                    return json.loads(existing_response)
-                
-                return None
-                
-            except Exception as e:
-                logger.warning(f"Redis pipeline idempotency check failed: {e}")
                 return None
 
     def verify_signature(self, payload: str, signature: str, secret: str) -> bool:
@@ -214,35 +190,30 @@ class WebhookProcessor:
                 
                 for strategy in strategies:
                     try:
-                        # Create order data using strategy settings
-                        signal_data = {
-                            "action": normalized_payload["action"],
-                            "symbol": strategy.ticker,
-                            "quantity": strategy.quantity if strategy.strategy_type == 'single' else strategy.leader_quantity,
-                            "order_type": "MARKET",
-                            "time_in_force": "GTC",
-                        }
+                        with logging_context(strategy_id=strategy.id, strategy_type=strategy.strategy_type):
+                            # Create order data using strategy settings
+                            signal_data = {
+                                "action": normalized_payload["action"],
+                                "symbol": strategy.ticker,
+                                "quantity": strategy.quantity if strategy.strategy_type == 'single' else strategy.leader_quantity,
+                                "order_type": "MARKET",  # Default to market orders for now
+                                "time_in_force": "GTC",  # Good Till Cancelled
+                            }
 
-                        # Use Railway optimization for direct execution when available
-                        if self.is_railway:
-                            strategy_result = await self._execute_strategy_direct(strategy, signal_data)
-                        else:
-                            with logging_context(strategy_id=strategy.id, strategy_type=strategy.strategy_type):
-                                logger.info(f"Executing strategy {strategy.id} with signal", 
-                                           operation="strategy_execution",
-                                           extra_context={"signal_data": signal_data})
-                                
-                                strategy_result = await self.strategy_processor.execute_strategy(
-                                    strategy=strategy,
-                                    signal_data=signal_data
-                                )
-                        
-                        results.append({
-                            "strategy_id": strategy.id,
-                            "result": strategy_result
-                        })
-                        
-                        if not self.is_railway:
+                            logger.info(f"Executing strategy {strategy.id} with signal", 
+                                       operation="strategy_execution",
+                                       extra_context={"signal_data": signal_data})
+                            
+                            strategy_result = await self.strategy_processor.execute_strategy(
+                                strategy=strategy,
+                                signal_data=signal_data
+                            )
+                            
+                            results.append({
+                                "strategy_id": strategy.id,
+                                "result": strategy_result
+                            })
+                            
                             logger.info(f"Strategy {strategy.id} execution completed successfully", 
                                        operation="strategy_execution",
                                        extra_context={"result_status": strategy_result.get("status")})
@@ -402,12 +373,7 @@ class WebhookProcessor:
                 return self._validate_rate_limit_db(webhook, client_ip)
     
     def check_rate_limit(self, webhook: Webhook, client_ip: str) -> bool:
-        """Check if request exceeds rate limit using Redis sliding window with Railway optimization"""
-        # Use pipeline optimization for Railway environment
-        if self.is_railway:
-            return self.check_rate_limit_pipeline(webhook, client_ip)
-        
-        # Standard rate limiting for non-Railway environments
+        """Check if request exceeds rate limit using Redis sliding window"""
         with get_redis_connection() as redis_client:
             if not redis_client:
                 logger.debug("Redis not available, falling back to database rate limiting")
@@ -475,52 +441,330 @@ class WebhookProcessor:
             # On error, allow the request (fail open for availability)
             return True
 
-    async def _execute_strategy_direct(self, strategy, signal_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Direct strategy execution optimized for Railway environment"""
+
+class RailwayOptimizedWebhookProcessor:
+    """
+    Railway-optimized webhook processor using async database operations
+    for ultra-fast response times when running on Railway infrastructure
+    """
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.is_on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        
+    async def process_webhook_fast(
+        self,
+        webhook: Webhook,
+        payload: Dict[str, Any],
+        client_ip: str
+    ) -> Dict[str, Any]:
+        """
+        Ultra-optimized webhook processing with minimal logging overhead
+        Expected performance: ~3-5ms on Railway
+        """
+        start_time = datetime.utcnow()
+        
+        # Minimal correlation tracking (skip expensive logging context)
+        correlation_id = CorrelationManager.set_correlation_id()
+        
+        # Essential logging only - webhook accepted
+        logger.info(f"Webhook {webhook.id} accepted")
+        
+        # Check for duplicate request using optimized pipeline (1 second TTL for HFT support)
+        idempotency_key = self._generate_idempotency_key(webhook.id, payload)
+        
+        # Pre-built response structure for faster caching (avoid repeated timestamp conversion)
+        processing_response = {
+            "status": "accepted",
+            "message": "Webhook received and being processed",
+            "webhook_id": webhook.id,
+            "timestamp": start_time.isoformat(),
+            "railway_optimized": True
+        }
+        
+        cached_response = self._check_and_set_idempotency_pipeline(idempotency_key, processing_response, ttl=1)
+        if cached_response:
+            return cached_response
+            
         try:
+                # Find associated strategies using async database query
+                # Use options to avoid loading joined relationships that cause unique() requirement
+                from sqlalchemy.orm import selectinload, noload
+                strategies_result = await self.db.execute(
+                    select(ActivatedStrategy)
+                    .options(noload(ActivatedStrategy.follower_accounts_with_quantities))
+                    .where(ActivatedStrategy.webhook_id == webhook.token)
+                    .where(ActivatedStrategy.is_active == True)
+                )
+                strategies = strategies_result.scalars().all()
+
+                if not strategies:
+                    # Calculate processing time even for early returns
+                    processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+                    return {
+                        "status": "warning", 
+                        "message": "No active strategies found for this webhook",
+                        "processing_time_ms": round(processing_time, 2),
+                        "railway_optimized": True
+                    }
+
+                # Essential logging only - webhook triggered
+                logger.info(f"Webhook {webhook.id} triggered {len(strategies)} strategies")
+
+                # CRITICAL FIX: Normalize payload first to handle WEBHOOKACTION.BUY -> BUY
+                normalized_payload = self.normalize_payload(webhook.source_type, payload)
+                
+                # Process strategies (keeping existing logic but with async DB operations)
+                results = []
+                strategy_errors = []
+                
+                for strategy in strategies:
+                    try:
+                        # Create order data using strategy settings with NORMALIZED action
+                        signal_data = {
+                            "action": normalized_payload.get("action", "BUY"),  # Use normalized action
+                            "symbol": strategy.ticker,
+                            "quantity": strategy.quantity if strategy.strategy_type == 'single' else strategy.leader_quantity,
+                            "order_type": "MARKET",
+                            "time_in_force": "GTC",
+                        }
+                        
+                        # Process with strategy processor (this can be optimized further if needed)
+                        result = await self._process_strategy_async(strategy, signal_data)
+                        
+                        # Transform result to show more detail
+                        detailed_result = {
+                            "strategy_id": strategy.id,
+                            "status": "processed" if result.get("result") else "error",
+                            "signal_data": signal_data,
+                            "execution_result": result.get("result"),  # Show actual broker response
+                            "message": f"Strategy {strategy.id} processed successfully" if result.get("result") else f"Strategy {strategy.id} failed"
+                        }
+                        results.append(detailed_result)
+                        
+                    except Exception as strategy_error:
+                        error_msg = f"Error processing strategy {strategy.id}: {str(strategy_error)}"
+                        logger.error(error_msg, exc_info=True)
+                        strategy_errors.append(error_msg)
+
+                # Calculate processing time
+                processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+
+                # Return optimized response with minimal fields
+                return {
+                    "status": "success" if not strategy_errors else "partial_success",
+                    "message": f"Processed {len(results)} strategies" + (f", {len(strategy_errors)} errors" if strategy_errors else ""),
+                    "webhook_id": webhook.id,
+                    "results": results,
+                    "processing_time_ms": round(processing_time, 2),
+                    "railway_optimized": True
+                }
+                
+        except Exception as e:
+            processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+            logger.error(f"Webhook {webhook.id} processing failed: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Webhook processing failed: {str(e)}",
+                "webhook_id": webhook.id,
+                "processing_time_ms": round(processing_time, 2),
+                "railway_optimized": True
+            }
+    
+    def _generate_idempotency_key(self, webhook_id: int, payload: Dict[str, Any]) -> str:
+        """Generate idempotency key from webhook ID and payload content"""
+        key_data = {
+            "webhook_id": webhook_id,
+            "action": payload.get("action"),
+            "timestamp": payload.get("timestamp", ""),
+            "source": payload.get("source", "")
+        }
+        key_string = json.dumps(key_data, sort_keys=True)
+        key_hash = hashlib.sha256(key_string.encode()).hexdigest()
+        return f"webhook_idempotency:{webhook_id}:{key_hash[:16]}"
+    
+    def _check_and_set_idempotency_pipeline(self, key: str, response_data: Dict[str, Any], ttl: int = 1) -> Optional[Dict[str, Any]]:
+        """Optimized idempotency check using Redis pipeline with orjson for faster performance."""
+        with get_redis_connection() as redis_client:
+            if not redis_client:
+                return None
+            
+            try:
+                # Use orjson for faster JSON serialization
+                import orjson
+                
+                # Use pipeline for atomic operations
+                pipe = redis_client.pipeline()
+                pipe.get(key)  # Check if key exists
+                pipe.setex(key, ttl, orjson.dumps(response_data))  # Set the key with orjson
+                results = pipe.execute()
+                
+                existing_response = results[0]
+                if existing_response:
+                    return orjson.loads(existing_response)
+                
+                return None
+                
+            except Exception as e:
+                # Fallback to standard json if orjson fails
+                try:
+                    pipe = redis_client.pipeline()
+                    pipe.get(key)
+                    pipe.setex(key, ttl, json.dumps(response_data))
+                    results = pipe.execute()
+                    
+                    existing_response = results[0]
+                    if existing_response:
+                        return json.loads(existing_response)
+                    return None
+                except:
+                    return None
+    
+    def _check_and_set_idempotency(self, key: str, response_data: Dict[str, Any], ttl: int = 1) -> Optional[Dict[str, Any]]:
+        """Check if request is duplicate and set idempotency key. Returns existing response if duplicate."""
+        with get_redis_connection() as redis_client:
+            if not redis_client:
+                logger.debug("Redis not available for idempotency check")
+                return None
+            
+            try:
+                # Check if key exists
+                existing_response = redis_client.get(key)
+                if existing_response:
+                    logger.info(f"Duplicate request detected for key: {key}")
+                    return json.loads(existing_response)
+                
+                # Set the key with TTL (1 second for HFT support)
+                redis_client.setex(key, ttl, json.dumps(response_data))
+                return None
+                
+            except RedisError as e:
+                logger.error(f"Redis idempotency check failed: {str(e)}")
+                return None
+    
+    async def _process_strategy_async(self, strategy: ActivatedStrategy, signal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process individual strategy by executing the actual trade with the broker
+        """
+        try:
+            # CRITICAL FIX: Bypass complex async infrastructure for Railway processor
+            # Execute strategy directly with broker to avoid async/sync conflicts
+            from app.db.session import SessionLocal
             from app.models.broker import BrokerAccount
             from app.core.brokers.base import BaseBroker
             from app.utils.ticker_utils import validate_ticker
             
-            # Get account with validation
-            account = self.db.query(BrokerAccount).filter(
-                BrokerAccount.account_id == strategy.account_id,
-                BrokerAccount.is_active == True
-            ).first()
-
-            if not account:
-                return {"status": "error", "error": "Trading account not found"}
-
-            # Validate account credentials
-            if not account.credentials or not account.credentials.is_valid:
-                return {"status": "error", "error": "Invalid or expired account credentials"}
-
-            # Get broker instance
-            broker = BaseBroker.get_broker_instance(account.broker_id, self.db)
-
-            # Ensure we have a valid contract ticker
-            valid, contract_ticker = validate_ticker(strategy.ticker)
-            if not valid:
-                return {"status": "error", "error": f"Invalid ticker format: {strategy.ticker}"}
-
-            # Prepare and execute order with the validated contract ticker
-            order_data = {
-                "account_id": account.account_id,
-                "symbol": contract_ticker,
-                "quantity": strategy.quantity,
-                "side": signal_data["action"],
-                "type": signal_data.get("order_type", "MARKET"),
-                "time_in_force": signal_data.get("time_in_force", "GTC"),
-            }
-
-            # Execute order
-            order_result = await broker.place_order(account, order_data)
+            # Execute the strategy (this sends the order to the broker)
+            logger.info(f"Executing trade for strategy {strategy.id}: {signal_data}")
             
-            return {
-                "status": "success",
-                "order_details": order_result
-            }
+            # Use sync session for direct broker execution
+            with SessionLocal() as sync_db:
+                # Get account with validation
+                account = sync_db.query(BrokerAccount).filter(
+                    BrokerAccount.account_id == strategy.account_id,
+                    BrokerAccount.is_active == True
+                ).first()
+
+                if not account:
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": "Trading account not found"}
+                    }
+
+                # Validate account credentials
+                if not account.credentials or not account.credentials.is_valid:
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": "Invalid or expired account credentials"}
+                    }
+
+                # Get broker instance
+                broker = BaseBroker.get_broker_instance(account.broker_id, sync_db)
+
+                # Ensure we have a valid contract ticker
+                valid, contract_ticker = validate_ticker(strategy.ticker)
+                if not valid:
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": f"Invalid ticker format: {strategy.ticker}"}
+                    }
+
+                # Prepare and execute order with the validated contract ticker
+                order_data = {
+                    "account_id": account.account_id,
+                    "symbol": contract_ticker,
+                    "quantity": strategy.quantity,
+                    "side": signal_data["action"],
+                    "type": signal_data.get("order_type", "MARKET"),
+                    "time_in_force": signal_data.get("time_in_force", "GTC"),
+                }
+
+                # Log the order details
+                logger.info(f"Executing order directly via broker API", extra_context={"order_data": order_data})
+
+                # Execute order
+                try:
+                    order_result = await broker.place_order(account, order_data)
                     
+                    # Log successful order execution
+                    logger.info(f"Order executed successfully for strategy {strategy.id}: {order_result}")
+                    
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {
+                            "status": "success",
+                            "order_details": order_result
+                        }
+                    }
+                    
+                except Exception as order_error:
+                    logger.error(f"Order execution failed for strategy {strategy.id}: {str(order_error)}")
+                    return {
+                        "strategy_id": strategy.id,
+                        "result": {"status": "error", "error": f"Order execution failed: {str(order_error)}"}
+                    }
         except Exception as e:
-            logger.error(f"Direct strategy execution failed: {str(e)}")
-            return {"status": "error", "error": str(e)}
+            logger.error(f"Strategy {strategy.id} execution failed: {str(e)}", exc_info=True)
+            return {
+                "strategy_id": strategy.id,
+                "result": {"status": "error", "error": str(e)}
+            }
+
+    def normalize_payload(self, source_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize webhook payload to standard format (copied from WebhookProcessor)"""
+        try:
+            # Handle Enum string representation
+            if 'action' in payload:
+                action_str = str(payload['action']).strip()
+                if '.' in action_str and 'WEBHOOKACTION' in action_str:
+                    action_str = action_str.split('.')[-1]
+                payload['action'] = action_str.upper()
+
+            # Rest of validation logic
+            if 'action' not in payload:
+                raise ValueError("Missing required field: action")
+
+            action = payload['action']
+            if action not in {'BUY', 'SELL'}:
+                raise ValueError(f"Invalid action: {action}. Must be BUY or SELL.")
+
+            # Create normalized payload
+            normalized = {
+                'action': action,
+                'timestamp': datetime.utcnow().isoformat(),
+                'source': source_type,
+            }
+
+            return normalized
+
+        except ValueError as ve:
+            raise HTTPException(
+                status_code=400,
+                detail=str(ve)
+            )
+        except Exception as e:
+            logger.error(f"Payload normalization failed: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid payload format: {str(e)}"
+            )

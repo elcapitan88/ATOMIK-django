@@ -211,27 +211,84 @@ async def webhook_endpoint(
                     detail="IP not allowed"
                 )
 
-        # Initialize unified webhook processor
+        # Use standard webhook processor
         webhook_processor = WebhookProcessor(db)
-        logger.info("Using unified webhook processor")
+        logger.info("Using standard webhook processor")
         
         # Check rate limiting (10 requests per second for HFT support)
+        # Use optimized pipeline version for Railway-optimized processing
         if hasattr(webhook_processor, 'check_rate_limit'):
-            rate_check = webhook_processor.check_rate_limit(webhook, client_ip)
+            if use_railway_optimization and hasattr(webhook_processor, 'check_rate_limit_pipeline'):
+                rate_check = webhook_processor.check_rate_limit_pipeline(webhook, client_ip)
+            else:
+                rate_check = webhook_processor.check_rate_limit(webhook, client_ip)
+                
             if not rate_check:
                 raise HTTPException(
                     status_code=429,
                     detail="Rate limit exceeded. Please wait before sending another request."
                 )
         
-        # Process webhook with unified processor
-        result = await webhook_processor.process_webhook(
+        # Convert the Pydantic model to a plain dictionary and ensure action is properly formatted
+        processed_payload = payload.dict()
+        
+        # Ensure action is a simple string value
+        if 'action' in processed_payload:
+            # Handle case where it's still the Enum string representation
+            if isinstance(processed_payload['action'], str):
+                if '.' in processed_payload['action'] and 'WEBHOOKACTION' in processed_payload['action']:
+                    processed_payload['action'] = processed_payload['action'].split('.')[-1]
+            # Always ensure it's uppercase
+            processed_payload['action'] = str(processed_payload['action']).upper()
+
+        if use_railway_optimization:
+            # Use Railway-optimized direct processing (faster response)
+            try:
+                result = await webhook_processor.process_webhook_fast(
+                    webhook=webhook,
+                    payload=processed_payload,
+                    client_ip=client_ip
+                )
+                logger.info(f"Railway-optimized webhook processed in {result.get('processing_time_ms', 'N/A')}ms")
+                return result
+            except Exception as e:
+                logger.error(f"Railway-optimized processing failed, falling back to standard: {str(e)}")
+                # Fallback to standard processing - create new processor
+                use_railway_optimization = False
+                webhook_processor = WebhookProcessor(db)
+                logger.info("Switched to standard webhook processor for fallback")
+        
+        # Standard processing with background tasks
+        idempotency_key = webhook_processor._generate_idempotency_key(webhook.id, processed_payload)
+        
+        response_data = {
+            "status": "accepted", 
+            "message": "Webhook received and being processed",
+            "webhook_id": webhook.id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "railway_optimized": use_railway_optimization
+        }
+        
+        # Check if this is a duplicate request (1 second TTL for HFT support)
+        # Use optimized pipeline version when available
+        if hasattr(webhook_processor, '_check_and_set_idempotency_pipeline'):
+            cached_response = webhook_processor._check_and_set_idempotency_pipeline(idempotency_key, response_data, ttl=1)
+        else:
+            cached_response = webhook_processor._check_and_set_idempotency(idempotency_key, response_data, ttl=1)
+            
+        if cached_response:
+            logger.info(f"Duplicate webhook request detected, returning cached response")
+            return cached_response
+
+        # Pass the processed payload to the background task
+        background_tasks.add_task(
+            webhook_processor.process_webhook,
             webhook=webhook,
-            payload=payload.dict(),
+            payload=processed_payload,
             client_ip=client_ip
         )
-        
-        return result
+
+        return response_data
 
     except HTTPException as he:
         raise he
