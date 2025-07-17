@@ -62,7 +62,10 @@ class TradovateBroker(BaseBroker):
     ) -> Any:
         """Make HTTP request to Tradovate API"""
         try:
-            async with aiohttp.ClientSession() as session:
+            # Set reasonable timeout to prevent hanging requests
+            timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 request_kwargs = {
                     'method': method,
                     'url': url,
@@ -85,6 +88,9 @@ class TradovateBroker(BaseBroker):
                     
                     return json.loads(response_text) if response_text else None
 
+        except asyncio.TimeoutError:
+            logger.error(f"Request to {url} timed out after 30 seconds")
+            raise ConnectionError(f"Request to {url} timed out")
         except Exception as e:
             logger.error(f"Request error: {str(e)}")
             raise
