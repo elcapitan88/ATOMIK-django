@@ -7,7 +7,7 @@ def get_tickers() -> Dict[str, str]:
 
 def get_display_tickers() -> List[str]:
     """Get display tickers for validation"""
-    return FuturesContractManager.FUTURES_SYMBOLS
+    return FuturesContractManager.FUTURES_SYMBOLS + FuturesContractManager.MONTHLY_FUTURES_SYMBOLS
 
 def get_contract_ticker(display_ticker: str) -> str:
     """Get full contract spec for a display ticker"""
@@ -17,11 +17,12 @@ def get_contract_ticker(display_ticker: str) -> str:
 def get_display_ticker(contract_ticker: str) -> str:
     """Convert full contract to display ticker"""
     # First check if it's already a display ticker
-    if contract_ticker in FuturesContractManager.FUTURES_SYMBOLS:
+    all_symbols = FuturesContractManager.FUTURES_SYMBOLS + FuturesContractManager.MONTHLY_FUTURES_SYMBOLS
+    if contract_ticker in all_symbols:
         return contract_ticker
     
     # Extract base symbol from contract ticker (e.g., "ESU5" -> "ES")
-    for symbol in FuturesContractManager.FUTURES_SYMBOLS:
+    for symbol in all_symbols:
         if contract_ticker.startswith(symbol):
             return symbol
     
@@ -32,13 +33,15 @@ def validate_ticker(ticker: str) -> Tuple[bool, str]:
     Validate if a ticker is supported.
     Accepts both display tickers (ES) and contract tickers (ESU5).
     """
-    # Check if it's a valid display ticker (e.g., "ES")
-    if ticker in FuturesContractManager.FUTURES_SYMBOLS:
+    all_symbols = FuturesContractManager.FUTURES_SYMBOLS + FuturesContractManager.MONTHLY_FUTURES_SYMBOLS
+    
+    # Check if it's a valid display ticker (e.g., "ES", "MBT")
+    if ticker in all_symbols:
         return True, get_contract_ticker(ticker)
     
-    # Check if it's a valid contract ticker (e.g., "ESU5")
+    # Check if it's a valid contract ticker (e.g., "ESU5", "MBTQ5")
     # Extract base symbol and validate
-    for symbol in FuturesContractManager.FUTURES_SYMBOLS:
+    for symbol in all_symbols:
         if ticker.startswith(symbol) and len(ticker) == len(symbol) + 2:
             # Verify it matches current contract format
             current_contracts = get_current_futures_contracts()
