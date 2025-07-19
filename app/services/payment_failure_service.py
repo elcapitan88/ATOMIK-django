@@ -6,6 +6,7 @@ import logging
 
 from app.models.subscription import Subscription, DunningStage
 from app.models.user import User
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
