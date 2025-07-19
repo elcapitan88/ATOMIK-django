@@ -495,8 +495,34 @@ async def toggle_strategy(
         if not strategy:
             raise HTTPException(status_code=404, detail="Strategy not found")
         
+        # Check if trying to activate and if at limit
+        if not strategy.is_active:
+            # Only check limits when activating (not when deactivating)
+            subscription_service = SubscriptionService(db)
+            can_add, message = subscription_service.can_add_resource(
+                current_user.id, 
+                "active_strategies"
+            )
+            
+            if not can_add and not settings.SKIP_SUBSCRIPTION_CHECK:
+                raise HTTPException(status_code=403, detail=message)
+        
         # Toggle the active status
+        old_status = strategy.is_active
         strategy.is_active = not strategy.is_active
+        
+        # Update subscription counter
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if subscription:
+            if strategy.is_active and not old_status:  # Being activated
+                subscription.active_strategies_count = (subscription.active_strategies_count or 0) + 1
+            elif not strategy.is_active and old_status:  # Being deactivated
+                if subscription.active_strategies_count > 0:
+                    subscription.active_strategies_count -= 1
+        
         db.commit()
         db.refresh(strategy)
         
@@ -546,9 +572,34 @@ async def update_strategy(
         
         # Update fields if provided
         if strategy_update.is_active is not None:
+            # Check limits if trying to activate a currently inactive strategy
+            if strategy_update.is_active and not strategy.is_active:
+                subscription_service = SubscriptionService(db)
+                can_add, message = subscription_service.can_add_resource(
+                    current_user.id, 
+                    "active_strategies"
+                )
+                
+                if not can_add and not settings.SKIP_SUBSCRIPTION_CHECK:
+                    raise HTTPException(status_code=403, detail=message)
+            
+            # Track old status for counter updates
+            old_status = strategy.is_active
             strategy.is_active = strategy_update.is_active
             changes_made = True
             logger.info(f"Updated is_active to {strategy_update.is_active}")
+            
+            # Update subscription counter
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == current_user.id
+            ).first()
+            
+            if subscription:
+                if strategy.is_active and not old_status:  # Being activated
+                    subscription.active_strategies_count = (subscription.active_strategies_count or 0) + 1
+                elif not strategy.is_active and old_status:  # Being deactivated
+                    if subscription.active_strategies_count > 0:
+                        subscription.active_strategies_count -= 1
         
         if strategy.strategy_type == "single":
             # Handle single strategy updates
