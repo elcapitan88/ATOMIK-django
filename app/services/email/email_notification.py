@@ -126,17 +126,6 @@ class PaymentEmailService:
 app_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # app/
 templates_dir = os.path.join(app_dir, "templates")
 
-# Debug logging
-logger.info(f"Email service template directory: {templates_dir}")
-logger.info(f"Template directory exists: {os.path.exists(templates_dir)}")
-if os.path.exists(templates_dir):
-    try:
-        logger.info(f"Template directory contents: {os.listdir(templates_dir)}")
-        emails_dir = os.path.join(templates_dir, "emails")
-        if os.path.exists(emails_dir):
-            logger.info(f"Emails subdirectory contents: {os.listdir(emails_dir)}")
-    except Exception as e:
-        logger.error(f"Error listing template directory: {e}")
 
 env = Environment(loader=FileSystemLoader(templates_dir))
 
@@ -161,9 +150,7 @@ async def send_email(
     try:
         # Load the template
         template_path = f"emails/{template}.html"
-        logger.info(f"Attempting to load template: {template_path}")
         template_obj = env.get_template(template_path)
-        logger.info(f"Template loaded successfully: {template_path}")
         
         # Render the template
         html_content = template_obj.render(**context)
