@@ -48,7 +48,7 @@ class PaymentFailureService:
                 return True
             
             # Check if this is first payment failure or subsequent
-            if subscription.dunning_stage == DunningStage.NONE:
+            if subscription.dunning_stage == 'none':
                 # First payment failure - start grace period
                 self._start_grace_period(subscription, failure_reason)
                 logger.info(f"Started grace period for subscription {subscription.id}")
@@ -128,7 +128,7 @@ class PaymentFailureService:
             
             # Get subscriptions that need advancement based on time thresholds
             subscriptions = self.db.query(Subscription).filter(
-                Subscription.dunning_stage.in_([DunningStage.WARNING, DunningStage.URGENT, DunningStage.FINAL]),
+                Subscription.dunning_stage.in_(['warning', 'urgent', 'final']),
                 Subscription.grace_period_ends_at.isnot(None)
             ).all()
             
@@ -138,11 +138,11 @@ class PaymentFailureService:
                 # Advance stages based on days in grace period
                 advancement_needed = False
                 
-                if subscription.dunning_stage == DunningStage.WARNING and days_in_grace >= 3:
+                if subscription.dunning_stage == 'warning' and days_in_grace >= 3:
                     advancement_needed = True
-                elif subscription.dunning_stage == DunningStage.URGENT and days_in_grace >= 6:
+                elif subscription.dunning_stage == 'urgent' and days_in_grace >= 6:
                     advancement_needed = True
-                elif subscription.dunning_stage == DunningStage.FINAL and days_in_grace >= 7:
+                elif subscription.dunning_stage == 'final' and days_in_grace >= 7:
                     advancement_needed = True
                 
                 if advancement_needed:
@@ -217,7 +217,7 @@ class PaymentFailureService:
             billing_portal_url = f"{settings.active_frontend_url}/billing"
             
             # Send appropriate email based on dunning stage
-            if subscription.dunning_stage == DunningStage.WARNING:
+            if subscription.dunning_stage == 'warning':
                 # First payment failure - start of grace period
                 asyncio.create_task(
                     PaymentEmailService.send_payment_failure_email(
@@ -228,7 +228,7 @@ class PaymentFailureService:
                         billing_portal_url=billing_portal_url
                     )
                 )
-            elif subscription.dunning_stage == DunningStage.URGENT:
+            elif subscription.dunning_stage == 'urgent':
                 # Reminder at 3 days
                 asyncio.create_task(
                     PaymentEmailService.send_grace_period_reminder(
@@ -238,7 +238,7 @@ class PaymentFailureService:
                         billing_portal_url=billing_portal_url
                     )
                 )
-            elif subscription.dunning_stage == DunningStage.FINAL:
+            elif subscription.dunning_stage == 'final':
                 # Final notice before suspension
                 asyncio.create_task(
                     PaymentEmailService.send_final_notice(
