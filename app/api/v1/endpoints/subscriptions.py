@@ -712,6 +712,71 @@ async def get_subscription_config():
         "environment": settings.ENVIRONMENT
     }
 
+@router.get("/status")
+async def get_subscription_status(
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get comprehensive subscription status including subscription data and resource usage"""
+    try:
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        
+        if not subscription:
+            raise HTTPException(status_code=404, detail="No subscription found")
+        
+        # Get resource counts
+        webhook_count = db.query(Webhook).filter(Webhook.user_id == current_user.id).count()
+        account_count = db.query(BrokerAccount).filter(BrokerAccount.user_id == current_user.id).count() 
+        strategy_count = db.query(ActivatedStrategy).filter(ActivatedStrategy.user_id == current_user.id).count()
+        
+        # Update counts in subscription
+        subscription.active_webhooks_count = webhook_count
+        subscription.connected_accounts_count = account_count
+        subscription.active_strategies_count = strategy_count
+        db.commit()
+        
+        # Get tier limits
+        from app.core.subscription_tiers import get_tier_limits
+        tier_limits = get_tier_limits(subscription.tier)
+        
+        return {
+            "subscription": {
+                "id": subscription.id,
+                "status": subscription.status,
+                "tier": subscription.tier,
+                "is_lifetime": subscription.is_lifetime,
+                "stripe_customer_id": subscription.stripe_customer_id,
+                "limits": {
+                    "connected_accounts": {
+                        "limit": tier_limits["connected_accounts"],
+                        "available": account_count < tier_limits["connected_accounts"]
+                    },
+                    "active_webhooks": {
+                        "limit": tier_limits["active_webhooks"],
+                        "available": webhook_count < tier_limits["active_webhooks"]
+                    },
+                    "active_strategies": {
+                        "limit": tier_limits["active_strategies"], 
+                        "available": strategy_count < tier_limits["active_strategies"]
+                    }
+                }
+            },
+            "resources": {
+                "connected_accounts": account_count,
+                "active_webhooks": webhook_count,
+                "active_strategies": strategy_count
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting subscription status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error retrieving subscription status"
+        )
+
 @router.get("/payment-status")
 async def get_payment_status(
     current_user = Depends(get_current_user),
