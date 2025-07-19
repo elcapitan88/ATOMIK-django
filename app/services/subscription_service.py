@@ -117,17 +117,19 @@ class SubscriptionService:
         if current_count < limit:
             return True, f"Allowed ({current_count + 1}/{limit} {resource})"
         
-        # Generate upgrade message based on resource type
-        upgrade_messages = {
-            "connected_accounts": f"You've reached the maximum number of connected accounts ({limit}) for your {tier} tier. Please upgrade to add more accounts.",
-            "active_webhooks": f"You've reached the maximum number of active webhooks ({limit}) for your {tier} tier. Please upgrade to add more webhooks.",
-            "active_strategies": f"You've reached the maximum number of active strategies ({limit}) for your {tier} tier. Please upgrade to add more strategies."
+        # Use proper upgrade prompt system for consistent messaging
+        from app.core.upgrade_prompts import get_upgrade_message, UpgradeReason
+        
+        reason_mapping = {
+            "connected_accounts": UpgradeReason.ACCOUNT_LIMIT,
+            "active_webhooks": UpgradeReason.WEBHOOK_LIMIT,
+            "active_strategies": UpgradeReason.STRATEGY_LIMIT,
         }
         
-        return False, upgrade_messages.get(
-            resource, 
-            f"Upgrade required: {current_count}/{limit} {resource} (maximum for {tier} tier)"
-        )
+        reason = reason_mapping.get(resource, UpgradeReason.ADVANCED_FEATURES)
+        message = get_upgrade_message(reason, tier)
+        
+        return False, message
     
     def get_tier_limit(self, tier: str, resource: str) -> int:
         """Get the resource limit for a specific tier"""
