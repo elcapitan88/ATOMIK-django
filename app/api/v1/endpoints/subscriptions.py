@@ -1267,3 +1267,51 @@ async def sync_resource_counts(
             status_code=500,
             detail=f"Failed to synchronize resource counts: {str(e)}"
         )
+
+@router.post("/emergency-fix-enum")
+async def emergency_fix_dunning_stage_enum(
+    db: Session = Depends(get_db)
+):
+    """
+    Emergency endpoint to fix dunning_stage enum issues
+    This can be called directly to repair database enum values
+    """
+    try:
+        from sqlalchemy import text
+        
+        # Check current state
+        result = db.execute(text("SELECT COUNT(*) as count FROM subscriptions WHERE dunning_stage IS NULL"))
+        null_count = result.scalar()
+        
+        # Fix NULL values
+        if null_count > 0:
+            db.execute(text("UPDATE subscriptions SET dunning_stage = 'none' WHERE dunning_stage IS NULL"))
+            logger.info(f"Fixed {null_count} NULL dunning_stage values")
+        
+        # Fix any invalid enum values
+        db.execute(text("""
+            UPDATE subscriptions 
+            SET dunning_stage = 'none' 
+            WHERE dunning_stage NOT IN ('none', 'warning', 'urgent', 'final', 'suspended')
+        """))
+        
+        db.commit()
+        
+        # Get final counts
+        result = db.execute(text("SELECT dunning_stage, COUNT(*) as count FROM subscriptions GROUP BY dunning_stage ORDER BY dunning_stage"))
+        final_counts = {row[0]: row[1] for row in result.fetchall()}
+        
+        return {
+            "status": "success",
+            "message": "Dunning stage enum values fixed successfully",
+            "null_values_fixed": null_count,
+            "final_counts": final_counts
+        }
+        
+    except Exception as e:
+        logger.error(f"Emergency enum fix error: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fix failed: {str(e)}"
+        )
