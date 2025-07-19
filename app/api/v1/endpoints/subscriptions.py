@@ -761,6 +761,59 @@ async def create_billing_portal_session(
             detail="Error creating billing portal session"
         )
 
+@router.post("/test-payment-failure")
+async def test_payment_failure(
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Test endpoint to manually trigger payment failure for email testing"""
+    try:
+        from app.services.payment_failure_service import PaymentFailureService
+        
+        # Only allow in development or for admin users
+        if settings.ENVIRONMENT == "production" and current_user.email != "cruz5150@gmail.com":
+            raise HTTPException(
+                status_code=403,
+                detail="Test endpoint only available for authorized users"
+            )
+        
+        if not current_user.subscription or not current_user.subscription.stripe_customer_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No subscription found"
+            )
+        
+        # Trigger payment failure handling
+        payment_service = PaymentFailureService(db)
+        success = payment_service.handle_payment_failure(
+            stripe_customer_id=current_user.subscription.stripe_customer_id,
+            failure_reason="Test payment failure - Card declined (test mode)",
+            invoice_data={"test": True}
+        )
+        
+        if success:
+            return {
+                "status": "success",
+                "message": "Test payment failure triggered. Check your email!",
+                "email": current_user.email,
+                "dunning_stage": current_user.subscription.dunning_stage.value,
+                "grace_period_ends": current_user.subscription.grace_period_ends_at.isoformat() if current_user.subscription.grace_period_ends_at else None
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to trigger payment failure"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in test payment failure: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Test failed: {str(e)}"
+        )
+
 @router.get("/verify-session/{session_id}")
 async def verify_session(
     session_id: str,
