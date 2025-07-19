@@ -4,28 +4,35 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
 class SubscriptionTier(str, Enum):
-    """Enumeration of available subscription tiers"""
-    STARTER = "starter"  # This will now be for grandfathered free users only
-    PRO = "pro"         # This becomes the new "Starter" tier (with old Pro features)
-    ELITE = "elite"     # This becomes the new "Pro" tier (with old Elite features)
+    """
+    Enumeration of available subscription tiers
+    
+    IMPORTANT: Database values don't match marketing names!
+    - STARTER ("starter") = Legacy free tier for grandfathered users
+    - PRO ("pro") = Marketed as "Starter" plan ($129/month)
+    - ELITE ("elite") = Marketed as "Pro" plan ($189/month)
+    """
+    STARTER = "starter"  # Legacy free tier - NOT SOLD ANYMORE
+    PRO = "pro"         # Database value for "Starter" plan (confusing but historical)
+    ELITE = "elite"     # Database value for "Pro" plan (confusing but historical)
 
 # Define resource limits for each tier
 TIER_LIMITS = {
-    SubscriptionTier.STARTER: {
+    SubscriptionTier.STARTER: {  # Legacy free tier (not sold anymore)
         "connected_accounts": 1,
         "active_webhooks": 1,
         "active_strategies": 1,
         "group_strategies_allowed": False,
         "can_share_webhooks": False,
     },
-    SubscriptionTier.PRO: {  # Now the new "Starter" tier with old Pro limits
+    SubscriptionTier.PRO: {  # "Starter" plan ($129/month) - DB value is "pro"
         "connected_accounts": 5,
         "active_webhooks": 5, 
         "active_strategies": 5,
         "group_strategies_allowed": True,
         "can_share_webhooks": True,
     },
-    SubscriptionTier.ELITE: {  # Now the new "Pro" tier with old Elite limits
+    SubscriptionTier.ELITE: {  # "Pro" plan ($189/month) - DB value is "elite"
         "connected_accounts": float('inf'),  # Unlimited
         "active_webhooks": float('inf'),     # Unlimited
         "active_strategies": float('inf'),   # Unlimited

@@ -65,40 +65,7 @@ async def generate_webhook(
         logger.info(f"Webhook data: {webhook_in.dict()}")
         logger.info(f"Current user: {current_user.id}")
         
-        # Check webhook limits with detailed upgrade information
-        if not settings.SKIP_SUBSCRIPTION_CHECK:
-            subscription = db.query(Subscription).filter(
-                Subscription.user_id == current_user.id
-            ).first()
-            
-            if subscription:
-                user_tier = subscription.tier
-                webhook_count = db.query(Webhook).filter(
-                    Webhook.user_id == current_user.id,
-                    Webhook.is_active == True
-                ).count()
-                
-                max_webhooks = float('inf')
-                if user_tier == "starter":
-                    max_webhooks = 1
-                elif user_tier == "pro":
-                    max_webhooks = 5
-                
-                if webhook_count >= max_webhooks:
-                    # Provide detailed upgrade information
-                    upgrade_info = build_upgrade_response(
-                        reason=UpgradeReason.WEBHOOK_LIMIT,
-                        current_tier=user_tier,
-                        status_code=403
-                    )
-                    
-                    if response:
-                        add_upgrade_headers(response, user_tier, UpgradeReason.WEBHOOK_LIMIT)
-                    
-                    raise HTTPException(
-                        status_code=403,
-                        detail=upgrade_info
-                    )
+        # Resource limit check is already handled by @check_resource_limit decorator
 
         # Create webhook
         webhook = Webhook(
