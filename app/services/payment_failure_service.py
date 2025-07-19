@@ -19,7 +19,8 @@ class PaymentFailureService:
         self, 
         stripe_customer_id: str, 
         failure_reason: str = None,
-        invoice_data: Dict[str, Any] = None
+        invoice_data: Dict[str, Any] = None,
+        test_mode: bool = False
     ) -> bool:
         """
         Handle payment failure for a customer
@@ -42,10 +43,13 @@ class PaymentFailureService:
                 logger.warning(f"No subscription found for customer {stripe_customer_id}")
                 return False
             
-            # Skip processing for lifetime subscriptions
-            if subscription.is_lifetime:
+            # Skip processing for lifetime subscriptions (unless in test mode)
+            if subscription.is_lifetime and not test_mode:
                 logger.info(f"Skipping payment failure for lifetime subscription: {stripe_customer_id}")
                 return True
+            
+            if subscription.is_lifetime and test_mode:
+                logger.info(f"Processing payment failure for lifetime subscription in test mode: {stripe_customer_id}")
             
             # Check if this is first payment failure or subsequent
             if subscription.dunning_stage == 'none':

@@ -18,7 +18,7 @@ def get_user_token(email: str, password: str) -> str:
     
     response = requests.post(
         f"{API_BASE_URL}/api/v1/auth/login",
-        json={"email": email, "password": password}
+        data={"username": email, "password": password}
     )
     
     if response.status_code == 200:
@@ -92,7 +92,7 @@ def main():
     status = test_email_directly(token)
     
     # Ask if user wants to trigger test email
-    if status and not status.get("has_payment_issues"):
+    if status:
         trigger = input("\n⚠️  Would you like to trigger a test payment failure email? (y/n): ")
         if trigger.lower() == 'y':
             trigger_test_payment_failure(token)

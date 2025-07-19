@@ -788,7 +788,8 @@ async def test_payment_failure(
         success = payment_service.handle_payment_failure(
             stripe_customer_id=current_user.subscription.stripe_customer_id,
             failure_reason="Test payment failure - Card declined (test mode)",
-            invoice_data={"test": True}
+            invoice_data={"test": True},
+            test_mode=True  # Allow testing even for lifetime subscriptions
         )
         
         if success:
