@@ -63,22 +63,22 @@ TIER_DETAILS = {
 # Upgrade messages by reason
 UPGRADE_MESSAGES = {
     UpgradeReason.ACCOUNT_LIMIT: {
-        "starter": "You've reached the maximum number of connected accounts (1) for your Starter tier. Upgrade to Pro to connect up to 5 accounts, or Elite for unlimited accounts.",
-        "pro": "You've reached the maximum number of connected accounts (5) for your Pro tier. Upgrade to Elite for unlimited accounts.",
+        "starter": "You've reached the maximum number of connected accounts (1) for your Legacy Free plan. Upgrade to Starter to connect up to 5 accounts, or Pro for unlimited accounts.",
+        "pro": "You've reached the maximum number of connected accounts (5) for your Starter plan. Upgrade to Pro for unlimited accounts.",
     },
     UpgradeReason.WEBHOOK_LIMIT: {
-        "starter": "You've reached the maximum number of webhooks (1) for your Starter tier. Upgrade to Pro for up to 5 webhooks, or Elite for unlimited webhooks.",
-        "pro": "You've reached the maximum number of webhooks (5) for your Pro tier. Upgrade to Elite for unlimited webhooks.",
+        "starter": "You've reached the maximum number of webhooks (1) for your Legacy Free plan. Upgrade to Starter for up to 5 webhooks, or Pro for unlimited webhooks.",
+        "pro": "You've reached the maximum number of webhooks (5) for your Starter plan. Upgrade to Pro for unlimited webhooks.",
     },
     UpgradeReason.STRATEGY_LIMIT: {
-        "starter": "You've reached the maximum number of strategies (1) for your Starter tier. Upgrade to Pro for up to 5 strategies, or Elite for unlimited strategies.",
-        "pro": "You've reached the maximum number of strategies (5) for your Pro tier. Upgrade to Elite for unlimited strategies.",
+        "starter": "You've reached the maximum number of strategies (1) for your Legacy Free plan. Upgrade to Starter for up to 5 strategies, or Pro for unlimited strategies.",
+        "pro": "You've reached the maximum number of strategies (5) for your Starter plan. Upgrade to Pro for unlimited strategies.",
     },
     UpgradeReason.GROUP_STRATEGY: {
-        "starter": "Group strategies are only available in Pro and Elite tiers. Upgrade to access this feature.",
+        "starter": "Group strategies are only available in Starter and Pro plans. Upgrade to access this feature.",
     },
     UpgradeReason.WEBHOOK_SHARING: {
-        "starter": "Webhook sharing is only available in Pro and Elite tiers. Upgrade to access this feature.",
+        "starter": "Webhook sharing is only available in Starter and Pro plans. Upgrade to access this feature.",
     },
     UpgradeReason.WEBHOOK_RATE_LIMIT: {
         "starter": "You've exceeded the webhook rate limit for your Starter tier (60/min). Upgrade to Pro (300/min) or Elite (unlimited) for higher limits.",
