@@ -7,7 +7,7 @@ import enum
 
 class DunningStage(str, enum.Enum):
     NONE = "none"
-    WARNING = "warning"
+    WARNING = "warning" 
     URGENT = "urgent"
     FINAL = "final"
     SUSPENDED = "suspended"
@@ -73,7 +73,7 @@ class Subscription(Base):
     payment_failure_count = Column(Integer, default=0)
     grace_period_ends_at = Column(DateTime, nullable=True)
     last_payment_failure_reason = Column(String, nullable=True)
-    dunning_stage = Column(SafeDunningStageType(), default=DunningStage.NONE, nullable=False, server_default='none')
+    dunning_stage = Column(String, default='none', nullable=False, server_default='none')
 
     # Relationship
     user = relationship("User", back_populates="subscription")
@@ -81,8 +81,12 @@ class Subscription(Base):
     @property
     def safe_dunning_stage(self):
         """Get dunning stage with fallback to NONE if invalid"""
-        # With SafeDunningStageType, this should always be a valid enum
-        return self.dunning_stage or DunningStage.NONE
+        try:
+            if not self.dunning_stage:
+                return DunningStage.NONE
+            return DunningStage(self.dunning_stage)
+        except (ValueError, TypeError):
+            return DunningStage.NONE
     
     @property
     def is_trial_active(self):
@@ -129,29 +133,29 @@ class Subscription(Base):
     @property
     def has_payment_issues(self):
         """Check if subscription has active payment issues"""
-        return self.dunning_stage != DunningStage.NONE
+        return self.dunning_stage != 'none'
     
     @property
     def is_suspended(self):
         """Check if subscription is suspended due to payment failure"""
-        return self.dunning_stage == DunningStage.SUSPENDED
+        return self.dunning_stage == 'suspended'
     
     def start_grace_period(self, grace_days=7):
         """Start grace period after payment failure"""
         self.payment_failed_at = datetime.utcnow()
         self.payment_failure_count += 1
         self.grace_period_ends_at = datetime.utcnow() + timedelta(days=grace_days)
-        self.dunning_stage = DunningStage.WARNING
+        self.dunning_stage = 'warning'
         self.status = "past_due"
     
     def advance_dunning_stage(self):
         """Advance to next dunning stage"""
-        if self.dunning_stage == DunningStage.WARNING:
-            self.dunning_stage = DunningStage.URGENT
-        elif self.dunning_stage == DunningStage.URGENT:
-            self.dunning_stage = DunningStage.FINAL
-        elif self.dunning_stage == DunningStage.FINAL:
-            self.dunning_stage = DunningStage.SUSPENDED
+        if self.dunning_stage == 'warning':
+            self.dunning_stage = 'urgent'
+        elif self.dunning_stage == 'urgent':
+            self.dunning_stage = 'final'
+        elif self.dunning_stage == 'final':
+            self.dunning_stage = 'suspended'
             self.status = "suspended"
     
     def resolve_payment_failure(self):
@@ -160,5 +164,5 @@ class Subscription(Base):
         self.payment_failure_count = 0
         self.grace_period_ends_at = None
         self.last_payment_failure_reason = None
-        self.dunning_stage = DunningStage.NONE
+        self.dunning_stage = 'none'
         self.status = "active"
