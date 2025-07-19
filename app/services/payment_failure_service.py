@@ -183,7 +183,7 @@ class PaymentFailureService:
             return {"has_subscription": False}
         
         # Debug logging
-        logger.info(f"Payment status check for user {user_id}: dunning_stage={subscription.dunning_stage}, has_payment_issues={subscription.has_payment_issues}")
+        logger.info(f"Payment status check for user {user_id}: dunning_stage='{subscription.dunning_stage}' (type: {type(subscription.dunning_stage)}), has_payment_issues={subscription.has_payment_issues}")
         
         return {
             "has_subscription": True,
