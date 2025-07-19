@@ -1,5 +1,5 @@
 # app/models/subscription.py
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, Enum
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, Enum, TypeDecorator
 from sqlalchemy.orm import relationship
 from datetime import datetime, timedelta
 from ..db.base_class import Base
@@ -11,6 +11,40 @@ class DunningStage(str, enum.Enum):
     URGENT = "urgent"
     FINAL = "final"
     SUSPENDED = "suspended"
+
+class SafeDunningStageType(TypeDecorator):
+    """Custom type that safely handles DunningStage enum conversion"""
+    impl = Enum
+    cache_ok = True
+    
+    def __init__(self):
+        super().__init__(DunningStage, name='dunningstage')
+    
+    def process_result_value(self, value, dialect):
+        """Convert database value to enum, with fallback to NONE"""
+        if value is None:
+            return DunningStage.NONE
+        
+        try:
+            if isinstance(value, DunningStage):
+                return value
+            return DunningStage(value)
+        except (ValueError, TypeError):
+            # Fallback to NONE for any invalid values
+            return DunningStage.NONE
+    
+    def process_bind_param(self, value, dialect):
+        """Convert enum to database value"""
+        if value is None:
+            return DunningStage.NONE.value
+        
+        if isinstance(value, DunningStage):
+            return value.value
+        
+        try:
+            return DunningStage(value).value
+        except (ValueError, TypeError):
+            return DunningStage.NONE.value
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
@@ -39,7 +73,7 @@ class Subscription(Base):
     payment_failure_count = Column(Integer, default=0)
     grace_period_ends_at = Column(DateTime, nullable=True)
     last_payment_failure_reason = Column(String, nullable=True)
-    dunning_stage = Column(Enum(DunningStage), default=DunningStage.NONE, nullable=False, server_default='none')
+    dunning_stage = Column(SafeDunningStageType(), default=DunningStage.NONE, nullable=False, server_default='none')
 
     # Relationship
     user = relationship("User", back_populates="subscription")
@@ -47,14 +81,8 @@ class Subscription(Base):
     @property
     def safe_dunning_stage(self):
         """Get dunning stage with fallback to NONE if invalid"""
-        try:
-            if self.dunning_stage is None:
-                return DunningStage.NONE
-            if isinstance(self.dunning_stage, str):
-                return DunningStage(self.dunning_stage)
-            return self.dunning_stage
-        except (ValueError, TypeError):
-            return DunningStage.NONE
+        # With SafeDunningStageType, this should always be a valid enum
+        return self.dunning_stage or DunningStage.NONE
     
     @property
     def is_trial_active(self):

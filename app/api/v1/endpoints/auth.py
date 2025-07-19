@@ -217,9 +217,25 @@ async def login(
 
         # Verify subscription status
         stripe_service = StripeService()
-        subscription = db.query(Subscription).filter(
-            Subscription.user_id == user.id
-        ).first()
+        
+        try:
+            subscription = db.query(Subscription).filter(
+                Subscription.user_id == user.id
+            ).first()
+        except Exception as e:
+            # Handle enum loading issues - fix dunning_stage data
+            logger.warning(f"Subscription loading error for {user.email}: {e}")
+            if "'none' is not among the defined enum values" in str(e):
+                # Fix the enum data directly in database
+                from sqlalchemy import text
+                db.execute(text("UPDATE subscriptions SET dunning_stage = 'none' WHERE user_id = :user_id AND (dunning_stage IS NULL OR dunning_stage = '')"), {"user_id": user.id})
+                db.commit()
+                # Retry loading
+                subscription = db.query(Subscription).filter(
+                    Subscription.user_id == user.id
+                ).first()
+            else:
+                raise e
 
         if not subscription:
             logger.warning(f"No subscription found for user {user.email}")
