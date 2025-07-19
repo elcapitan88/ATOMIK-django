@@ -796,7 +796,7 @@ async def test_payment_failure(
                 "status": "success",
                 "message": "Test payment failure triggered. Check your email!",
                 "email": current_user.email,
-                "dunning_stage": current_user.subscription.dunning_stage.value,
+                "dunning_stage": current_user.subscription.safe_dunning_stage.value,
                 "grace_period_ends": current_user.subscription.grace_period_ends_at.isoformat() if current_user.subscription.grace_period_ends_at else None
             }
         else:

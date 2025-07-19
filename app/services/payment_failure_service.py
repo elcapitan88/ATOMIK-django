@@ -183,7 +183,7 @@ class PaymentFailureService:
             "tier": subscription.tier,
             "is_lifetime": subscription.is_lifetime,
             "has_payment_issues": subscription.has_payment_issues,
-            "dunning_stage": subscription.dunning_stage.value if subscription.dunning_stage else "none",
+            "dunning_stage": subscription.safe_dunning_stage.value,
             "is_in_grace_period": subscription.is_in_grace_period,
             "days_left_in_grace_period": subscription.days_left_in_grace_period,
             "payment_failed_at": subscription.payment_failed_at.isoformat() if subscription.payment_failed_at else None,

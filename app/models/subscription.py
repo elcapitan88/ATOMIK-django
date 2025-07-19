@@ -39,10 +39,22 @@ class Subscription(Base):
     payment_failure_count = Column(Integer, default=0)
     grace_period_ends_at = Column(DateTime, nullable=True)
     last_payment_failure_reason = Column(String, nullable=True)
-    dunning_stage = Column(Enum(DunningStage), default=DunningStage.NONE)
+    dunning_stage = Column(Enum(DunningStage), default=DunningStage.NONE, nullable=False, server_default='none')
 
     # Relationship
     user = relationship("User", back_populates="subscription")
+    
+    @property
+    def safe_dunning_stage(self):
+        """Get dunning stage with fallback to NONE if invalid"""
+        try:
+            if self.dunning_stage is None:
+                return DunningStage.NONE
+            if isinstance(self.dunning_stage, str):
+                return DunningStage(self.dunning_stage)
+            return self.dunning_stage
+        except (ValueError, TypeError):
+            return DunningStage.NONE
     
     @property
     def is_trial_active(self):
