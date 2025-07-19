@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Direct API test for payment failure emails
-Tests the email system by triggering payment failure for cruz5150@gmail.com
+Tests the email system by triggering payment failure for cruzh5150@gmail.com
 """
 
 import requests
@@ -10,7 +10,7 @@ import sys
 
 # Production API configuration
 API_BASE_URL = "https://api.atomiktrading.io"
-TEST_EMAIL = "cruz5150@gmail.com"
+TEST_EMAIL = "cruzh5150@gmail.com"
 
 def get_user_token(email: str, password: str) -> str:
     """Login and get JWT token"""
@@ -68,7 +68,7 @@ def trigger_test_payment_failure(token: str):
     
     if response.status_code == 200:
         print("✅ Test payment failure triggered")
-        print("📬 Check your email at cruz5150@gmail.com")
+        print("📬 Check your email at cruzh5150@gmail.com")
         return True
     else:
         print(f"❌ Failed to trigger test: {response.status_code} - {response.text}")
@@ -80,7 +80,7 @@ def main():
     print("=" * 50)
     
     # You'll need to provide the password
-    password = input("Enter password for cruz5150@gmail.com: ")
+    password = input("Enter password for cruzh5150@gmail.com: ")
     
     # Get authentication token
     token = get_user_token(TEST_EMAIL, password)

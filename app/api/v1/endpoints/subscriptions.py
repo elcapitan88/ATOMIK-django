@@ -771,7 +771,7 @@ async def test_payment_failure(
         from app.services.payment_failure_service import PaymentFailureService
         
         # Only allow in development or for admin users
-        if settings.ENVIRONMENT == "production" and current_user.email != "cruz5150@gmail.com":
+        if settings.ENVIRONMENT == "production" and current_user.email not in ["cruz5150@gmail.com", "cruzh5150@gmail.com"]:
             raise HTTPException(
                 status_code=403,
                 detail="Test endpoint only available for authorized users"
