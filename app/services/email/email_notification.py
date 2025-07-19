@@ -14,6 +14,113 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+class PaymentEmailService:
+    """Service for sending payment-related emails"""
+    
+    @staticmethod
+    async def send_payment_failure_email(
+        user_email: str,
+        user_name: str = None,
+        failure_reason: str = None,
+        days_in_grace: int = 7,
+        billing_portal_url: str = None
+    ) -> bool:
+        """Send payment failure notification email"""
+        try:
+            context = {
+                "user_name": user_name or user_email.split("@")[0],
+                "failure_reason": failure_reason or "Your payment could not be processed",
+                "days_in_grace": days_in_grace,
+                "billing_portal_url": billing_portal_url,
+                "support_email": "support@atomiktrading.io",
+                "company_name": "Atomik Trading"
+            }
+            
+            return await send_email(
+                to=user_email,
+                subject="Payment Failed - Action Required",
+                template="payment_failure",
+                context=context
+            )
+        except Exception as e:
+            logger.error(f"Failed to send payment failure email to {user_email}: {str(e)}")
+            return False
+    
+    @staticmethod
+    async def send_grace_period_reminder(
+        user_email: str,
+        user_name: str = None,
+        days_remaining: int = 3,
+        billing_portal_url: str = None
+    ) -> bool:
+        """Send grace period reminder email"""
+        try:
+            context = {
+                "user_name": user_name or user_email.split("@")[0],
+                "days_remaining": days_remaining,
+                "billing_portal_url": billing_portal_url,
+                "support_email": "support@atomiktrading.io",
+                "company_name": "Atomik Trading"
+            }
+            
+            return await send_email(
+                to=user_email,
+                subject=f"Payment Reminder - {days_remaining} Days Remaining",
+                template="grace_period_reminder",
+                context=context
+            )
+        except Exception as e:
+            logger.error(f"Failed to send grace period reminder to {user_email}: {str(e)}")
+            return False
+    
+    @staticmethod
+    async def send_final_notice(
+        user_email: str,
+        user_name: str = None,
+        billing_portal_url: str = None
+    ) -> bool:
+        """Send final notice before suspension"""
+        try:
+            context = {
+                "user_name": user_name or user_email.split("@")[0],
+                "billing_portal_url": billing_portal_url,
+                "support_email": "support@atomiktrading.io",
+                "company_name": "Atomik Trading"
+            }
+            
+            return await send_email(
+                to=user_email,
+                subject="Final Notice - Account Will Be Suspended",
+                template="final_notice",
+                context=context
+            )
+        except Exception as e:
+            logger.error(f"Failed to send final notice to {user_email}: {str(e)}")
+            return False
+    
+    @staticmethod
+    async def send_payment_recovery_email(
+        user_email: str,
+        user_name: str = None
+    ) -> bool:
+        """Send payment recovery confirmation email"""
+        try:
+            context = {
+                "user_name": user_name or user_email.split("@")[0],
+                "support_email": "support@atomiktrading.io",
+                "company_name": "Atomik Trading"
+            }
+            
+            return await send_email(
+                to=user_email,
+                subject="Payment Successful - Service Restored",
+                template="payment_recovery",
+                context=context
+            )
+        except Exception as e:
+            logger.error(f"Failed to send payment recovery email to {user_email}: {str(e)}")
+            return False
+
 # Initialize Jinja2 environment
 templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "templates")
 env = Environment(loader=FileSystemLoader(templates_dir))

@@ -1,8 +1,16 @@
 # app/models/subscription.py
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, Enum
 from sqlalchemy.orm import relationship
 from datetime import datetime, timedelta
 from ..db.base_class import Base
+import enum
+
+class DunningStage(str, enum.Enum):
+    NONE = "none"
+    WARNING = "warning"
+    URGENT = "urgent"
+    FINAL = "final"
+    SUSPENDED = "suspended"
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
@@ -25,6 +33,13 @@ class Subscription(Base):
     trial_ends_at = Column(DateTime, nullable=True)
     is_in_trial = Column(Boolean, default=False)
     trial_converted = Column(Boolean, default=False)  # Track if trial converted to paid
+    
+    # Payment failure tracking fields
+    payment_failed_at = Column(DateTime, nullable=True)
+    payment_failure_count = Column(Integer, default=0)
+    grace_period_ends_at = Column(DateTime, nullable=True)
+    last_payment_failure_reason = Column(String, nullable=True)
+    dunning_stage = Column(Enum(DunningStage), default=DunningStage.NONE)
 
     # Relationship
     user = relationship("User", back_populates="subscription")
@@ -55,3 +70,55 @@ class Subscription(Base):
         self.is_in_trial = True
         self.trial_ends_at = datetime.utcnow() + timedelta(days=days)
         self.status = "trialing"
+    
+    @property
+    def is_in_grace_period(self):
+        """Check if subscription is currently in grace period after payment failure"""
+        if not self.grace_period_ends_at:
+            return False
+        return datetime.utcnow() <= self.grace_period_ends_at
+    
+    @property
+    def days_left_in_grace_period(self):
+        """Get number of days left in grace period"""
+        if not self.is_in_grace_period:
+            return 0
+        delta = self.grace_period_ends_at - datetime.utcnow()
+        return max(0, delta.days)
+    
+    @property
+    def has_payment_issues(self):
+        """Check if subscription has active payment issues"""
+        return self.dunning_stage != DunningStage.NONE
+    
+    @property
+    def is_suspended(self):
+        """Check if subscription is suspended due to payment failure"""
+        return self.dunning_stage == DunningStage.SUSPENDED
+    
+    def start_grace_period(self, grace_days=7):
+        """Start grace period after payment failure"""
+        self.payment_failed_at = datetime.utcnow()
+        self.payment_failure_count += 1
+        self.grace_period_ends_at = datetime.utcnow() + timedelta(days=grace_days)
+        self.dunning_stage = DunningStage.WARNING
+        self.status = "past_due"
+    
+    def advance_dunning_stage(self):
+        """Advance to next dunning stage"""
+        if self.dunning_stage == DunningStage.WARNING:
+            self.dunning_stage = DunningStage.URGENT
+        elif self.dunning_stage == DunningStage.URGENT:
+            self.dunning_stage = DunningStage.FINAL
+        elif self.dunning_stage == DunningStage.FINAL:
+            self.dunning_stage = DunningStage.SUSPENDED
+            self.status = "suspended"
+    
+    def resolve_payment_failure(self):
+        """Reset payment failure state after successful payment"""
+        self.payment_failed_at = None
+        self.payment_failure_count = 0
+        self.grace_period_ends_at = None
+        self.last_payment_failure_reason = None
+        self.dunning_stage = DunningStage.NONE
+        self.status = "active"

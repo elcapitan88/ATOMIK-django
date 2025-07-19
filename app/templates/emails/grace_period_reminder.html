@@ -1,0 +1,173 @@
+<!-- templates/emails/grace_period_reminder.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Reminder - {{ days_remaining }} Days Remaining</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333333;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #ffffff;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px 0;
+            border-bottom: 2px solid #f0f0f0;
+        }
+        .header h1 {
+            color: #ff9800;
+            margin: 0;
+            font-size: 28px;
+        }
+        .countdown-box {
+            background-color: #fff8e1;
+            border: 2px solid #ffcc80;
+            border-radius: 8px;
+            padding: 25px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        .countdown-box .days {
+            font-size: 48px;
+            font-weight: bold;
+            color: #ff6f00;
+            margin: 10px 0;
+        }
+        .countdown-box .label {
+            font-size: 18px;
+            color: #666666;
+        }
+        .content {
+            padding: 20px 0;
+        }
+        .content p {
+            margin: 15px 0;
+            font-size: 16px;
+        }
+        .button {
+            display: inline-block;
+            padding: 14px 30px;
+            background-color: #ff9800;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 16px;
+            margin: 20px 0;
+        }
+        .button:hover {
+            background-color: #f57c00;
+            text-decoration: none;
+        }
+        .warning-box {
+            background-color: #ffebee;
+            border: 1px solid #ffcdd2;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .warning-box h3 {
+            color: #c62828;
+            margin-top: 0;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            font-size: 14px;
+            color: #777777;
+        }
+        .footer a {
+            color: #00C6E0;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+        .center {
+            text-align: center;
+        }
+        .highlight {
+            background-color: #ffeb3b;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⏰ Payment Reminder</h1>
+        </div>
+        
+        <div class="countdown-box">
+            <div class="days">{{ days_remaining }}</div>
+            <div class="label">DAYS REMAINING</div>
+            <p style="margin: 10px 0 0 0; font-size: 14px;">to update your payment method</p>
+        </div>
+
+        <div class="content">
+            <p>Hi {{ user_name }},</p>
+            
+            <p>This is a friendly reminder that your payment is still pending for your {{ company_name }} subscription.</p>
+            
+            {% if days_remaining == 3 %}
+            <p>You have <span class="highlight">3 days left</span> in your grace period. After this time, your access to {{ company_name }} will be temporarily suspended until payment is received.</p>
+            {% elif days_remaining == 1 %}
+            <div class="warning-box">
+                <h3>⚠️ Urgent: Only 1 Day Remaining!</h3>
+                <p>This is your final reminder. Your service will be suspended tomorrow if payment is not updated.</p>
+            </div>
+            {% else %}
+            <p>You have <span class="highlight">{{ days_remaining }} days left</span> to update your payment information and maintain uninterrupted access to your account.</p>
+            {% endif %}
+            
+            <p><strong>Don't lose access to:</strong></p>
+            <ul>
+                <li>Your active trading strategies</li>
+                <li>Webhook connections</li>
+                <li>Connected broker accounts</li>
+                <li>Trading analytics and history</li>
+            </ul>
+            
+            <div class="center">
+                <a href="{{ billing_portal_url }}" class="button">Update Payment Now</a>
+            </div>
+            
+            <p><strong>Need help?</strong></p>
+            <p>If you're having trouble updating your payment method or have any questions about your subscription, our support team is here to help. Simply reply to this email or contact us at <a href="mailto:{{ support_email }}">{{ support_email }}</a>.</p>
+            
+            <p>We value your business and hope to continue serving you!</p>
+            
+            <p>Best regards,<br>
+            The {{ company_name }} Team</p>
+        </div>
+        
+        <div class="footer">
+            <p>© 2024 {{ company_name }}. All rights reserved.</p>
+            <p>
+                <a href="https://atomiktrading.io">Website</a> |
+                <a href="mailto:{{ support_email }}">Support</a> |
+                <a href="https://atomiktrading.io/privacy">Privacy Policy</a>
+            </p>
+            <p style="font-size: 12px; color: #999999;">
+                You received this email because you have an active subscription with {{ company_name }}.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

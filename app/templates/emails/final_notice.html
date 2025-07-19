@@ -1,0 +1,187 @@
+<!-- templates/emails/final_notice.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Final Notice - Account Will Be Suspended</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333333;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #ffffff;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px 0;
+            background-color: #d32f2f;
+            color: #ffffff;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+        }
+        .urgent-box {
+            background-color: #ffebee;
+            border: 3px solid #d32f2f;
+            border-radius: 8px;
+            padding: 25px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        .urgent-box h2 {
+            color: #d32f2f;
+            margin: 0 0 15px 0;
+            font-size: 24px;
+        }
+        .urgent-box .deadline {
+            font-size: 20px;
+            font-weight: bold;
+            color: #d32f2f;
+        }
+        .content {
+            padding: 20px 0;
+        }
+        .content p {
+            margin: 15px 0;
+            font-size: 16px;
+        }
+        .button-urgent {
+            display: inline-block;
+            padding: 16px 40px;
+            background-color: #d32f2f;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 18px;
+            margin: 20px 0;
+        }
+        .button-urgent:hover {
+            background-color: #b71c1c;
+            text-decoration: none;
+        }
+        .consequences-box {
+            background-color: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .consequences-box h3 {
+            color: #333333;
+            margin-top: 0;
+        }
+        .consequences-box ul {
+            margin: 10px 0;
+            padding-left: 25px;
+        }
+        .consequences-box li {
+            margin: 8px 0;
+            color: #666666;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            font-size: 14px;
+            color: #777777;
+        }
+        .footer a {
+            color: #00C6E0;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+        .center {
+            text-align: center;
+        }
+        .red-text {
+            color: #d32f2f;
+            font-weight: bold;
+        }
+        .recovery-info {
+            background-color: #e8f5e9;
+            border: 1px solid #c8e6c9;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚨 FINAL NOTICE</h1>
+        </div>
+        
+        <div class="urgent-box">
+            <h2>Your Account Will Be Suspended</h2>
+            <p class="deadline">Tomorrow at Midnight</p>
+            <p style="margin: 0; font-size: 16px;">This is your last chance to update payment</p>
+        </div>
+
+        <div class="content">
+            <p>Hi {{ user_name }},</p>
+            
+            <p>We've been trying to process your payment for your {{ company_name }} subscription, but have been unsuccessful.</p>
+            
+            <p><span class="red-text">Your account will be suspended in less than 24 hours</span> if we don't receive payment.</p>
+            
+            <div class="consequences-box">
+                <h3>What happens when your account is suspended:</h3>
+                <ul>
+                    <li>❌ All active trading strategies will be paused</li>
+                    <li>❌ Webhook connections will be disabled</li>
+                    <li>❌ Access to your dashboard will be restricted</li>
+                    <li>❌ Broker account connections will be inactive</li>
+                    <li>❌ You won't be able to view your trading history</li>
+                </ul>
+            </div>
+            
+            <p><strong>The good news:</strong> You can prevent this suspension by updating your payment method right now.</p>
+            
+            <div class="center">
+                <a href="{{ billing_portal_url }}" class="button-urgent">Update Payment Method Now</a>
+            </div>
+            
+            <div class="recovery-info">
+                <p style="margin: 0;"><strong>💡 Note:</strong> Even if your account is suspended, your data remains safe. You can restore full access at any time by updating your payment information.</p>
+            </div>
+            
+            <p><strong>Need assistance?</strong></p>
+            <p>If you're experiencing difficulties or have questions about your account, please contact us immediately at <a href="mailto:{{ support_email }}">{{ support_email }}</a>. We're here to help!</p>
+            
+            <p>We hope to continue serving you and helping you achieve your trading goals.</p>
+            
+            <p>Best regards,<br>
+            The {{ company_name }} Team</p>
+        </div>
+        
+        <div class="footer">
+            <p>© 2024 {{ company_name }}. All rights reserved.</p>
+            <p>
+                <a href="https://atomiktrading.io">Website</a> |
+                <a href="mailto:{{ support_email }}">Support</a> |
+                <a href="https://atomiktrading.io/privacy">Privacy Policy</a>
+            </p>
+            <p style="font-size: 12px; color: #999999;">
+                You received this email because you have an active subscription with {{ company_name }}.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

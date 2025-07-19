@@ -39,10 +39,25 @@ def check_subscription(func: Callable):
                         detail="Your subscription is not active"
                     )
 
-            # Handle Stripe users
+            # Handle Stripe users - check for grace period first
+            subscription = current_user.subscription
+            
+            # Allow access during grace period
+            if subscription.is_in_grace_period:
+                logger.info(f"Access granted during grace period: {current_user.email}, days left: {subscription.days_left_in_grace_period}")
+                return await func(*args, current_user=current_user, **kwargs)
+            
+            # Check if subscription is suspended
+            if subscription.is_suspended:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Your subscription is suspended due to payment failure. Please update your payment method to restore access."
+                )
+            
+            # Standard Stripe verification for non-grace period cases
             stripe_service = StripeService()
             has_active_subscription = await stripe_service.verify_subscription_status(
-                current_user.subscription.stripe_customer_id
+                subscription.stripe_customer_id
             )
 
             if not has_active_subscription:

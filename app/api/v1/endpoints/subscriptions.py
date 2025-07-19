@@ -554,6 +554,22 @@ async def stripe_webhook(
                 db=db,
                 subscription=event_data
             )
+        
+        # Handle payment failures
+        elif event_type == "invoice.payment_failed":
+            background_tasks.add_task(
+                handle_payment_failure,
+                db=db,
+                invoice=event_data
+            )
+        
+        # Handle successful payments (recovery)
+        elif event_type == "invoice.payment_succeeded":
+            background_tasks.add_task(
+                handle_payment_success,
+                db=db,
+                invoice=event_data
+            )
 
         return {"status": "success"}
 
@@ -628,6 +644,65 @@ async def handle_subscription_deletion(db: Session, subscription: dict):
         db.rollback()
         logger.error(f"Error handling subscription deletion: {str(e)}")
 
+async def handle_payment_failure(db: Session, invoice: dict):
+    """Handle payment failure event"""
+    try:
+        from app.services.payment_failure_service import PaymentFailureService
+        
+        customer_id = invoice.get('customer')
+        if not customer_id:
+            logger.error("No customer ID found in payment failure event")
+            return
+        
+        # Extract failure reason from invoice
+        failure_reason = "Payment failed"
+        if invoice.get('last_payment_error'):
+            failure_reason = invoice['last_payment_error'].get('message', failure_reason)
+        
+        # Initialize payment failure service
+        payment_service = PaymentFailureService(db)
+        
+        # Handle the payment failure
+        success = payment_service.handle_payment_failure(
+            stripe_customer_id=customer_id,
+            failure_reason=failure_reason,
+            invoice_data=invoice
+        )
+        
+        if success:
+            logger.info(f"Payment failure handled for customer {customer_id}")
+        else:
+            logger.error(f"Failed to handle payment failure for customer {customer_id}")
+
+    except Exception as e:
+        logger.error(f"Error handling payment failure: {str(e)}")
+
+async def handle_payment_success(db: Session, invoice: dict):
+    """Handle successful payment event"""
+    try:
+        from app.services.payment_failure_service import PaymentFailureService
+        
+        customer_id = invoice.get('customer')
+        if not customer_id:
+            logger.error("No customer ID found in payment success event")
+            return
+        
+        # Initialize payment failure service
+        payment_service = PaymentFailureService(db)
+        
+        # Handle the payment success (recovery)
+        success = payment_service.handle_payment_success(
+            stripe_customer_id=customer_id
+        )
+        
+        if success:
+            logger.info(f"Payment success handled for customer {customer_id}")
+        else:
+            logger.error(f"Failed to handle payment success for customer {customer_id}")
+
+    except Exception as e:
+        logger.error(f"Error handling payment success: {str(e)}")
+
 @router.get("/config", response_model=SubscriptionConfig)
 async def get_subscription_config():
     """Get subscription configuration"""
@@ -636,6 +711,55 @@ async def get_subscription_config():
         "checks_disabled": settings.SKIP_SUBSCRIPTION_CHECK,
         "environment": settings.ENVIRONMENT
     }
+
+@router.get("/payment-status")
+async def get_payment_status(
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get payment status for current user"""
+    try:
+        from app.services.payment_failure_service import PaymentFailureService
+        
+        payment_service = PaymentFailureService(db)
+        status = payment_service.get_payment_status(current_user.id)
+        
+        return status
+        
+    except Exception as e:
+        logger.error(f"Error getting payment status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error retrieving payment status"
+        )
+
+@router.post("/create-billing-portal-session")
+async def create_billing_portal_session(
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create Stripe billing portal session for payment management"""
+    try:
+        if not current_user.subscription or not current_user.subscription.stripe_customer_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No Stripe customer ID found"
+            )
+        
+        # Create billing portal session
+        session = stripe.billing_portal.Session.create(
+            customer=current_user.subscription.stripe_customer_id,
+            return_url=settings.active_frontend_url
+        )
+        
+        return {"url": session.url}
+        
+    except Exception as e:
+        logger.error(f"Error creating billing portal session: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error creating billing portal session"
+        )
 
 @router.get("/verify-session/{session_id}")
 async def verify_session(
