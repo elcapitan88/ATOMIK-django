@@ -103,6 +103,11 @@ class SubscriptionService:
         Returns:
             Tuple of (allowed: bool, message: str)
         """
+        # Check if user is lifetime - lifetime users get unlimited resources
+        subscription = self.get_user_subscription(user_id)
+        if subscription and subscription.is_lifetime and subscription.status == "active":
+            return True, f"Unlimited access (lifetime user)"
+        
         tier = self.get_user_tier(user_id)
         resources = self.count_user_resources(user_id)
         
