@@ -28,6 +28,18 @@ def check_subscription(func: Callable):
                     detail="Active subscription required"
                 )
 
+            # Handle lifetime users without Stripe (previous app users)
+            if not current_user.subscription.stripe_customer_id:
+                if current_user.subscription.status == "active" and current_user.subscription.is_lifetime:
+                    logger.info(f"Access granted to non-Stripe lifetime user: {current_user.email}")
+                    return await func(*args, current_user=current_user, **kwargs)
+                else:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Your subscription is not active"
+                    )
+
+            # Handle Stripe users
             stripe_service = StripeService()
             has_active_subscription = await stripe_service.verify_subscription_status(
                 current_user.subscription.stripe_customer_id

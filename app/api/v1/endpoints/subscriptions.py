@@ -43,12 +43,29 @@ async def verify_subscription(
             Subscription.user_id == current_user.id
         ).first()
 
-        if not subscription or not subscription.stripe_customer_id:
+        if not subscription:
             logger.warning(f"No subscription found for user {current_user.email}")
             return {
                 "has_access": False,
                 "reason": "no_subscription"
             }
+
+        # Handle lifetime users without Stripe (previous app users)
+        if not subscription.stripe_customer_id:
+            if subscription.status == "active" and subscription.is_lifetime:
+                logger.info(f"Verified active lifetime subscription (non-Stripe) for user {current_user.email}")
+                return {
+                    "has_access": True,
+                    "tier": subscription.tier,
+                    "is_lifetime": True,
+                    "customer_id": None
+                }
+            else:
+                logger.warning(f"Inactive non-Stripe subscription for user {current_user.email}")
+                return {
+                    "has_access": False,
+                    "reason": "inactive_subscription"
+                }
 
         # For lifetime subscriptions, bypass Stripe verification
         if subscription.is_lifetime and subscription.status == "active":
