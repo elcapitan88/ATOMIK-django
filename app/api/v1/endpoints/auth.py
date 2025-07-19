@@ -228,7 +228,7 @@ async def login(
             if "'none' is not among the defined enum values" in str(e):
                 # Fix the enum data directly in database
                 from sqlalchemy import text
-                db.execute(text("UPDATE subscriptions SET dunning_stage = 'none' WHERE user_id = :user_id AND (dunning_stage IS NULL OR dunning_stage = '')"), {"user_id": user.id})
+                db.execute(text("UPDATE subscriptions SET dunning_stage = 'none' WHERE user_id = :user_id AND dunning_stage IS NULL"), {"user_id": user.id})
                 db.commit()
                 # Retry loading
                 subscription = db.query(Subscription).filter(

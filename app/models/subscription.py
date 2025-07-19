@@ -14,11 +14,11 @@ class DunningStage(str, enum.Enum):
 
 class SafeDunningStageType(TypeDecorator):
     """Custom type that safely handles DunningStage enum conversion"""
-    impl = Enum
+    impl = Enum(DunningStage, name='dunningstage')
     cache_ok = True
     
     def __init__(self):
-        super().__init__(DunningStage, name='dunningstage')
+        super().__init__()
     
     def process_result_value(self, value, dialect):
         """Convert database value to enum, with fallback to NONE"""
