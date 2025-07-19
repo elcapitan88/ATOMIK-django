@@ -126,6 +126,23 @@ def is_in_trial_period(subscription_created_at: datetime) -> bool:
     trial_end_date = subscription_created_at + timedelta(days=14)
     return datetime.utcnow() <= trial_end_date
 
+def get_tier_limits(tier: str) -> Dict[str, Any]:
+    """
+    Get all resource limits for a specific subscription tier
+    
+    Args:
+        tier: Subscription tier (starter, pro, elite)
+        
+    Returns:
+        Dict: All limits for the tier
+    """
+    tier_enum = SubscriptionTier(tier.lower()) if isinstance(tier, str) else tier
+    
+    if tier_enum not in TIER_LIMITS:
+        raise ValueError(f"Unknown subscription tier: {tier}")
+        
+    return TIER_LIMITS[tier_enum].copy()
+
 def get_tier_display_name(tier: str) -> str:
     """
     Get the marketing display name for a tier
